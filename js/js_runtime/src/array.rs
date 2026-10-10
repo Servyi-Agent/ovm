@@ -117,20 +117,18 @@ fn array_push_impl<'a>(
     };
     for i in 1..args.len() {
         let arg = args.get_handle(heap, i);
-        let in_place = {
-            let r = receiver.as_tagged(heap);
-            let obj = r.as_heap_object().expect("validated above");
-            match obj.as_ref().elements_array(heap) {
-                Some(elements) if len < elements.len() => {
-                    elements.as_ref().set(heap, len, arg.as_tagged(heap));
-                    obj.as_ref()
-                        .length
-                        .set(heap, r.erase(), Smi::new((len + 1) as i64));
-                    Prototype::element_mutated(heap, obj);
-                    true
-                }
-                _ => false,
+        let r = receiver.as_tagged(heap);
+        let obj = r.as_heap_object().expect("validated above");
+        let in_place = match obj.as_ref().elements_array(heap) {
+            Some(elements) if len < elements.len() => {
+                elements.as_ref().set(heap, len, arg.as_tagged(heap));
+                obj.as_ref()
+                    .length
+                    .set(heap, r.erase(), Smi::new((len + 1) as i64));
+                Prototype::element_mutated(heap, obj);
+                true
             }
+            _ => false,
         };
         if !in_place {
             rt_try!(
@@ -272,14 +270,12 @@ pub fn array_iterator_next<'a>(
         let Some(index) = Smi::decode(index) else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
-        let done = {
-            let len = array
-                .as_tagged(heap)
-                .as_heap_object()
-                .map(|o| o.as_ref().length())
-                .unwrap_or(0);
-            index.value() as usize >= len
-        };
+        let len = array
+            .as_tagged(heap)
+            .as_heap_object()
+            .map(|o| o.as_ref().length())
+            .unwrap_or(0);
+        let done = index.value() as usize >= len;
         let (value, done_value) = if done {
             (
                 scope.handle(heap.known().undefined.as_tagged(heap).erase()),

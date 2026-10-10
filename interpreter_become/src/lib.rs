@@ -2056,24 +2056,21 @@ extern "rust-preserve-none" fn op_load_context_slot<'a, const STRIDE: usize>(
         let v = slots.as_ref().element_slot(slot).get(heap);
         next!(LoadContextSlot, ip, regs, ctx, table, roots, float, v)
     }
-    let v = {
-        let heap = ctx.heap();
-        let Some(mut context) = ctx.stack().frame_header(base).context_slot().get(heap).get_as::<ContextObject>(heap) else {
-            bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type);
-        };
-        for _ in 0..depth {
-            context = match context.as_ref().outer.get(heap) {
-                Some(context) => context,
-                None => bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type),
-            };
-        }
-        context
-            .slots
-            .get(heap)
-            .as_ref()
-            .element_slot(slot)
-            .get(heap)
+    let heap = ctx.heap();
+    let Some(mut context) = ctx.stack().frame_header(base).context_slot().get(heap).get_as::<ContextObject>(heap) else {
+        bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type);
     };
+    for _ in 0..depth {
+        context = match context.as_ref().outer.get(heap) {
+            Some(context) => context,
+            None => bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type),
+        };
+    }
+    let v = context
+        .slots(heap)
+        .as_ref()
+        .element_slot(slot)
+        .get(heap);
     next!(LoadContextSlot, ip, regs, ctx, table, roots, float, v)
 }
 
@@ -3236,10 +3233,7 @@ fn construct_start<'a>(
 ) -> Result<ConstructStart, VmError> {
     let callee_word = regs.read(callee, ctx);
     let constructible = callee_word.as_heap_object().is_some_and(|o| {
-        o.as_ref()
-            .header
-            .map
-            .get(ctx.heap())
+        o.map(ctx.heap())
             .kind()
             .is_constructor()
     });
@@ -3977,25 +3971,22 @@ fn enter<'a>(
                 return Err(VmError::Type);
             }
             let stack = state.stack();
-            let frame = {
-                let heap: &Heap = heap;
-                let new_target_value = match &new_target {
-                    Some(nt) => nt.as_tagged(heap).erase(),
-                    None => heap.known().undefined.as_tagged(heap).erase(),
-                };
-                let staged = stack.stage_slice(args.as_tagged())?;
-                stack.push_frame(
-                    heap,
-                    FrameMeta::ROOT,
-                    Callee {
-                        callable: target.erase(),
-                        info,
-                        context: context.erase(),
-                    },
-                    new_target_value,
-                    staged,
-                )?
+            let new_target_value = match &new_target {
+                Some(nt) => nt.as_tagged(heap).erase(),
+                None => heap.known().undefined.as_tagged(heap).erase(),
             };
+            let staged = stack.stage_slice(args.as_tagged())?;
+            let frame = stack.push_frame(
+                heap,
+                FrameMeta::ROOT,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                new_target_value,
+                staged,
+            )?;
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
 

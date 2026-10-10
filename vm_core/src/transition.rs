@@ -219,7 +219,7 @@ fn super_store_on_receiver<'a, 's>(
             slot,
             flags,
             ..
-        } if holder.as_ref().erase() == recv => {
+        } if holder.erase() == recv => {
             if !flags.is_writable() {
                 return Err(VmError::Type);
             }
@@ -228,7 +228,7 @@ fn super_store_on_receiver<'a, 's>(
         }
         // own accessor: Receiver.[[DefineOwnProperty]]({value}) on an
         // accessor is an incompatible change (ES 9.1.9.2 step 3.d.i)
-        Lookup::Accessor { holder, .. } if holder.as_ref().erase() == recv => Err(VmError::Type),
+        Lookup::Accessor { holder, .. } if holder.erase() == recv => Err(VmError::Type),
         // not owned by the receiver: define a fresh own property
         _ => Ok(StoreOutcome::Transition {
             receiver,
@@ -472,13 +472,12 @@ impl Transition {
                 .find_transition(heap, name.as_tagged(heap), flags, None)
                 .expect("transition recorded above");
             let index = target
-                .as_ref()
                 .descriptors()
                 .iter()
                 .position(|d| d.name(heap).ptr_eq(name.as_tagged(heap)) && d.flags() == flags)
                 .expect("transition target row");
             (
-                target.as_ref().descriptor(index).offset(),
+                target.descriptor(index).offset(),
                 parent.value_slot_count(),
                 receiver_ref.slots(heap).as_slice().len(),
             )
@@ -514,9 +513,9 @@ impl Transition {
             let old = receiver_ref.slots(heap);
             let new = slots.as_tagged(heap);
             for k in 0..old_len {
-                new.as_ref().set(heap, k, old.at(heap, k));
+                new.set(heap, k, old.at(heap, k));
             }
-            new.as_ref().set(heap, offset, value.as_tagged(heap));
+            new.set(heap, offset, value.as_tagged(heap));
         }
         let host = receiver_ref.erase();
         receiver_ref.slots.set(heap, host, slots.as_tagged(heap));
@@ -633,11 +632,9 @@ impl Transition {
                 .map(|m| m.as_handle(scope));
             if let Some(existing) = existing {
                 // only this receiver's slots need compacting
-                let values = {
-                    let anchored: Vec<Tagged<'_, Value>> =
-                        values.iter().map(|h| h.as_tagged(heap)).collect();
-                    scope.stage(&anchored)
-                };
+                let anchored: Vec<Tagged<'_, Value>> =
+                    values.iter().map(|h| h.as_tagged(heap)).collect();
+                let values = scope.stage(&anchored);
                 heap.allocate_token_enter_heap(
                     FixedArray::<Value>::layout_for(values.len()),
                     |token, heap| {
@@ -663,11 +660,9 @@ impl Transition {
             let pairs_layout = WeakFixedArray::<Value>::layout_for(pairs_len + 2);
             let slots_layout = FixedArray::<Value>::layout_for(values.len());
             let total = AllocToken::total_for(&[map_layout, pairs_layout, slots_layout]);
-            let values = {
-                let anchored: Vec<Tagged<'_, Value>> =
-                    values.iter().map(|h| h.as_tagged(heap)).collect();
-                scope.stage(&anchored)
-            };
+            let anchored: Vec<Tagged<'_, Value>> =
+                values.iter().map(|h| h.as_tagged(heap)).collect();
+            let values = scope.stage(&anchored);
             let published = heap.allocate_token_enter_heap(total, |token, heap| {
                 let obj = receiver.as_tagged(heap);
                 let parent = obj.map(heap);
@@ -1089,16 +1084,16 @@ impl Object {
             match key {
                 Key::Element(i) => {
                     let obj = receiver.as_tagged(heap);
-                    if obj.as_ref().is_array(heap) {
-                        if let Some(dict) = obj.as_ref().element_dictionary(heap) {
-                            dict.as_ref().delete(heap, i);
+                    if obj.is_array(heap) {
+                        if let Some(dict) = obj.element_dictionary(heap) {
+                            dict.delete(heap, i);
                             Prototype::element_mutated(heap, obj);
                             break 'name None;
                         }
                         // indices at/past `length` were never own properties
-                        if i < obj.as_ref().length()
-                            && obj.as_ref().map(heap).as_ref().kind().is_dense_elements()
-                            && let Some(elements) = obj.as_ref().elements_array(heap)
+                        if i < obj.length()
+                            && obj.map(heap).kind().is_dense_elements()
+                            && let Some(elements) = obj.elements_array(heap)
                             && i < elements.len()
                         {
                             elements.set(heap, i, heap.known().the_hole.as_tagged(heap).erase());
@@ -1215,7 +1210,7 @@ impl Object {
                     let Some(o) = p.as_heap_object() else {
                         break;
                     };
-                    p = o.as_ref().prototype(heap);
+                    p = o.prototype(heap);
                 }
                 Ok(())
             }

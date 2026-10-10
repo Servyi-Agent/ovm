@@ -136,7 +136,6 @@ impl<'a> Ctx<'a> {
         self.stack()
             .frame_header(self.frame_base())
             .code(self.heap())
-            .as_ref()
             .as_ptr()
     }
 
@@ -283,9 +282,9 @@ pub fn unwind<'a>(ctx: &Ctx<'a>, fault_pc: usize) -> Unwind<'a> {
                 .get(ctx.heap());
             callable
                 .as_heap_object()
-                .and_then(|obj| obj.as_ref().callable_info(ctx.heap()))
+                .and_then(|obj| obj.callable_info(ctx.heap()))
                 .and_then(|info| info.handlers.get(ctx.heap()))
-                .and_then(|handlers| handlers.as_ref().lookup(pc))
+                .and_then(|handlers| handlers.lookup(pc))
         };
         if let Some(handler_pc) = handled {
             let ex = ctx

@@ -4,8 +4,9 @@ use crate::{
     CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_DATA, DenseString, EdgeVisitable,
     ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
     HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Lookup, Map, NativeIndex,
-    NumberDictionary, ObjectKind, PropertyDescriptor, Prototype, SiblingChange, SlotName, Smi,
-    Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor, VmError,
+    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
+    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
+    VmError,
 };
 
 /// The elements slot is typed `FixedArray` but holds a
@@ -167,24 +168,21 @@ impl Object {
     }
 
     pub fn promote_holey(heap: &mut Heap, scope: &HandleScope<'_>, receiver: &Handle<'_, Object>) {
-        let map = {
-            let obj = receiver.as_tagged(heap);
-            let map = obj.as_ref().map(heap);
-            // one-way lattice: only packed maps promote; holey and
-            // dictionary maps are already past this rung
-            if map.as_ref().kind().elements() != ElementsKind::Packed {
-                return;
-            }
-            scope.handle(map)
-        };
+        let obj = receiver.as_tagged(heap);
+        let map = obj.map(heap);
+        // one-way lattice: only packed maps promote; holey and
+        // dictionary maps are already past this rung
+        if map.kind().elements() != ElementsKind::Packed {
+            return;
+        }
+        let map = scope.handle(map);
         // the map swap must invalidate chains keyed on the old map:
         // later shape changes fire on the new map lineage only
         Prototype::shape_changed(heap, map.as_tagged(heap));
         let target =
             Transition::sibling_target(heap, scope, |h| map.as_tagged(h), SiblingChange::Holey);
         let obj = receiver.as_tagged(heap);
-        obj.as_ref()
-            .header
+        obj.header
             .map
             .set(heap, obj.erase(), target.as_tagged(heap));
     }
@@ -198,17 +196,17 @@ impl Object {
         let elements = self.elements(heap);
         if kind.is_holey() {
             // `length` can exceed the backing store: those indices are holes
-            if i >= elements.as_ref().len() {
+            if i >= elements.len() {
                 return None;
             }
-            let v = elements.as_ref().at(heap, i);
+            let v = elements.at(heap, i);
             if v == heap.known().the_hole.as_tagged(heap) {
                 return None;
             }
             Some(v)
         } else {
             // packed: capacity covers `length`, and no slot is a hole
-            Some(elements.as_ref().at(heap, i))
+            Some(elements.at(heap, i))
         }
     }
 
@@ -223,11 +221,11 @@ impl Object {
             return None;
         }
         let dict = self.element_dictionary(heap)?;
-        let entry = dict.as_ref().find(heap, i)?;
-        if dict.as_ref().is_accessor_at(heap, entry) {
+        let entry = dict.find(heap, i)?;
+        if dict.is_accessor_at(heap, entry) {
             return None;
         }
-        Some(dict.as_ref().value_at(heap, entry))
+        Some(dict.value_at(heap, entry))
     }
 }
 
@@ -248,7 +246,7 @@ impl<'a> Tagged<'a, Value> {
         let Some(obj) = self.as_heap_object() else {
             return false;
         };
-        obj.as_ref().map(heap).kind().is_callable()
+        obj.map(heap).kind().is_callable()
     }
 
     /// ES 7.3.26 PrivateElementFind restricted to fields: an own data
@@ -256,10 +254,10 @@ impl<'a> Tagged<'a, Value> {
     /// elements live only on the instance itself).
     pub fn private_find(self, heap: &'a Heap, key: Tagged<'a, Value>) -> Option<&'a GcSlot> {
         let o = self.as_heap_object()?;
-        let map = o.as_ref().map(heap);
+        let map = o.map(heap);
         for d in map.descriptors() {
             if d.name(heap).ptr_eq(key.as_name()) && !d.flags().is_accessor() {
-                return Some(o.as_ref().slot(heap, d.offset()));
+                return Some(o.slot(heap, d.offset()));
             }
         }
         None
@@ -278,11 +276,11 @@ impl<'a> Tagged<'a, Value> {
         let Some(obj) = self.as_heap_object() else {
             return Err(VmError::Type);
         };
-        let kind = obj.as_ref().map(heap).kind();
-        if !kind.is_array() || !kind.is_dense_elements() || i >= obj.as_ref().length() {
+        let kind = obj.map(heap).kind();
+        if !kind.is_array() || !kind.is_dense_elements() || i >= obj.length() {
             return Err(VmError::OutOfBounds);
         }
-        let elements = obj.as_ref().elements_array(heap).ok_or(VmError::Type)?;
+        let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
         if i >= elements.len() {
             return Err(VmError::OutOfBounds);
         }
@@ -297,7 +295,7 @@ impl<'a> Tagged<'a, Value> {
     #[inline(always)]
     pub fn call_target(self, heap: &'a Heap) -> Option<CallTarget<'a>> {
         let obj = self.as_heap_object()?;
-        let kind = obj.as_ref().map(heap).kind();
+        let kind = obj.map(heap).kind();
         if kind.is_proxy() {
             return Some(CallTarget::Proxy(obj));
         }
@@ -305,11 +303,11 @@ impl<'a> Tagged<'a, Value> {
             return None;
         }
         if kind.is_native() {
-            return obj.as_ref().runtime_call_target(heap);
+            return obj.runtime_call_target(heap);
         }
         // every non-runtime callable object is laid out with
         // `[callable info, context]` in its first two slots
-        let slots = obj.as_ref().slots(heap);
+        let slots = obj.slots(heap);
         let info = unsafe { slots.at(heap, 0).cast::<CallableInfoObject>() };
         let context = unsafe { slots.at(heap, 1).cast::<ContextObject>() };
         let descriptor = info.descriptor.to_smi_unchecked().value() as u64;
@@ -333,7 +331,7 @@ impl<'a> Tagged<'a, Value> {
     #[inline]
     pub fn bytecode_target(self, heap: &'a Heap) -> Option<CallTarget<'a>> {
         let obj = self.as_heap_object()?;
-        let slots = obj.as_ref().slots(heap);
+        let slots = obj.slots(heap);
         let info = unsafe { slots.at(heap, 0).cast::<CallableInfoObject>() };
         let context = unsafe { slots.at(heap, 1).cast::<ContextObject>() };
         let descriptor = info.descriptor.to_smi_unchecked().value() as u64;
@@ -358,16 +356,12 @@ impl Object {
 
         let (grows, old_len, dictionary) = {
             let obj = receiver.as_tagged(heap);
-            if !obj.as_ref().is_array(heap) {
+            if !obj.is_array(heap) {
                 return Err(VmError::Type);
             }
-            let dictionary = obj.as_ref().element_dictionary(heap).is_some();
-            let capacity = obj
-                .as_ref()
-                .elements_array(heap)
-                .map(|e| e.len())
-                .unwrap_or(0);
-            (i >= capacity, obj.as_ref().length(), dictionary)
+            let dictionary = obj.element_dictionary(heap).is_some();
+            let capacity = obj.elements_array(heap).map(|e| e.len()).unwrap_or(0);
+            (i >= capacity, obj.length(), dictionary)
         };
 
         if dictionary {
@@ -379,17 +373,16 @@ impl Object {
         }
 
         if grows {
+            let obj = receiver.as_tagged(heap);
+            let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
             let (normalize, capacity) = {
-                let heap_ref: &Heap = heap;
-                let obj = receiver.as_tagged(heap_ref);
-                let elements = obj.as_ref().elements_array(heap_ref).ok_or(VmError::Type)?;
                 let new_capacity = (new_len + (new_len >> 1) + 16).max(elements.len());
                 if i - elements.len() >= 1024 {
                     (true, new_capacity)
                 } else if new_capacity > 1000 {
                     let mut used = 0usize;
                     for k in 0..elements.len() {
-                        if elements.at(heap_ref, k) != heap_ref.known().the_hole.as_tagged(heap) {
+                        if elements.at(heap, k) != heap.known().the_hole.as_tagged(heap) {
                             used += 1;
                         }
                     }
@@ -404,25 +397,22 @@ impl Object {
                 Self::normalize_elements(heap, scope, receiver);
                 return Self::store_dictionary_element(heap, scope, receiver, i, value);
             }
-            let keep = old_len.min({
-                let heap_ref: &Heap = heap;
+            let keep = old_len.min(
                 receiver
-                    .as_tagged(heap_ref)
-                    .as_ref()
-                    .elements_array(heap_ref)
+                    .as_tagged(heap)
+                    .elements_array(heap)
                     .map(|e| e.len())
-                    .unwrap_or(0)
-            });
+                    .unwrap_or(0),
+            );
             let elements = heap.allocate_hole_array(capacity).as_handle(scope);
             {
-                let heap_ref: &Heap = heap;
-                let obj = receiver.as_tagged(heap_ref);
-                let old = obj.as_ref().elements_array(heap_ref).ok_or(VmError::Type)?;
-                let new = elements.as_tagged(heap_ref);
+                let obj = receiver.as_tagged(heap);
+                let old = obj.elements_array(heap).ok_or(VmError::Type)?;
+                let new = elements.as_tagged(heap);
                 for k in 0..keep {
-                    new.as_ref().set(heap_ref, k, old.at(heap_ref, k));
+                    new.set(heap, k, old.at(heap, k));
                 }
-                new.as_ref().set(heap_ref, i, value.as_tagged(heap_ref));
+                new.set(heap, i, value.as_tagged(heap));
             }
             let obj = receiver.as_tagged(heap);
             obj.elements
@@ -431,11 +421,11 @@ impl Object {
             Prototype::element_mutated(heap, obj);
         } else {
             let obj = receiver.as_tagged(heap);
-            let elements = obj.as_ref().elements_array(heap).ok_or(VmError::Type)?;
+            let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
             elements.set(heap, i, value.as_tagged(heap));
             // a store inside the physical capacity but past the logical
             // length still extends the array
-            if i >= obj.as_ref().length() {
+            if i >= obj.length() {
                 obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
             }
             Prototype::element_mutated(heap, obj);
@@ -456,8 +446,8 @@ impl Object {
         let new_len = i.checked_add(1).ok_or(VmError::OutOfBounds)?;
         let (dict, length) = {
             let obj = receiver.as_tagged(heap);
-            let dict = obj.as_ref().element_dictionary(heap).ok_or(VmError::Type)?;
-            (scope.handle(dict), obj.as_ref().length())
+            let dict = obj.element_dictionary(heap).ok_or(VmError::Type)?;
+            (scope.handle(dict), obj.length())
         };
         match dict.as_tagged(heap).classify(heap, i) {
             EntryClass::ReadOnly | EntryClass::Accessor => return Ok(()),
@@ -501,27 +491,28 @@ impl Object {
         scope: &HandleScope<'_>,
         receiver: &Handle<'_, Object>,
     ) {
-        let map = {
-            let obj = receiver.as_tagged(heap);
-            let map = obj.as_ref().map(heap);
-            if map.as_ref().kind().is_dictionary_elements() {
-                return;
-            }
-            scope.handle(map)
-        };
+        let obj = receiver.as_tagged(heap);
+        let map = obj.map(heap);
+        if map.kind().is_dictionary_elements() {
+            return;
+        }
+        let map = scope.handle(map);
         let mut entries: Vec<(usize, Handle<'_, Value>)> = Vec::new();
-        {
-            let obj = receiver.as_tagged(heap);
-            if let Some(elements) = obj.as_ref().elements_array(heap) {
-                for k in 0..elements.len() {
-                    let v = elements.at(heap, k);
-                    if v != heap.known().the_hole.as_tagged(heap) {
-                        entries.push((k, scope.handle(v)));
-                    }
+        let obj = receiver.as_tagged(heap);
+        if let Some(elements) = obj.elements_array(heap) {
+            for k in 0..elements.len() {
+                let v = elements.at(heap, k);
+                if v != heap.known().the_hole.as_tagged(heap) {
+                    entries.push((k, scope.handle(v)));
                 }
             }
         }
-        let mut dict = NumberDictionary::new(heap, scope, entries.len());
+        let mut dict = heap.allocate_handle::<NumberDictionary>(
+            NumberDictionaryInit {
+                capacity: NumberDictionary::compute_capacity(entries.len()),
+            },
+            scope,
+        );
         for (k, v) in &entries {
             let word = v.as_tagged(heap).raw();
             dict = NumberDictionary::insert(
@@ -545,8 +536,7 @@ impl Object {
         obj.elements.set(heap, obj.erase(), unsafe {
             as_elements_word(dict.as_tagged(heap))
         });
-        obj.as_ref()
-            .header
+        obj.header
             .map
             .set(heap, obj.erase(), target.as_tagged(heap));
     }
@@ -557,31 +547,24 @@ impl Object {
         receiver: &Handle<'_, Object>,
         capacity: usize,
     ) {
-        let map = {
-            let obj = receiver.as_tagged(heap);
-            let map = obj.as_ref().map(heap);
-            if !map.as_ref().kind().is_dictionary_elements() {
-                return;
-            }
-            scope.handle(map)
-        };
+        let obj = receiver.as_tagged(heap);
+        let map = obj.map(heap);
+        if !map.kind().is_dictionary_elements() {
+            return;
+        }
+        let map = scope.handle(map);
         let mut entries: Vec<(usize, Handle<'_, Value>)> = Vec::new();
-        {
-            let obj = receiver.as_tagged(heap);
-            if let Some(dict) = obj.as_ref().element_dictionary(heap) {
-                dict.as_ref().for_each_entry(heap, |k, v, _| {
-                    if k < capacity {
-                        entries.push((k, scope.handle(v)));
-                    }
-                });
-            }
+        let obj = receiver.as_tagged(heap);
+        if let Some(dict) = obj.element_dictionary(heap) {
+            dict.for_each_entry(heap, |k, v, _| {
+                if k < capacity {
+                    entries.push((k, scope.handle(v)));
+                }
+            });
         }
         let elements = heap.allocate_hole_array(capacity).as_handle(scope);
         for (k, v) in &entries {
-            elements
-                .as_tagged(heap)
-                .as_ref()
-                .set(heap, *k, v.as_tagged(heap));
+            elements.as_tagged(heap).set(heap, *k, v.as_tagged(heap));
         }
         Prototype::shape_changed(heap, map.as_tagged(heap));
         let target =
@@ -589,8 +572,7 @@ impl Object {
         let obj = receiver.as_tagged(heap);
         obj.elements
             .set(heap, obj.erase(), elements.as_tagged(heap));
-        obj.as_ref()
-            .header
+        obj.header
             .map
             .set(heap, obj.erase(), target.as_tagged(heap));
     }
@@ -792,13 +774,11 @@ impl Object {
                     // GetMethod: a non-callable, non-nullish method is a TypeError
                     return Err(VmError::Type);
                 }
-                let hint_string = {
-                    let s = heap.known().strings;
-                    match hint {
-                        Hint::Default => s.default.as_tagged(heap).erase(),
-                        Hint::Number => s.number.as_tagged(heap).erase(),
-                        Hint::String => s.string.as_tagged(heap).erase(),
-                    }
+                let s = heap.known().strings;
+                let hint_string = match hint {
+                    Hint::Default => s.default.as_tagged(heap).erase(),
+                    Hint::Number => s.number.as_tagged(heap).erase(),
+                    Hint::String => s.string.as_tagged(heap).erase(),
                 };
                 let args = scope.stage(&[hint_string]);
                 let result =
@@ -942,7 +922,7 @@ impl Object {
             // canonical index strings name the same property as their
             // numeric form (ES 6.1.7): canonicalize to the Smi spelling
             // exactly once here, so every downstream bits-compare is sound
-            if let Some(i) = word.as_ref().data(heap).canonical_index()
+            if let Some(i) = word.data(heap).canonical_index()
                 && i < u32::MAX as usize
             {
                 return Ok(Some(Tagged::from(Smi::new(i as i64))));
@@ -1020,7 +1000,7 @@ impl Object {
         let Some(obj) = object.as_heap_object() else {
             return false;
         };
-        let proto = obj.as_ref().prototype(heap);
+        let proto = obj.prototype(heap);
         if proto.ptr_eq(target) {
             return true;
         }

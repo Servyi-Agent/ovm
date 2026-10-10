@@ -270,9 +270,8 @@ fn probe_element_smi<'a>(
 /// resolve to `undefined`, hole stores are plain).
 #[inline(always)]
 fn map_chain_cell_valid(heap: &Heap, map: Tagged<'_, Map>) -> bool {
-    map.as_ref()
-        .published_validity_cell(heap)
-        .is_some_and(|cell| cell.as_ref().is_valid(heap))
+    map.published_validity_cell(heap)
+        .is_some_and(|cell| cell.is_valid(heap))
 }
 
 /// Publish the chain validity cell on `map` so hit paths can guard a
@@ -282,7 +281,6 @@ fn attach_chain_cell(heap: &mut Heap, scope: &HandleScope<'_>, map: &Handle<'_, 
     match Prototype::get_or_create_prototype_chain_validity_cell(heap, scope, *map) {
         Some(cell) => {
             map.as_tagged(heap)
-                .as_ref()
                 .set_validity_cell(heap, cell.as_tagged(heap));
             true
         }
@@ -319,7 +317,7 @@ fn walk<'s>(
 ) -> Option<Found<'s>> {
     let map = obj.map(heap);
     // accessor entries in a sparse hop act like accessor descriptors
-    if let Some(pair) = obj.as_ref().dictionary_accessor(heap, name.as_index()) {
+    if let Some(pair) = obj.dictionary_accessor(heap, name.as_index()) {
         return Some(Found::Accessor {
             pair: scope.handle(pair),
             holder: scope.handle(obj),
@@ -445,12 +443,12 @@ fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
     let Some(obj) = word.get_as::<Object>(heap) else {
         return false;
     };
-    let map = obj.as_ref().map(heap);
-    let kind = map.as_ref().kind();
+    let map = obj.map(heap);
+    let kind = map.kind();
     if kind.is_proxy() || !matches!(kind.kind(), ObjectKind::Object | ObjectKind::Array) {
         return false;
     }
-    for d in map.as_ref().descriptors() {
+    for d in map.descriptors() {
         if d.name(heap).to_i64().is_some() {
             return false;
         }
@@ -460,10 +458,10 @@ fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
             // a dictionary-backed hop may hold elements
             return false;
         }
-        let elements = obj.as_ref().elements(heap);
+        let elements = obj.elements(heap);
         if elements.is_strong_ptr() {
             let hole = heap.known().the_hole.as_tagged(heap);
-            let elements = elements.as_ref();
+            let elements = elements;
             for i in 0..elements.len() {
                 if elements.at(heap, i) != hole {
                     return false;
@@ -501,7 +499,7 @@ fn chain_elements_clean(heap: &Heap, map: Tagged<'_, Map>) -> bool {
         let Some(obj) = proto.get_as::<Object>(heap) else {
             return false;
         };
-        current = obj.as_ref().map(heap);
+        current = obj.map(heap);
     }
 }
 
@@ -739,7 +737,7 @@ fn apply_element_load<'a>(
     let elements = obj.elements(heap);
     if holey {
         // `length` can exceed the backing store: those indices are holes
-        if index >= elements.as_ref().len() {
+        if index >= elements.len() {
             return oob(heap);
         }
         let v = elements.at(heap, index);
@@ -765,7 +763,7 @@ fn apply_indexed_string<'a>(
         if payload & ELEMENT_ALLOW_OOB != 0
             && receiver
                 .as_heap_object()
-                .is_some_and(|h| map_chain_cell_valid(heap, h.as_ref().map(heap)))
+                .is_some_and(|h| map_chain_cell_valid(heap, h.map(heap)))
         {
             return Some(ElementHit::Value(
                 heap.known().undefined.as_tagged(heap).erase(),
@@ -1009,7 +1007,7 @@ impl InlineCache {
         let elements = obj.elements(heap);
         let clean = payload & STORE_CHAIN_CLEAN != 0;
         if holey && !append {
-            if index >= elements.as_ref().len() {
+            if index >= elements.len() {
                 return None;
             }
             if !clean {
@@ -1024,7 +1022,7 @@ impl InlineCache {
             if !clean || !map_chain_cell_valid(heap, map) {
                 return None;
             }
-            if index >= elements.as_ref().len() {
+            if index >= elements.len() {
                 // no headroom: the slow path reallocates
                 return None;
             }
@@ -1035,7 +1033,7 @@ impl InlineCache {
             obj.length
                 .set(heap, obj.erase(), Smi::new((index + 1) as i64));
         }
-        if map.as_ref().kind().is_prototype() {
+        if map.kind().is_prototype() {
             Prototype::shape_changed(heap, map);
         }
         Some(value)
@@ -1066,7 +1064,7 @@ impl InlineCache {
                 return;
             }
             let string_prototype = heap.known().string_prototype.as_tagged(heap);
-            let proto_map = scope.handle(string_prototype.as_ref().map(heap));
+            let proto_map = scope.handle(string_prototype.map(heap));
             let clean = chain_elements_clean(heap, proto_map.as_tagged(heap));
             if index >= s.len() && !clean {
                 return;
@@ -1078,7 +1076,6 @@ impl InlineCache {
                     Prototype::get_or_create_prototype_chain_validity_cell(heap, scope, proto_map)
                 {
                     map.as_tagged(heap)
-                        .as_ref()
                         .set_validity_cell(heap, cell.as_tagged(heap));
                     payload |= ELEMENT_ALLOW_OOB;
                 }
@@ -1097,11 +1094,11 @@ impl InlineCache {
             // the miss index tells what the handler must handle: in-bounds
             // non-hole reads never install (the interpreter's direct read
             // covers them); hole/OOB misses add the guarded OOB bit
-            let len = obj.as_ref().length();
+            let len = obj.length();
             let hole_miss = payload & ELEMENT_HOLEY != 0 && {
-                let elements = obj.as_ref().elements(heap);
-                index < elements.as_ref().len()
-                    && elements.as_ref().at(heap, index) == heap.known().the_hole.as_tagged(heap)
+                let elements = obj.elements(heap);
+                index < elements.len()
+                    && elements.at(heap, index) == heap.known().the_hole.as_tagged(heap)
             };
             if (index >= len || hole_miss)
                 && chain_elements_clean(heap, map.as_tagged(heap))
@@ -1232,41 +1229,39 @@ impl InlineCache {
         let recv = ic_receiver(receiver.as_tagged(heap).erase(), heap)?;
         vector.as_tagged(heap).site(slot)?;
         let map = scope.handle(recv.map(heap));
-        let action = {
-            let handler = probe(heap, vector.as_tagged(heap), slot, map.as_tagged(heap))?;
-            if !handler.is_ptr() {
-                let (kind, payload) = decode_handler_smi(handler)?;
-                match kind {
-                    KIND_FIELD => StoreAction::Field(payload as usize),
-                    _ => return None,
-                }
-            } else if handler.is_weak_ptr() {
-                let strong = handler.as_strong()?;
-                if let Some(target) = strong.get_as::<Map>(heap) {
-                    if !target.is_prototype_validity_cell_valid(heap) {
-                        return None;
-                    }
-                    StoreAction::Transition(scope.handle(target))
-                } else {
-                    // own setter as a whole weak pair
-                    setter_action(heap, scope, strong.get_as::<AccessorPair>(heap)?)
-                }
-            } else {
-                let data_handler = handler.as_strong()?.get_as::<DataHandler>(heap)?;
-                if !check_prototype_validity_cell(heap, data_handler) {
+        let handler = probe(heap, vector.as_tagged(heap), slot, map.as_tagged(heap))?;
+        let action = if !handler.is_ptr() {
+            let (kind, payload) = decode_handler_smi(handler)?;
+            match kind {
+                KIND_FIELD => StoreAction::Field(payload as usize),
+                _ => return None,
+            }
+        } else if handler.is_weak_ptr() {
+            let strong = handler.as_strong()?;
+            if let Some(target) = strong.get_as::<Map>(heap) {
+                if !target.is_prototype_validity_cell_valid(heap) {
                     return None;
                 }
-                let (kind, _) = decode_handler_smi(data_handler.smi_handler(heap))?;
-                match kind {
-                    KIND_SETTER => {
-                        let pair = data_handler
-                            .data(heap, 0)
-                            .as_strong()?
-                            .get_as::<AccessorPair>(heap)?;
-                        setter_action(heap, scope, pair)
-                    }
-                    _ => return None,
+                StoreAction::Transition(scope.handle(target))
+            } else {
+                // own setter as a whole weak pair
+                setter_action(heap, scope, strong.get_as::<AccessorPair>(heap)?)
+            }
+        } else {
+            let data_handler = handler.as_strong()?.get_as::<DataHandler>(heap)?;
+            if !check_prototype_validity_cell(heap, data_handler) {
+                return None;
+            }
+            let (kind, _) = decode_handler_smi(data_handler.smi_handler(heap))?;
+            match kind {
+                KIND_SETTER => {
+                    let pair = data_handler
+                        .data(heap, 0)
+                        .as_strong()?
+                        .get_as::<AccessorPair>(heap)?;
+                    setter_action(heap, scope, pair)
                 }
+                _ => return None,
             }
         };
         match action {
@@ -1597,11 +1592,11 @@ impl InlineCache {
         };
         let info: Tagged<'a, CallableInfoObject> = unsafe { info_word.cast() };
         debug_assert!(info_word.get_as::<CallableInfoObject>(heap).is_some());
-        let (_, _, kind) = decode_descriptor(info.as_ref().descriptor.to_smi_unchecked().value());
+        let (_, _, kind) = decode_descriptor(info.descriptor.to_smi_unchecked().value());
         let Some(target) = callee.as_heap_object() else {
             return CallProbe::Miss;
         };
-        let context_word = target.as_ref().slot(heap, 1).get(heap);
+        let context_word = target.slot(heap, 1).get(heap);
         debug_assert!(context_word.get_as::<ContextObject>(heap).is_some());
         let context: Tagged<'a, ContextObject> = unsafe { context_word.cast() };
         CallProbe::Bytecode(CallHit {

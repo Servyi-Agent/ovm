@@ -91,7 +91,7 @@ impl Map {
 
     pub fn is_prototype_validity_cell_valid(&self, heap: &Heap) -> bool {
         match self.published_validity_cell(heap) {
-            Some(cell) => cell.as_ref().is_valid(heap),
+            Some(cell) => cell.is_valid(heap),
             None => true,
         }
     }

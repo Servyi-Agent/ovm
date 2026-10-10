@@ -240,7 +240,7 @@ impl NumberDictionary {
     }
 
     /// Rehash every live entry into `new` (capacity already set).
-    fn rehash_into(&self, heap: &Heap, new: &NumberDictionary) {
+    fn rehash_into(&self, heap: &Heap, new: Tagged<'_, NumberDictionary>) {
         for entry in 0..self.capacity() {
             let Some(index) = self.key_at(heap, entry) else {
                 continue;
@@ -276,10 +276,14 @@ impl NumberDictionary {
             return *dict;
         }
         let nof = dict.as_tagged(heap).nof();
-        let fresh = NumberDictionary::new(heap, scope, nof + 1);
+        let fresh = heap.allocate_handle::<NumberDictionary>(
+            NumberDictionaryInit {
+                capacity: Self::compute_capacity(nof + 1),
+            },
+            scope,
+        );
         dict.as_tagged(heap)
-            .as_ref()
-            .rehash_into(heap, fresh.as_tagged(heap).as_ref());
+            .rehash_into(heap, fresh.as_tagged(heap));
         fresh
     }
 
@@ -296,14 +300,13 @@ impl NumberDictionary {
         let current = *dict;
         if current
             .as_tagged(heap)
-            .as_ref()
             .set_in_place(heap, index, value, details)
         {
             return current;
         }
         let table = Self::ensure_capacity(heap, scope, &current);
         {
-            let t = table.as_tagged(heap).as_ref();
+            let t = table.as_tagged(heap);
             let entry = t.find_insertion(heap, index);
             let host = t.tagged(heap);
             let reused_tombstone = t.key_word(heap, entry) == heap.known().the_hole.as_tagged(heap);
@@ -334,16 +337,6 @@ impl NumberDictionary {
         self.nof.set(heap, host, Smi::new((self.nof() - 1) as i64));
         self.nod.set(heap, host, Smi::new((self.nod() + 1) as i64));
         true
-    }
-
-    /// Allocate an empty table sized for `at_least` live entries.
-    pub fn new<'s>(
-        heap: &mut Heap,
-        scope: &'s HandleScope<'_>,
-        at_least: usize,
-    ) -> Handle<'s, NumberDictionary> {
-        let capacity = Self::compute_capacity(at_least);
-        heap.allocate_handle::<NumberDictionary>(NumberDictionaryInit { capacity }, scope)
     }
 
     /// Iterate live entries in slot order (NOT index order — callers
