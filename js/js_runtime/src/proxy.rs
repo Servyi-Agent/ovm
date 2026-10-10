@@ -83,24 +83,22 @@ pub fn proxy_revocable<'a>(
             unsafe { Tagged::<Value>::from_value_unchecked(handler.raw()) },
         ));
         // Function.prototype.__makeRevoke (installed by REVOKE_PRELUDE)
-        let make_revoke = {
-            // Safety: fresh interned word, consumed by the lookup.
-            let name = vm
-                .interner()
-                .intern_str(heap, &scope, "__makeRevoke")
-                .erase();
-            let proto = heap.known().function_prototype.erase();
-            match rt_try!(
-                vm,
-                heap,
-                state,
-                Lookup::get_property_on(vm, heap, state, proto, proto, name)
-            ) {
-                Coercion::Threw => {
-                    return heap.known().exception.as_tagged(heap).erase();
-                }
-                Coercion::Value(v) => scope.handle(v),
+        // Safety: fresh interned word, consumed by the lookup.
+        let name = vm
+            .interner()
+            .intern_str(heap, &scope, "__makeRevoke")
+            .erase();
+        let proto = heap.known().function_prototype.erase();
+        let make_revoke = match rt_try!(
+            vm,
+            heap,
+            state,
+            Lookup::get_property_on(vm, heap, state, proto, proto, name)
+        ) {
+            Coercion::Threw => {
+                return heap.known().exception.as_tagged(heap).erase();
             }
+            Coercion::Value(v) => scope.handle(v),
         };
         // Safety: fresh rooted-slot words staged for the call.
         let exception = heap.known().exception.as_tagged(heap).raw();
@@ -108,19 +106,17 @@ pub fn proxy_revocable<'a>(
             heap.known().undefined.as_tagged(heap).erase(),
             proxy.as_tagged(heap).erase(),
         ]);
-        let revoke = {
-            let r = rt_try!(
-                vm,
-                heap,
-                state,
-                HostCtx::enter(vm, &mut *heap, state, make_revoke, staged, None)
-            );
-            if r.raw() == exception {
-                return heap.known().exception.as_tagged(heap).erase();
-            }
-            // Safety: fresh call result, rooted below.
-            scope.handle(r)
-        };
+        let r = rt_try!(
+            vm,
+            heap,
+            state,
+            HostCtx::enter(vm, &mut *heap, state, make_revoke, staged, None)
+        );
+        if r.raw() == exception {
+            return heap.known().exception.as_tagged(heap).erase();
+        }
+        // Safety: fresh call result, rooted below.
+        let revoke = scope.handle(r);
         let map = heap.known().object_initial_map;
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)

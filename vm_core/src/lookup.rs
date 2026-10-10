@@ -46,7 +46,7 @@ impl<'a> Tagged<'a, Value> {
             return Ok(Key::Name(Tagged::from(Smi::new(v))));
         }
         if let Some(s) = self.get_as::<DenseString>(heap) {
-            if let Some(i) = s.as_ref().data(heap).canonical_index()
+            if let Some(i) = s.data(heap).canonical_index()
                 && i < u32::MAX as usize
             {
                 return Ok(Key::Element(i));
@@ -69,12 +69,12 @@ impl<'a> Tagged<'a, Value> {
             return Err(VmError::Type);
         }
         if let Some(obj) = self.as_heap_object()
-            && let Some(v) = obj.as_ref().array_length(heap, name)
+            && let Some(v) = obj.array_length(heap, name)
         {
             return Ok(LoadOutcome::Value(v));
         }
         if let Some(s) = DenseString::from_receiver(heap, self)
-            && let Some(StringOwn::Length(len)) = s.as_ref().own_key(heap, name)
+            && let Some(StringOwn::Length(len)) = s.own_key(heap, name)
         {
             return Ok(LoadOutcome::Value(Smi::new(len as i64).into_tagged()));
         }
@@ -129,8 +129,8 @@ impl<'a> Tagged<'a, Value> {
         };
         let mut hop = self;
         while let Some(obj) = hop.as_heap_object() {
-            let map = obj.as_ref().map(heap);
-            let proto = map.as_ref().prototype.get(heap);
+            let map = obj.map(heap);
+            let proto = map.prototype.get(heap);
             if proto.get_as::<FixedArray>(heap).is_some() {
                 return true;
             }
@@ -145,33 +145,27 @@ impl<'a> Tagged<'a, Value> {
             let Some(next) = proto.get_as::<Object>(heap) else {
                 return false;
             };
-            if next.as_ref().map(heap).kind().is_proxy() {
+            if next.map(heap).kind().is_proxy() {
                 return true;
             }
-            let next_map = next.as_ref().map(heap);
-            if next_map
-                .as_ref()
-                .descriptors()
-                .iter()
-                .any(|d| matches(d.name(heap)))
-            {
+            let next_map = next.map(heap);
+            if next_map.descriptors().iter().any(|d| matches(d.name(heap))) {
                 return true;
             }
             // dictionary hops: accessor or read-only entries intercept
             // stores at their indices
-            if let Some(dict) = next.as_ref().element_dictionary(heap) {
+            if let Some(dict) = next.element_dictionary(heap) {
                 let intercepts = |details: i64| {
                     details & (DETAILS_ACCESSOR | DETAILS_WRITABLE) != DETAILS_WRITABLE
                 };
                 let dirty = match query {
                     ChainQuery::Index(i) => dict
-                        .as_ref()
                         .find(heap, i)
-                        .map(|e| intercepts(dict.as_ref().details_at(heap, e)))
+                        .map(|e| intercepts(dict.details_at(heap, e)))
                         .unwrap_or(false),
                     ChainQuery::AnyIndex => {
                         let mut any = false;
-                        dict.as_ref().for_each_entry(heap, |_, _, details| {
+                        dict.for_each_entry(heap, |_, _, details| {
                             if intercepts(details) {
                                 any = true;
                             }
@@ -198,14 +192,14 @@ impl<'a> Tagged<'a, Value> {
                 let smi_name: Tagged<'a, SlotName> = Tagged::from(Smi::new(i as i64));
                 if let Some(v) = self
                     .as_heap_object()
-                    .and_then(|obj| obj.as_ref().element_value(heap, i))
+                    .and_then(|obj| obj.element_value(heap, i))
                 {
                     return Ok(LoadOutcome::Value(v));
                 }
                 // accessor entries in a sparse self are own getters
                 if let Some(outcome) = self
                     .as_heap_object()
-                    .and_then(|obj| obj.as_ref().element_dictionary(heap))
+                    .and_then(|obj| obj.element_dictionary(heap))
                     .and_then(|dict| dictionary_accessor_outcome(heap, dict, i))
                 {
                     return Ok(outcome);
@@ -215,8 +209,8 @@ impl<'a> Tagged<'a, Value> {
                     let Some(obj) = hop.as_heap_object() else {
                         break;
                     };
-                    let map = obj.as_ref().map(heap);
-                    let proto = map.as_ref().prototype.get(heap);
+                    let map = obj.map(heap);
+                    let proto = map.prototype.get(heap);
                     // Self-style multi-parent chains and exotic hops take
                     // the ordinary named walk
                     if proto.get_as::<FixedArray>(heap).is_some() {
@@ -233,22 +227,20 @@ impl<'a> Tagged<'a, Value> {
                     let Some(next) = proto.get_as::<Object>(heap) else {
                         break;
                     };
-                    if next.as_ref().map(heap).kind().is_proxy() {
+                    if next.map(heap).kind().is_proxy() {
                         break;
                     }
-                    if let Some(v) = next.as_ref().element_value(heap, i) {
+                    if let Some(v) = next.element_value(heap, i) {
                         return Ok(LoadOutcome::Value(v));
                     }
                     if let Some(outcome) = next
-                        .as_ref()
                         .element_dictionary(heap)
                         .and_then(|dict| dictionary_accessor_outcome(heap, dict, i))
                     {
                         return Ok(outcome);
                     }
-                    let next_map = next.as_ref().map(heap);
+                    let next_map = next.map(heap);
                     if next_map
-                        .as_ref()
                         .descriptors()
                         .iter()
                         .any(|d| d.name(heap).ptr_eq(smi_name))
@@ -271,24 +263,21 @@ impl<'a> Tagged<'a, Value> {
     ) -> Option<PropertyDescriptor<'s>> {
         if let Ok(Key::Element(i)) = key.classify_key(heap)
             && let Some(o) = self.as_heap_object()
-            && let Some(dict) = o.as_ref().element_dictionary(heap)
-            && let Some(entry) = dict.as_ref().find(heap, i)
+            && let Some(dict) = o.element_dictionary(heap)
+            && let Some(entry) = dict.find(heap, i)
         {
-            let details = dict.as_ref().details_at(heap, entry);
+            let details = dict.details_at(heap, entry);
             if details & DETAILS_ACCESSOR != 0 {
-                let pair = dict
-                    .as_ref()
-                    .value_at(heap, entry)
-                    .get_as::<AccessorPair>(heap)?;
+                let pair = dict.value_at(heap, entry).get_as::<AccessorPair>(heap)?;
                 return Some(PropertyDescriptor::Accessor {
-                    get: scope.handle(pair.as_ref().get.get(heap)),
-                    set: scope.handle(pair.as_ref().set.get(heap)),
+                    get: scope.handle(pair.get.get(heap)),
+                    set: scope.handle(pair.set.get(heap)),
                     enumerable: details & DETAILS_ENUMERABLE != 0,
                     configurable: details & DETAILS_CONFIGURABLE != 0,
                 });
             }
             return Some(PropertyDescriptor::Data {
-                value: scope.handle(dict.as_ref().value_at(heap, entry)),
+                value: scope.handle(dict.value_at(heap, entry)),
                 writable: details & DETAILS_WRITABLE != 0,
                 enumerable: details & DETAILS_ENUMERABLE != 0,
                 configurable: details & DETAILS_CONFIGURABLE != 0,
@@ -296,7 +285,7 @@ impl<'a> Tagged<'a, Value> {
         }
         if let Ok(Key::Element(i)) = key.classify_key(heap)
             && let Some(o) = self.as_heap_object()
-            && let Some(v) = o.as_ref().element_value(heap, i)
+            && let Some(v) = o.element_value(heap, i)
         {
             return Some(PropertyDescriptor::Data {
                 value: scope.handle(v),
@@ -307,7 +296,7 @@ impl<'a> Tagged<'a, Value> {
         }
         let name = key.as_name();
         let o = self.as_heap_object()?;
-        if let Some(v) = o.as_ref().array_length(heap, name) {
+        if let Some(v) = o.array_length(heap, name) {
             return Some(PropertyDescriptor::Data {
                 value: scope.handle(v),
                 writable: true,
@@ -315,7 +304,7 @@ impl<'a> Tagged<'a, Value> {
                 configurable: false,
             });
         }
-        let map = o.as_ref().map(heap);
+        let map = o.map(heap);
         for d in map.descriptors() {
             if !d.name(heap).ptr_eq(name) {
                 continue;
@@ -333,7 +322,7 @@ impl<'a> Tagged<'a, Value> {
                     configurable: d.flags().is_configurable(),
                 });
             }
-            let slot = o.as_ref().slot(heap, d.offset());
+            let slot = o.slot(heap, d.offset());
             return Some(PropertyDescriptor::Data {
                 value: scope.handle(slot.get(heap)),
                 writable: d.flags().is_writable(),
@@ -347,7 +336,7 @@ impl<'a> Tagged<'a, Value> {
     pub fn has_property(self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> bool {
         // String exotics own `length` and in-range indices
         if let Some(s) = DenseString::from_receiver(heap, self)
-            && s.as_ref().own_key(heap, name).is_some()
+            && s.own_key(heap, name).is_some()
         {
             return true;
         }
@@ -357,11 +346,10 @@ impl<'a> Tagged<'a, Value> {
                 // descriptors; canonicalize so the named walk finds them
                 let smi_name: Tagged<'a, SlotName> = Tagged::from(Smi::new(i as i64));
                 if let Some(obj) = self.as_heap_object()
-                    && (obj.as_ref().element_value(heap, i).is_some()
+                    && (obj.element_value(heap, i).is_some()
                         || obj
-                            .as_ref()
                             .element_dictionary(heap)
-                            .is_some_and(|d| d.as_ref().find(heap, i).is_some()))
+                            .is_some_and(|d| d.find(heap, i).is_some()))
                 {
                     return true;
                 }
@@ -397,7 +385,7 @@ impl<'a> Tagged<'a, Value> {
     /// GetSuperBase happens first).
     pub fn home_proto(self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
         let obj = self.as_heap_object()?;
-        Some(obj.as_ref().prototype(heap))
+        Some(obj.prototype(heap))
     }
 
     pub fn super_lookup(
@@ -427,7 +415,7 @@ impl Lookup<'_> {
                 while i < parents.len() {
                     let parent = parents.at(heap, i);
                     if let Some(obj) = parent.as_heap_object()
-                        && let Some(v) = obj.as_ref().array_length(heap, name)
+                        && let Some(v) = obj.array_length(heap, name)
                     {
                         return Ok(LoadOutcome::Value(v));
                     }
@@ -492,12 +480,9 @@ impl Lookup<'_> {
             return Proxy::get(vm, heap, state, holder, receiver, name);
         }
         state.handle_scope(|scope| -> Result<Coercion<'a>, VmError> {
-            let loaded = {
-                let heap_ref: &Heap = heap;
-                holder
-                    .as_tagged(heap_ref)
-                    .load_outcome_on(heap_ref, name.as_tagged(heap_ref).as_name())?
-            };
+            let loaded = holder
+                .as_tagged(heap)
+                .load_outcome_on(heap, name.as_tagged(heap).as_name())?;
             match loaded {
                 LoadOutcome::Value(v) => {
                     let v = scope.handle(v);
@@ -626,15 +611,13 @@ fn dictionary_accessor_outcome<'a>(
     dict: Tagged<'a, NumberDictionary>,
     i: usize,
 ) -> Option<LoadOutcome<'a>> {
-    let entry = dict.as_ref().find(heap, i)?;
-    if !dict.as_ref().is_accessor_at(heap, entry) {
+    let entry = dict.find(heap, i)?;
+    if !dict.is_accessor_at(heap, entry) {
         return None;
     }
     let getter = dict
-        .as_ref()
         .value_at(heap, entry)
         .get_as::<AccessorPair>(heap)?
-        .as_ref()
         .get
         .get(heap);
     if getter == heap.known().undefined.as_tagged(heap) {
@@ -645,22 +628,21 @@ fn dictionary_accessor_outcome<'a>(
     Some(LoadOutcome::Getter(getter))
 }
 
-impl<'a, T> Tagged<'a, T> {
+impl<'a> Tagged<'a, Value> {
+    /// Lookup on any value: non-objects find nothing (ES [[Get]] walks
+    /// primitives' prototypes only via the caller's coercion).
     #[inline(always)]
     pub fn lookup(self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Lookup<'a> {
         let Some(obj) = self.erase().as_heap_object() else {
             return Lookup::NotFound;
         };
-        obj.as_ref().lookup(heap, name)
+        obj.lookup(heap, name)
     }
 }
 
-impl<'s, T> Handle<'s, T> {
+impl<'s> Handle<'s, Value> {
     #[inline(always)]
-    pub fn lookup<'a>(self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Lookup<'a>
-    where
-        T: 'a,
-    {
+    pub fn lookup<'a>(self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Lookup<'a> {
         self.as_tagged(heap).lookup(heap, name)
     }
 }
@@ -688,7 +670,7 @@ impl Map {
                 return Lookup::Data {
                     map_index: index,
                     holder_index: d.offset(),
-                    slot: receiver.as_ref().slot(heap, d.offset()),
+                    slot: receiver.slot(heap, d.offset()),
                     holder: receiver,
                     flags: d.flags(),
                 };
@@ -728,11 +710,7 @@ impl Object {
                 pair,
             };
         }
-        self.header
-            .map
-            .get(heap)
-            .as_ref()
-            .lookup(heap, receiver, name)
+        self.header.map.get(heap).lookup(heap, receiver, name)
     }
 
     /// The `AccessorPair` of a sparse accessor entry at `index`, when
@@ -744,12 +722,10 @@ impl Object {
     ) -> Option<Tagged<'a, AccessorPair>> {
         let index = index?;
         let dict = self.element_dictionary(heap)?;
-        let entry = dict.as_ref().find(heap, index)?;
-        if !dict.as_ref().is_accessor_at(heap, entry) {
+        let entry = dict.find(heap, index)?;
+        if !dict.is_accessor_at(heap, entry) {
             return None;
         }
-        dict.as_ref()
-            .value_at(heap, entry)
-            .get_as::<AccessorPair>(heap)
+        dict.value_at(heap, entry).get_as::<AccessorPair>(heap)
     }
 }

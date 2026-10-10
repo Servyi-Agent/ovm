@@ -26,7 +26,8 @@ impl WrapperKind {
 }
 
 impl Object {
-    pub fn native_function<'s>(
+    /// Callable + constructable: `new f()` is legal ([[Call]] and [[Construct]]).
+    pub fn native_constructor<'s>(
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
@@ -34,7 +35,8 @@ impl Object {
         Self::make_native_object(heap, scope, index, true)
     }
 
-    pub fn native_plain_function<'s>(
+    /// Callable only: `new f()` throws TypeError ([[Call]] without [[Construct]]).
+    pub fn native_function<'s>(
         heap: &mut Heap,
         scope: &'s HandleScope<'_>,
         index: NativeIndex,
@@ -86,13 +88,11 @@ impl Object {
     ) -> Result<(), VmError> {
         let (vm, heap, state) = thread.split();
         let empty = heap.known().empty_context;
-        let closure = {
-            let program = compile(src, bytecode::SourceMode::Script).map_err(|e| {
-                eprintln!("{name} prelude compile error: {e}");
-                VmError::Type
-            })?;
-            Materialize::closure_vm(vm, heap, state, scope, &program, empty)?
-        };
+        let program = compile(src, bytecode::SourceMode::Script).map_err(|e| {
+            eprintln!("{name} prelude compile error: {e}");
+            VmError::Type
+        })?;
+        let closure = Materialize::closure_vm(vm, heap, state, scope, &program, empty)?;
         let (vm, heap, state) = thread.split();
         let exception = heap.known().exception.as_tagged(heap).raw();
         let result = HostCtx::enter(
@@ -120,7 +120,7 @@ impl Object {
         proto_parent: Handle<'_, Object>,
     ) -> Result<(Handle<'s, Object>, Handle<'s, Object>), VmError> {
         let name_str = thread.intern(scope, name);
-        let fn_obj = Self::native_function(thread.heap(), scope, index)?;
+        let fn_obj = Self::native_constructor(thread.heap(), scope, index)?;
 
         // prototype object: fresh extendable object chained to proto_parent
         let map = thread.heap().allocate_handle::<Map>(
@@ -191,29 +191,6 @@ impl Object {
         )?;
         Ok(())
     }
-
-    /// Install a non-constructor native function (`Function.prototype.call`-
-    /// style) as an own method of `receiver`.
-    pub fn install_plain_method(
-        thread: &mut Thread,
-        scope: &HandleScope<'_>,
-        receiver: Handle<'_, Object>,
-        name: &str,
-        index: NativeIndex,
-    ) -> Result<(), VmError> {
-        let method = Self::native_plain_function(thread.heap(), scope, index)?;
-        let name_str = thread.intern(scope, name);
-        // Safety: fresh interned word, rooted below before any allocation.
-        let method_name = scope.handle(name_str.as_tagged(&*thread.heap()));
-        Object::define_own_property(
-            thread.heap(),
-            scope,
-            receiver,
-            method_name,
-            PropertyDescriptor::method(method.erase()),
-        )?;
-        Ok(())
-    }
 }
 
 impl<'a> Tagged<'a, Value> {
@@ -234,11 +211,11 @@ impl<'a> Tagged<'a, Value> {
         let Some(obj) = self.as_heap_object() else {
             return Err(VmError::Type);
         };
-        let map = obj.as_ref().map(heap);
+        let map = obj.map(heap);
         if !map.kind().contains(MapKind::PRIMITIVE_WRAPPER) {
             return Err(VmError::Type);
         }
-        let value = obj.as_ref().slots(heap).at(heap, 0);
+        let value = obj.slots(heap).at(heap, 0);
         if kind.matches(heap, value) {
             Ok(value)
         } else {

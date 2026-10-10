@@ -110,9 +110,9 @@ fn lookup_finds_handler_inside_range() {
             let heap = &*thread.heap();
             let table = t.as_tagged(heap);
             // try_start is inside (inclusive) ...
-            assert_eq!(table.as_ref().lookup(5), Some(100));
+            assert_eq!(table.lookup(5), Some(100));
             // ... as is any offset before try_end
-            assert_eq!(table.as_ref().lookup(14), Some(100));
+            assert_eq!(table.lookup(14), Some(100));
         };
     });
 }
@@ -128,11 +128,11 @@ fn lookup_returns_none_outside_range() {
             let heap = &*thread.heap();
             let table = t.as_tagged(heap);
             // before the region ...
-            assert_eq!(table.as_ref().lookup(4), None);
+            assert_eq!(table.lookup(4), None);
             // ... try_end is exclusive ...
-            assert_eq!(table.as_ref().lookup(15), None);
+            assert_eq!(table.lookup(15), None);
             // ... and beyond it
-            assert_eq!(table.as_ref().lookup(16), None);
+            assert_eq!(table.lookup(16), None);
         };
     });
 }
@@ -157,10 +157,10 @@ fn lookup_returns_innermost_of_nested_ranges() {
             let heap = &*thread.heap();
             let table = t.as_tagged(heap);
             // inside both ranges: the innermost (largest try_start) wins
-            assert_eq!(table.as_ref().lookup(5), Some(300));
+            assert_eq!(table.lookup(5), Some(300));
             // inside the outer range only
-            assert_eq!(table.as_ref().lookup(1), Some(100));
-            assert_eq!(table.as_ref().lookup(15), Some(100));
+            assert_eq!(table.lookup(1), Some(100));
+            assert_eq!(table.lookup(15), Some(100));
         };
     });
 }
@@ -176,7 +176,7 @@ fn lookup_on_empty_table_returns_none() {
             let heap = &*thread.heap();
             let table = t.as_tagged(heap);
             assert_eq!(table.len(), 0);
-            assert_eq!(table.as_ref().lookup(0), None);
+            assert_eq!(table.lookup(0), None);
         };
     });
 }
@@ -197,9 +197,9 @@ fn callable_info_carries_handler_table() {
         );
         let heap = &*thread.heap();
         let o = unsafe { Tagged::<vm::Object>::from_value_unchecked(f) };
-        let info = o.as_ref().callable_info(heap).unwrap();
+        let info = o.callable_info(heap).unwrap();
         let table = info.handlers.get(heap).expect("handler table attached");
-        table.as_ref().lookup(5)
+        table.lookup(5)
     });
     assert_eq!(result, Some(33));
 }
@@ -213,7 +213,7 @@ fn callable_info_without_handler_table() {
         let f = callable(thread, &scope, &[], &[], 0, None);
         let heap = &*thread.heap();
         let o = unsafe { Tagged::<vm::Object>::from_value_unchecked(f) };
-        let info = o.as_ref().callable_info(heap).unwrap();
+        let info = o.callable_info(heap).unwrap();
         assert!(
             info.handlers.get(heap).is_none(),
             "a hole handlers slot must mean no table"

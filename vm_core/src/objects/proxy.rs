@@ -128,7 +128,7 @@ fn parts<'a>(
     proxy: Tagged<'a, Value>,
 ) -> Option<(Tagged<'a, Value>, Tagged<'a, Value>)> {
     let p = proxy.get_as::<ProxyObject>(heap)?;
-    Some(p.as_ref().parts(heap))
+    Some(p.parts(heap))
 }
 
 enum TrapLookup<'s> {
@@ -283,7 +283,7 @@ fn is_extensible_h(
         return Ok(Flow::Value({
             obj.as_tagged(heap)
                 .as_heap_object()
-                .is_some_and(|o| o.as_ref().map(heap).kind().is_extendable())
+                .is_some_and(|o| o.map(heap).kind().is_extendable())
         }));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
@@ -302,7 +302,7 @@ fn is_extensible_h(
                 Coercion::Threw => return Ok(Flow::Threw),
                 Coercion::Value(v) => scope.handle(v),
             };
-            Ok(Flow::Value({ result.as_tagged(heap).is_truthy(heap) }))
+            Ok(Flow::Value(result.as_tagged(heap).is_truthy(heap)))
         }
     }
 }
@@ -393,7 +393,7 @@ fn define_internal_h<'s>(
         let on_array = obj
             .as_tagged(heap)
             .as_heap_object()
-            .is_some_and(|o| o.as_ref().is_array(heap));
+            .is_some_and(|o| o.is_array(heap));
         if !on_array {
             break 'element None;
         }
@@ -423,20 +423,12 @@ fn define_internal_h<'s>(
         let array = scope
             .cast::<Object>(heap, obj.as_tagged(heap))
             .expect("array checked above");
-        if array
-            .as_tagged(heap)
-            .as_ref()
-            .map(heap)
-            .as_ref()
-            .kind()
-            .is_dense_elements()
-        {
+        if array.as_tagged(heap).map(heap).kind().is_dense_elements() {
             Object::normalize_elements(heap, scope, &array);
         }
         let dict = scope.handle(
             array
                 .as_tagged(heap)
-                .as_ref()
                 .element_dictionary(heap)
                 .ok_or(VmError::Type)?,
         );
@@ -483,17 +475,14 @@ fn define_internal_h<'s>(
         }
         let array_ref = array.as_tagged(heap);
         let host = array_ref.erase();
-        array_ref.as_ref().elements.set(
+        array_ref.elements.set(
             heap,
             host,
             // Safety: dictionary mode was established above.
             unsafe { Tagged::from_value_unchecked(table.as_tagged(heap).erase().raw()) },
         );
-        if i >= array_ref.as_ref().length() {
-            array_ref
-                .as_ref()
-                .length
-                .set(heap, host, Smi::new((i + 1) as i64));
+        if i >= array_ref.length() {
+            array_ref.length.set(heap, host, Smi::new((i + 1) as i64));
         }
         Prototype::element_mutated(heap, array_ref);
         return Ok(Flow::Value(true));
@@ -529,7 +518,7 @@ fn ordinary_set_forward<'a>(
         target
             .as_tagged(heap)
             .as_heap_object()
-            .is_some_and(|o| o.as_ref().is_array(heap)),
+            .is_some_and(|o| o.is_array(heap)),
     );
     if let (true, true) = classified {
         let partial = create_data_partial(scope, value);
@@ -553,9 +542,7 @@ fn ordinary_set_forward<'a>(
                 SetLookup::DataReadonly
             }
         }
-        Lookup::Accessor { pair, .. } => {
-            SetLookup::Setter(scope.handle(pair.as_ref().set.get(heap)))
-        }
+        Lookup::Accessor { pair, .. } => SetLookup::Setter(scope.handle(pair.set.get(heap))),
         Lookup::NotFound => SetLookup::NotFound,
     };
     match lookup {
@@ -898,10 +885,12 @@ fn proxy_define_h(
                     }
                 }
                 Some(d) => {
-                    let compatible = {
-                        let p = partial;
-                        Transition::is_compatible_property_descriptor(heap, extensible, &p, Some(d))
-                    };
+                    let compatible = Transition::is_compatible_property_descriptor(
+                        heap,
+                        extensible,
+                        &partial,
+                        Some(d),
+                    );
                     if !compatible {
                         return Err(VmError::Message(Message::ProxyDefineIncompatible));
                     }
@@ -995,13 +984,12 @@ fn construct_h<'a>(
                 .as_tagged(heap)
                 .as_heap_object()
                 .and_then(|obj| {
-                    obj.as_ref()
-                        .header
+                    obj.header
                         .map
                         .get(heap)
                         .kind()
                         .is_class_constructor()
-                        .then(|| obj.as_ref().callable_info(heap))
+                        .then(|| obj.callable_info(heap))
                 })
                 .flatten()
                 .is_some_and(|info| info.function_kind().is_derived_class_constructor());
@@ -1173,7 +1161,7 @@ fn is_extensible_entry_h<'a>(
         let extensible = obj
             .as_tagged(heap)
             .as_heap_object()
-            .is_some_and(|o| o.as_ref().map(heap).kind().is_extendable());
+            .is_some_and(|o| o.map(heap).kind().is_extendable());
         return Ok(Coercion::Value(Convert::boolean(heap, extensible)));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
@@ -1211,7 +1199,7 @@ impl Proxy {
     pub fn is_proxy<'a>(heap: &'a Heap, v: Tagged<'a, Value>) -> bool {
         // bit test on the already-loaded map kind, no kind decode/match
         v.as_heap_object()
-            .is_some_and(|obj| obj.as_ref().map(heap).kind().is_proxy())
+            .is_some_and(|obj| obj.map(heap).kind().is_proxy())
     }
 
     /// Whether `v` is a valid ECMAScript receiver ([[ProxyTarget]] /
@@ -1221,13 +1209,7 @@ impl Proxy {
         let Some(obj) = v.as_heap_object() else {
             return false;
         };
-        obj.as_ref()
-            .header
-            .map
-            .get(heap)
-            .kind()
-            .kind()
-            .is_js_receiver()
+        obj.header.map.get(heap).kind().kind().is_js_receiver()
     }
 
     pub fn allocate<'a>(
@@ -1244,7 +1226,6 @@ impl Proxy {
                 .as_tagged(heap)
                 .as_heap_object()
                 .expect("proxy target must be a JSReceiver")
-                .as_ref()
                 .header
                 .map
                 .get(heap)
@@ -1269,13 +1250,13 @@ impl Proxy {
         let Some(p) = proxy.get_as::<ProxyObject>(heap) else {
             return;
         };
-        if p.as_ref().is_revoked(heap) {
+        if p.is_revoked(heap) {
             return;
         }
         let host = proxy.erase();
         let null = heap.known().null.as_tagged(heap).erase();
-        p.as_ref().target.set(heap, host, null);
-        p.as_ref().handler.set(heap, host, null);
+        p.target.set(heap, host, null);
+        p.handler.set(heap, host, null);
     }
 
     pub fn internal_own_descriptor<'s>(

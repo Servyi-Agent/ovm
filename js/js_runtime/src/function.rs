@@ -94,14 +94,11 @@ pub fn function_bind<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
-    let raw_f = {
-        let f = args.get(heap, 0);
-        let f = f;
-        if !f.is_callable(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
-        f.raw()
-    };
+    let f = args.get(heap, 0);
+    if !f.is_callable(heap) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
+    let raw_f = f.raw();
     // the args window is rooted for the call; re-read at the point of use
     let raw_this_arg = args.get(heap, 1).raw();
     let prepend: Vec<Value> = (2..args.len()).map(|i| args.get(heap, i).raw()).collect();
@@ -113,24 +110,22 @@ pub fn function_bind<'a>(
         let f = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw_f) });
         let this_arg = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw_this_arg) });
         // Function.prototype.__makeBound (installed by BIND_PRELUDE)
-        let make_bound = {
-            let name = vm
-                .interner()
-                .intern_str(heap, &scope, "__makeBound")
-                .erase();
-            let proto = heap.known().function_prototype.erase();
-            match rt_try!(
-                vm,
-                heap,
-                state,
-                Lookup::get_property_on(vm, heap, state, proto, proto, name)
-            ) {
-                Coercion::Threw => {
-                    return heap.known().exception.as_tagged(heap).erase();
-                }
-                // Safety: fresh word from the lookup, rooted immediately.
-                Coercion::Value(v) => scope.handle(v),
+        let name = vm
+            .interner()
+            .intern_str(heap, &scope, "__makeBound")
+            .erase();
+        let proto = heap.known().function_prototype.erase();
+        let make_bound = match rt_try!(
+            vm,
+            heap,
+            state,
+            Lookup::get_property_on(vm, heap, state, proto, proto, name)
+        ) {
+            Coercion::Threw => {
+                return heap.known().exception.as_tagged(heap).erase();
             }
+            // Safety: fresh word from the lookup, rooted immediately.
+            Coercion::Value(v) => scope.handle(v),
         };
         let staged = scope.stage(
             &prepend

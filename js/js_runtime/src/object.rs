@@ -265,10 +265,7 @@ pub fn object_property_is_enumerable<'a>(
                 Lookup::Accessor {
                     holder, map_index, ..
                 } => holder
-                    .as_ref()
-                    .header
-                    .map
-                    .get(heap)
+                    .map(heap)
                     .descriptor(map_index)
                     .flags()
                     .is_enumerable(),
@@ -531,11 +528,10 @@ pub fn object_prevent_extensions<'a>(
     state.handle_scope(|scope| {
         let target = args.get(heap, 1);
         let target = scope.handle(target);
-        let nullish = {
-            let null = heap.known().null.as_tagged(heap).raw();
-            let undefined = heap.known().undefined.as_tagged(heap).raw();
-            target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined
-        };
+        let null = heap.known().null.as_tagged(heap).raw();
+        let undefined = heap.known().undefined.as_tagged(heap).raw();
+        let nullish =
+            target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined;
         if nullish {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
@@ -678,12 +674,9 @@ pub fn object_seal<'a>(
         vm, heap, state, ..
     } = nctx;
     let target = args.get_handle(heap, 1);
-    let nullish = {
-        let target = target.as_tagged(heap);
-        let null = heap.known().null.as_tagged(heap).raw();
-        let undefined = heap.known().undefined.as_tagged(heap).raw();
-        target.raw() == null || target.raw() == undefined
-    };
+    let null = heap.known().null.as_tagged(heap).raw();
+    let undefined = heap.known().undefined.as_tagged(heap).raw();
+    let nullish = target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined;
     if nullish {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
@@ -737,12 +730,9 @@ pub fn object_freeze<'a>(
         vm, heap, state, ..
     } = nctx;
     let target = args.get_handle(heap, 1);
-    let nullish = {
-        let target = target.as_tagged(heap);
-        let null = heap.known().null.as_tagged(heap).raw();
-        let undefined = heap.known().undefined.as_tagged(heap).raw();
-        target.raw() == null || target.raw() == undefined
-    };
+    let null = heap.known().null.as_tagged(heap).raw();
+    let undefined = heap.known().undefined.as_tagged(heap).raw();
+    let nullish = target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined;
     if nullish {
         return raise_runtime(vm, heap, state, VmError::Type);
     }

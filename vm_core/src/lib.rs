@@ -223,7 +223,7 @@ impl ThreadState {
         }
         // Safety: the slot only ever holds this module's table.
         let table: Tagged<'a, WeakFixedArray> = unsafe { core::mem::transmute(word.raw()) };
-        let t = table.as_ref();
+        let t = table;
         let mask = t.len() / 5 - 1;
         let mut i = ((closure.raw().to_bits() >> 5) as usize) & mask;
         for _ in 0..=mask {
@@ -236,11 +236,11 @@ impl ThreadState {
                     let fn_map = t.get(heap, base + 1);
                     let proto = t.get(heap, base + 2);
                     let offset = Smi::decode(t.get(heap, base + 3).raw())?.value() as usize;
-                    let map_now = closure.as_ref().map(heap);
+                    let map_now = closure.map(heap);
                     if fn_map.raw() != map_now.raw() {
                         return None;
                     }
-                    if closure.as_ref().slot(heap, offset).raw() != proto.raw() {
+                    if closure.slot(heap, offset).raw() != proto.raw() {
                         return None;
                     }
                     // Safety: written only by `construct_cache_insert` with
@@ -297,7 +297,7 @@ impl ThreadState {
             // allocation-free from here: every word is read through a root
             let table: Tagged<WeakFixedArray> =
                 unsafe { Tagged::from_value_unchecked(self.construct_cache.get(heap).raw()) };
-            let t = table.as_ref();
+            let t = table;
             let mask = t.len() / 5 - 1;
             let fn_map = closure.as_tagged(heap).map(heap);
             let mut i = ((closure.as_tagged(heap).raw().to_bits() >> 5) as usize) & mask;

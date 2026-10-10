@@ -36,7 +36,7 @@ impl Compare {
         }
         if let (Some(sx), Some(sy)) = (x.get_as::<DenseString>(heap), y.get_as::<DenseString>(heap))
         {
-            return sx.as_ref().content_eq(heap, sy.as_ref());
+            return sx.content_eq(heap, sy);
         }
         false
     }
@@ -126,7 +126,7 @@ impl Compare {
         }
         if let (Some(sx), Some(sy)) = (x.get_as::<DenseString>(heap), y.get_as::<DenseString>(heap))
         {
-            return sx.as_ref().content_eq(heap, sy.as_ref());
+            return sx.content_eq(heap, sy);
         }
         false
     }
@@ -138,8 +138,8 @@ impl Compare {
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
     ) -> Option<core::cmp::Ordering> {
-        let sx = x.get_as::<DenseString>(heap)?.as_ref();
-        let sy = y.get_as::<DenseString>(heap)?.as_ref();
+        let sx = x.get_as::<DenseString>(heap)?;
+        let sy = y.get_as::<DenseString>(heap)?;
         Some(sx.data(heap).cmp(&sy.data(heap)))
     }
 

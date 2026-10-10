@@ -164,14 +164,9 @@ impl DenseString {
         receiver: Tagged<'a, Value>,
     ) -> Option<Tagged<'a, DenseString>> {
         let obj = receiver.as_heap_object()?;
-        let kind = obj.as_ref().map(heap).kind();
+        let kind = obj.map(heap).kind();
         if kind.contains(MapKind::PRIMITIVE_WRAPPER) {
-            return obj
-                .as_ref()
-                .slots
-                .get(heap)
-                .at(heap, 0)
-                .get_as::<DenseString>(heap);
+            return obj.slots.get(heap).at(heap, 0).get_as::<DenseString>(heap);
         }
         if kind.kind() == ObjectKind::DenseString {
             // Safety: the map kind is DenseString, so the view is exact.
@@ -207,7 +202,7 @@ impl DenseString {
         key: Tagged<'_, Value>,
     ) -> Option<PropertyDescriptor<'s>> {
         let s = Self::from_receiver(heap, receiver)?;
-        match s.as_ref().own_key(heap, key.as_name())? {
+        match s.own_key(heap, key.as_name())? {
             StringOwn::Length(len) => Some(PropertyDescriptor::Data {
                 value: scope.handle(Smi::new(len as i64).into_tagged()),
                 writable: false,
@@ -215,7 +210,7 @@ impl DenseString {
                 configurable: false,
             }),
             StringOwn::Index(i) => {
-                let unit = s.as_ref().code_unit(heap, i);
+                let unit = s.code_unit(heap, i);
                 let value = DenseString::from_units(heap, scope, &[unit]).erase();
                 Some(PropertyDescriptor::Data {
                     value,
@@ -240,7 +235,7 @@ impl DenseString {
             return None;
         };
         let s = Self::from_receiver(heap, receiver.as_tagged(heap))?;
-        let unit = (i < s.as_ref().len()).then(|| s.as_ref().code_unit(heap, i))?;
+        let unit = (i < s.len()).then(|| s.code_unit(heap, i))?;
         Some(
             Self::from_units(heap, scope, &[unit])
                 .as_tagged(heap)
@@ -257,7 +252,7 @@ impl DenseString {
         // word read from the header is promoted unsafely; only its kind
         // bits are read and the map cannot move under the GC callback.
         let map = header.map.raw();
-        let map_ref = unsafe { Tagged::<Map>::from_value_unchecked(map) }.as_ref();
+        let map_ref = unsafe { Tagged::<Map>::from_value_unchecked(map) };
         if map_ref.kind().contains(MapKind::LATIN1) {
             Encoding::Latin1
         } else {
@@ -306,7 +301,7 @@ impl DenseString {
         (h != 0).then_some(h)
     }
 
-    pub fn content_eq(&self, heap: &Heap, other: &DenseString) -> bool {
+    pub fn content_eq(&self, heap: &Heap, other: Tagged<'_, DenseString>) -> bool {
         if let (Some(a), Some(b)) = (self.cached_hash(), other.cached_hash())
             && a != b
         {
@@ -377,22 +372,17 @@ impl DenseString {
         a: Handle<'_, Value>,
         b: Handle<'_, Value>,
     ) -> Handle<'s, DenseString> {
-        let units = {
-            let sa = a
-                .as_tagged(heap)
-                .get_as::<DenseString>(heap)
-                .expect("concat operand must be a string")
-                .as_ref();
-            let sb = b
-                .as_tagged(heap)
-                .get_as::<DenseString>(heap)
-                .expect("concat operand must be a string")
-                .as_ref();
-            let mut out = Vec::with_capacity(sa.len() + sb.len());
-            sa.data(heap).write_units(&mut out);
-            sb.data(heap).write_units(&mut out);
-            out
-        };
+        let sa = a
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .expect("concat operand must be a string");
+        let sb = b
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .expect("concat operand must be a string");
+        let mut units = Vec::with_capacity(sa.len() + sb.len());
+        sa.data(heap).write_units(&mut units);
+        sb.data(heap).write_units(&mut units);
         Self::from_units(heap, scope, &units)
     }
 }

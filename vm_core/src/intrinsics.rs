@@ -182,12 +182,12 @@ fn delete_property_core(
     key: Handle<'_, Value>,
 ) -> Result<bool, VmError> {
     // ToObject (ES 7.2.3): a null/undefined base throws
-    let nullish = {
-        let target = target.as_tagged(heap);
-        let null = heap.known().null.as_tagged(heap);
-        let undefined = heap.known().undefined.as_tagged(heap);
-        target.ptr_eq(null) || target.ptr_eq(undefined)
-    };
+    let nullish = target
+        .as_tagged(heap)
+        .ptr_eq(heap.known().null.as_tagged(heap).erase())
+        || target
+            .as_tagged(heap)
+            .ptr_eq(heap.known().undefined.as_tagged(heap).erase());
     if nullish {
         return Err(VmError::Type);
     }
@@ -195,9 +195,7 @@ fn delete_property_core(
     // for primitives and String wrappers alike (ES 10.4.3.4); every other
     // primitive property deletes as absent (true).
     if let Some(s) = DenseString::from_receiver(heap, target.as_tagged(heap))
-        && s.as_ref()
-            .own_key(heap, key.as_tagged(heap).as_name())
-            .is_some()
+        && s.own_key(heap, key.as_tagged(heap).as_name()).is_some()
     {
         return Ok(false);
     }
@@ -404,14 +402,13 @@ fn for_in_level_keys<'s>(
         let Some(obj) = level.as_heap_object() else {
             break 'keys (indices, names);
         };
-        let obj = obj.as_ref();
+        let obj = obj;
         // array elements: non-hole indices ascending
         if obj.is_array(heap) {
             if let Some(dict) = obj.element_dictionary(heap) {
                 // sparse: collect the live keys, then sort
                 let mut keys: Vec<i64> = Vec::new();
-                dict.as_ref()
-                    .for_each_entry(heap, |k, _, _| keys.push(k as i64));
+                dict.for_each_entry(heap, |k, _, _| keys.push(k as i64));
                 keys.sort_unstable();
                 indices.extend(keys);
             } else {
@@ -447,7 +444,7 @@ fn for_in_level_keys<'s>(
             let index = name
                 .erase()
                 .get_as::<DenseString>(heap)
-                .and_then(|s| s.as_ref().data(heap).canonical_index())
+                .and_then(|s| s.data(heap).canonical_index())
                 .filter(|i| *i < u32::MAX as usize);
             match index {
                 Some(i) => indices.push(i as i64),
@@ -501,7 +498,7 @@ fn for_in_next<'a>(
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
                     return raise_runtime(vm, heap, state, VmError::Type);
                 };
-                let slots = obj.as_ref().slots(heap);
+                let slots = obj.slots(heap);
                 let keys = rt_try!(
                     vm,
                     heap,
@@ -526,12 +523,10 @@ fn for_in_next<'a>(
             };
             let Some(key) = candidate else {
                 // snapshot exhausted: advance to the live prototype
-                let level = {
-                    let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                        return raise_runtime(vm, heap, state, VmError::Type);
-                    };
-                    scope.handle(obj.as_ref().slots(heap).at(heap, FOR_IN_LEVEL))
+                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
+                    return raise_runtime(vm, heap, state, VmError::Type);
                 };
+                let level = scope.handle(obj.slots(heap).at(heap, FOR_IN_LEVEL));
                 let Some(proto) = rt_try!(vm, heap, state, for_in_next_level(heap, &scope, level))
                 else {
                     return heap.known().undefined.as_tagged(heap).erase();
@@ -542,7 +537,7 @@ fn for_in_next<'a>(
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
                     return raise_runtime(vm, heap, state, VmError::Type);
                 };
-                let slots = obj.as_ref().slots(heap);
+                let slots = obj.slots(heap);
                 slots.set(heap, FOR_IN_LEVEL, proto.as_tagged(heap).erase());
                 slots.set(heap, FOR_IN_KEYS, keys.as_tagged(heap).erase());
                 slots.set(heap, FOR_IN_INDEX, Smi::new(0).into_tagged());
@@ -550,19 +545,39 @@ fn for_in_next<'a>(
             };
             // lazy [[GetOwnProperty]] on the key's own level: a key
             // deleted since the snapshot is skipped without registering
-            let level = {
-                let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                    return raise_runtime(vm, heap, state, VmError::Type);
-                };
-                obj.as_ref().slots(heap).at(heap, FOR_IN_LEVEL)
+            let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
+                return raise_runtime(vm, heap, state, VmError::Type);
             };
+            let level = obj.slots(heap).at(heap, FOR_IN_LEVEL);
             let own = for_in_own_state(heap, level, key.as_tagged(heap));
             let Some(enumerable) = own else {
                 continue;
             };
             // already registered (yielded earlier, or shadowing
             // non-enumerable on a closer level): skip
-            let seen = {
+            let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            };
+            let visited = rt_try!(
+                vm,
+                heap,
+                state,
+                obj.slots
+                    .get(heap)
+                    .at(heap, FOR_IN_VISITED)
+                    .get_as::<FixedArray>(heap)
+                    .ok_or(VmError::Type)
+            );
+            let key_word = key.as_tagged(heap);
+            let seen = visited
+                .as_slice()
+                .iter()
+                .any(|s| s.get(heap).ptr_eq(key_word));
+            if seen {
+                continue;
+            }
+            // register the key — yielded or shadowing, both at most once
+            {
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
                     return raise_runtime(vm, heap, state, VmError::Type);
                 };
@@ -570,51 +585,21 @@ fn for_in_next<'a>(
                     vm,
                     heap,
                     state,
-                    obj.as_ref()
-                        .slots
+                    obj.slots
                         .get(heap)
                         .at(heap, FOR_IN_VISITED)
                         .get_as::<FixedArray>(heap)
                         .ok_or(VmError::Type)
                 );
-                let key_word = key.as_tagged(heap);
-                visited
-                    .as_slice()
-                    .iter()
-                    .any(|s| s.get(heap).ptr_eq(key_word))
-            };
-            if seen {
-                continue;
-            }
-            // register the key — yielded or shadowing, both at most once
-            {
-                let visited = {
-                    let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
-                        return raise_runtime(vm, heap, state, VmError::Type);
-                    };
-                    let visited = rt_try!(
-                        vm,
-                        heap,
-                        state,
-                        obj.as_ref()
-                            .slots
-                            .get(heap)
-                            .at(heap, FOR_IN_VISITED)
-                            .get_as::<FixedArray>(heap)
-                            .ok_or(VmError::Type)
-                    );
-                    let mut words: Vec<Tagged<'_, Value>> =
-                        visited.as_slice().iter().map(|s| s.get(heap)).collect();
-                    words.push(key.as_tagged(heap));
-                    words
-                };
+                let mut visited: Vec<Tagged<'_, Value>> =
+                    visited.as_slice().iter().map(|s| s.get(heap)).collect();
+                visited.push(key.as_tagged(heap));
                 let staged = scope.stage(&visited);
                 let visited = heap.allocate_handle::<FixedArray>(staged, &scope);
                 let Some(obj) = enumerator.as_tagged(heap).as_heap_object() else {
                     return raise_runtime(vm, heap, state, VmError::Type);
                 };
-                obj.as_ref()
-                    .slots(heap)
+                obj.slots(heap)
                     .set(heap, FOR_IN_VISITED, visited.as_tagged(heap).erase());
             }
             if !enumerable {
@@ -662,7 +647,7 @@ fn for_in_next_level<'s>(
     let Some(obj) = level.as_heap_object() else {
         return Ok(None);
     };
-    let proto = obj.as_ref().prototype(heap);
+    let proto = obj.prototype(heap);
     let hole = heap.known().the_hole.as_tagged(heap);
     if proto.ptr_eq(hole) || proto.ptr_eq(heap.known().null.as_tagged(heap)) {
         return Ok(None);
@@ -687,7 +672,7 @@ fn for_in_own_state(heap: &Heap, level: Tagged<'_, Value>, key: Tagged<'_, Value
                 return Some((i as u64) < s.len() as u64);
             }
             let obj = level.as_heap_object()?;
-            let obj = obj.as_ref();
+            let obj = obj;
             if obj.is_array(heap) {
                 return obj.element_value(heap, i).is_some().then_some(true);
             }
@@ -702,12 +687,12 @@ fn for_in_own_state(heap: &Heap, level: Tagged<'_, Value>, key: Tagged<'_, Value
         Key::Name(name) => {
             // string exotics: indices are enumerable, "length" is not
             if let Some(s) = DenseString::from_receiver(heap, level)
-                && let Some(own) = s.as_ref().own_key(heap, name)
+                && let Some(own) = s.own_key(heap, name)
             {
                 return Some(matches!(own, StringOwn::Index(_)));
             }
             let obj = level.as_heap_object()?;
-            let obj = obj.as_ref();
+            let obj = obj;
 
             // arrays hold "length" outside the descriptors (never a
             // snapshot key) — any other name lives in them
@@ -960,7 +945,7 @@ fn copy_data_properties<'a>(
             let Some(obj) = source.as_tagged(heap).as_heap_object() else {
                 return target.as_tagged(heap);
             };
-            let obj = obj.as_ref();
+            let obj = obj;
             if obj.is_array(heap) {
                 let len = obj
                     .length()
@@ -1137,18 +1122,9 @@ fn set_class_fields<'a>(
     let fields = args.get_handle(heap, 1);
     let mut ok = false;
     if let Some(obj) = ctor.as_tagged(heap).as_heap_object() {
-        let slots = obj.as_ref().slots(heap);
-        if obj
-            .as_ref()
-            .header
-            .map
-            .get(heap)
-            .kind()
-            .is_class_constructor()
-            && slots.len() >= 3
-        {
+        let slots = obj.slots(heap);
+        if obj.map(heap).kind().is_class_constructor() && slots.len() >= 3 {
             slots
-                .as_ref()
                 .element_slot(2)
                 .set(heap, ctor.as_tagged(heap), fields.as_tagged(heap));
             ok = true;
@@ -1174,16 +1150,14 @@ fn init_instance_fields<'a>(
     let ctor = args.get_handle(heap, 0);
     let instance = args.get_handle(heap, 1);
     state.handle_scope(|scope| -> Tagged<'a, Value> {
-        let fields = {
-            let Some(obj) = ctor.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            };
-            let slots = obj.as_ref().slots(heap);
-            if slots.len() < 3 {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            }
-            slots.at(heap, 2)
+        let Some(obj) = ctor.as_tagged(heap).as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
         };
+        let slots = obj.slots(heap);
+        if slots.len() < 3 {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let fields = slots.at(heap, 2);
         if fields.ptr_eq(heap.known().undefined.as_tagged(heap)) {
             return instance.as_tagged(heap);
         }
@@ -1192,14 +1166,14 @@ fn init_instance_fields<'a>(
         let count = fields
             .as_tagged(heap)
             .as_heap_object()
-            .map(|o| o.as_ref().length())
+            .map(|o| o.length())
             .unwrap_or(0);
         let mut i = 0;
         while i + 1 < count {
             let raw_key = fields
                 .as_tagged(heap)
                 .as_heap_object()
-                .and_then(|o| o.as_ref().element_value(heap, i))
+                .and_then(|o| o.element_value(heap, i))
                 .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase());
             // computed keys need ToPropertyKey canonicalization
             let Some(key) = rt_try!(
@@ -1215,12 +1189,10 @@ fn init_instance_fields<'a>(
             let init = fields
                 .as_tagged(heap)
                 .as_heap_object()
-                .and_then(|o| o.as_ref().element_value(heap, i + 1))
+                .and_then(|o| o.element_value(heap, i + 1))
                 .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase());
-            let call_args = {
-                let inst = instance.as_tagged(heap);
-                scope.stage(&[inst])
-            };
+            let inst = instance.as_tagged(heap);
+            let call_args = scope.stage(&[inst]);
             let value = scope.handle(rt_try!(
                 vm,
                 heap,
@@ -1287,8 +1259,8 @@ fn dynamic_slot<'a>(
     // pointer identity decides — no content comparison in lookup
     name.get_as::<DenseString>(heap).ok_or(VmError::Type)?;
     loop {
-        let ctx = context.as_ref();
-        let names = ctx.scope_info.get(heap).as_ref().names.get(heap);
+        let ctx = *context;
+        let names = ctx.scope_info.get(heap).names.get(heap);
         for i in 0..names.len() {
             if names.at(heap, i) == name {
                 return Ok(ctx.slots.get(heap).as_ref().element_slot(i));
@@ -1367,11 +1339,9 @@ fn apply_store_outcome(
             })
         }
         StoreOutcome::CallSetter { setter } => state.handle_scope(|scope| {
-            let call_args = {
-                let recv = receiver.as_tagged(heap);
-                let val = value.as_tagged(heap);
-                scope.stage(&[recv, val])
-            };
+            let recv = receiver.as_tagged(heap);
+            let val = value.as_tagged(heap);
+            let call_args = scope.stage(&[recv, val]);
             let result = HostCtx::enter(vm, heap, state, setter, call_args, None)?;
             let word = result.raw();
             Ok(word == heap.known().exception.as_tagged(heap).erase().raw())
@@ -1406,18 +1376,14 @@ fn get_property_lenient<'a>(
             return v.as_tagged(heap);
         }
         let getter = getter.expect("one of the two arms is set");
-        let skip = {
-            let getter_tagged = getter.as_tagged(heap);
-            getter_tagged.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
-                || !getter_tagged.is_callable(heap)
-        };
+        let getter_tagged = getter.as_tagged(heap);
+        let skip = getter_tagged.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+            || !getter_tagged.is_callable(heap);
         if skip {
             return heap.known().undefined.as_tagged(heap).erase();
         }
-        let call_args = {
-            let recv = receiver.as_tagged(heap);
-            scope.stage(&[recv])
-        };
+        let recv = receiver.as_tagged(heap);
+        let call_args = scope.stage(&[recv]);
         match HostCtx::enter(vm, heap, state, getter, call_args, None).map(|v| v.raw()) {
             Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
             Err(err) => return raise_runtime(vm, heap, state, err),
@@ -1463,19 +1429,16 @@ fn set_function_name<'a>(
             state,
             Convert::to_string(heap, &scope, key)
         ));
-        let units = {
-            let s = text
-                .as_tagged(heap)
-                .get_as::<DenseString>(heap)
-                .expect("ToString yields a string");
-            let mut full: Vec<u16> = match prefix {
-                1 => b"get ".iter().map(|&b| b as u16).collect(),
-                2 => b"set ".iter().map(|&b| b as u16).collect(),
-                _ => Vec::new(),
-            };
-            s.as_ref().data(heap).write_units(&mut full);
-            full
+        let s = text
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .expect("ToString yields a string");
+        let mut units: Vec<u16> = match prefix {
+            1 => b"get ".iter().map(|&b| b as u16).collect(),
+            2 => b"set ".iter().map(|&b| b as u16).collect(),
+            _ => Vec::new(),
         };
+        s.data(heap).write_units(&mut units);
         let name = vm
             .interner()
             .intern(heap, &scope, StringData::Utf16(&units))
@@ -1570,7 +1533,7 @@ fn install_accessor<'a>(
         let mut get = heap.known().undefined.as_tagged(heap).erase();
         let mut set = get;
         if let Some(obj) = target.as_tagged(heap).as_heap_object() {
-            for d in obj.as_ref().map(heap).descriptors() {
+            for d in obj.map(heap).descriptors() {
                 if d.name(heap).ptr_eq(name) && d.flags().is_accessor() {
                     let pair = d
                         .value
@@ -1657,7 +1620,7 @@ fn define_own_property<'a>(
                         .get_as::<AccessorPair>(heap)
                         .ok_or(VmError::Type)
                 );
-                let pair = pair.as_ref();
+                let pair = pair;
                 PartialDescriptor {
                     value: None,
                     get: Some(scope.handle(pair.get.get(heap))),
@@ -1712,7 +1675,7 @@ fn define_own_property<'a>(
                     .get_as::<AccessorPair>(heap)
                     .ok_or(VmError::Type)
             );
-            let pair = pair.as_ref();
+            let pair = pair;
             PropertyDescriptor::Accessor {
                 get: scope.handle(pair.get.get(heap)),
                 set: scope.handle(pair.set.get(heap)),
@@ -1787,7 +1750,7 @@ fn throw_if_not_constructor_or_null<'a>(
     let ok = v_raw == null
         || unsafe { Tagged::<Value>::from_value_unchecked(v_raw) }
             .as_heap_object()
-            .is_some_and(|obj| obj.as_ref().map(heap).kind().is_constructor());
+            .is_some_and(|obj| obj.map(heap).kind().is_constructor());
     if !ok {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
@@ -1882,7 +1845,7 @@ fn construct_super_construct<'a>(
         let derived = callee
             .as_tagged(heap)
             .as_heap_object()
-            .and_then(|obj| obj.as_ref().callable_info(heap))
+            .and_then(|obj| obj.callable_info(heap))
             .is_some_and(|info| info.function_kind().is_derived_class_constructor());
         let Some(callee) = scope.cast::<Object>(heap, callee.as_tagged(heap)) else {
             return raise_runtime(vm, heap, state, VmError::Type);
@@ -2018,26 +1981,17 @@ fn construct_super_via<'a>(
     state.handle_scope(|scope| {
         let closure = args.get_handle(heap, n - 2);
         let new_target = args.get_handle(heap, n - 1);
-        let callee = {
-            let Some(obj) = closure.as_tagged(heap).as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            };
-            let proto = obj.as_ref().prototype(heap);
-            let Some(proto_obj) = proto.as_heap_object() else {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            };
-            if !proto_obj
-                .as_ref()
-                .header
-                .map
-                .get(heap)
-                .kind()
-                .is_constructor()
-            {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            }
-            scope.handle(proto)
+        let Some(obj) = closure.as_tagged(heap).as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
         };
+        let proto = obj.prototype(heap);
+        let Some(proto_obj) = proto.as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        if !proto_obj.map(heap).kind().is_constructor() {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let callee = scope.handle(proto);
         let arg_words: Vec<Handle<'_, Value>> =
             (0..n - 2).map(|i| args.get_handle(heap, i)).collect();
         construct_super_construct(
@@ -2223,43 +2177,37 @@ fn super_get_property<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        let outcome = {
-            let proto = home.as_tagged(heap).home_proto(heap);
-            let name = match rt_try!(
-                vm,
-                heap,
-                state,
-                key.as_tagged(heap).erase().classify_key(heap)
-            ) {
-                Key::Element(i) => Tagged::from(Smi::new(i as i64)),
-                Key::Name(name) => name,
-            };
-            match rt_try!(
-                vm,
-                heap,
-                state,
-                Lookup::super_lookup_from_proto(heap, proto, name)
-            ) {
-                LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
-                LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
-            }
+        let proto = home.as_tagged(heap).home_proto(heap);
+        let name = match rt_try!(
+            vm,
+            heap,
+            state,
+            key.as_tagged(heap).erase().classify_key(heap)
+        ) {
+            Key::Element(i) => Tagged::from(Smi::new(i as i64)),
+            Key::Name(name) => name,
+        };
+        let outcome = match rt_try!(
+            vm,
+            heap,
+            state,
+            Lookup::super_lookup_from_proto(heap, proto, name)
+        ) {
+            LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
+            LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
         };
         if let Some(v) = outcome.0 {
             return v.as_tagged(heap);
         }
         let getter = outcome.1.expect("one of the two arms is set");
-        let skip = {
-            let getter_tagged = getter.as_tagged(heap);
-            getter_tagged.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
-                || !getter_tagged.is_callable(heap)
-        };
+        let getter_tagged = getter.as_tagged(heap);
+        let skip = getter_tagged.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+            || !getter_tagged.is_callable(heap);
         if skip {
             return heap.known().undefined.as_tagged(heap).erase();
         }
-        let call_args = {
-            let r = recv.as_tagged(heap);
-            scope.stage(&[r])
-        };
+        let r = recv.as_tagged(heap);
+        let call_args = scope.stage(&[r]);
         match HostCtx::enter(vm, heap, state, getter, call_args, None).map(|v| v.raw()) {
             Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
             Err(err) => return raise_runtime(vm, heap, state, err),
@@ -2308,17 +2256,20 @@ fn super_set_property<'a>(
         } else {
             StoreSemantics::Shadow
         };
-        let outcome = {
-            let proto = home.as_tagged(heap).home_proto(heap);
-            let name = match rt_try!(
-                vm,
-                heap,
-                state,
-                key.as_tagged(heap).erase().classify_key(heap)
-            ) {
-                Key::Element(i) => Tagged::from(Smi::new(i as i64)),
-                Key::Name(name) => name,
-            };
+        let proto = home.as_tagged(heap).home_proto(heap);
+        let name = match rt_try!(
+            vm,
+            heap,
+            state,
+            key.as_tagged(heap).erase().classify_key(heap)
+        ) {
+            Key::Element(i) => Tagged::from(Smi::new(i as i64)),
+            Key::Name(name) => name,
+        };
+        let outcome = rt_try!(
+            vm,
+            heap,
+            state,
             Transition::super_store_lookup(
                 heap,
                 &scope,
@@ -2328,8 +2279,7 @@ fn super_set_property<'a>(
                 value.as_tagged(heap),
                 semantics,
             )
-        };
-        let outcome = rt_try!(vm, heap, state, outcome);
+        );
         if rt_try!(
             vm,
             heap,

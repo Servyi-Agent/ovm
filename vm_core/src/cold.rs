@@ -16,7 +16,7 @@ use crate::objects::string::DenseString;
 use crate::prototype::Prototype;
 use crate::transition::{PropertyDescriptor, StoreOutcome, StoreSemantics};
 use crate::value::{Smi, Tagged, Value};
-use crate::{AccessorPair, Compare, EntryClass, Errors, Heap, VmError};
+use crate::{AccessorPair, Compare, EntryClass, Errors, VmError};
 use crate::{Coercion, Hint, HostCtx};
 
 /// `Add` cold body: ToPrimitive both operands, string concatenation when
@@ -229,7 +229,6 @@ pub fn named_load<'a>(
         let name = scope.handle(
             ctx.stack()
                 .callable(heap, ctx.frame_base())
-                .as_ref()
                 .constant_slot_name(heap, name_idx),
         );
         // ES 20.2.5.8: a proxy receiver runs its `get` trap (with the
@@ -431,32 +430,25 @@ pub fn keyed_store<'a>(
                 let dict_mode = recv
                     .as_tagged(heap)
                     .as_heap_object()
-                    .is_some_and(|h| h.as_ref().element_dictionary(heap).is_some());
+                    .is_some_and(|h| h.element_dictionary(heap).is_some());
                 let dict_fallthrough: Option<Handle<'_, SlotName>> = if dict_mode {
-                    let entry_class = {
-                        let heap_ref: &Heap = heap;
-                        recv.as_tagged(heap_ref)
-                            .as_heap_object()
-                            .and_then(|h| h.as_ref().element_dictionary(heap_ref))
-                            .map(|d| d.as_ref().classify(heap_ref, i))
-                    };
+                    let entry_class = recv
+                        .as_tagged(heap)
+                        .as_heap_object()
+                        .and_then(|h| h.element_dictionary(heap))
+                        .map(|d| d.classify(heap, i));
                     match entry_class {
                         Some(EntryClass::Accessor) => {
-                            let heap_ref: &Heap = heap;
                             let pair = recv
-                                .as_tagged(heap_ref)
+                                .as_tagged(heap)
                                 .as_heap_object()
-                                .and_then(|h| h.as_ref().element_dictionary(heap_ref))
-                                .and_then(|d| {
-                                    d.as_ref()
-                                        .find(heap_ref, i)
-                                        .map(|e| d.as_ref().value_at(heap_ref, e))
-                                })
-                                .and_then(|v| v.get_as::<AccessorPair>(heap_ref));
+                                .and_then(|h| h.element_dictionary(heap))
+                                .and_then(|d| d.find(heap, i).map(|e| d.value_at(heap, e)))
+                                .and_then(|v| v.get_as::<AccessorPair>(heap));
                             let Some(pair) = pair else {
                                 return ctx.exception_word();
                             };
-                            let setter = pair.as_ref().set.get(heap);
+                            let setter = pair.set.get(heap);
                             if setter == heap.known().undefined.as_tagged(heap) {
                                 return value.as_tagged(heap).erase();
                             }
@@ -491,13 +483,10 @@ pub fn keyed_store<'a>(
                             // chain (prototype setters); clean chains
                             // store directly, dirty ones take the
                             // ordinary named path below
-                            let map = {
-                                let heap_ref: &Heap = heap;
-                                let Some(h) = recv.as_tagged(heap_ref).as_heap_object() else {
-                                    unreachable!("classified above");
-                                };
-                                scope.handle(h.map(heap_ref))
+                            let Some(h) = recv.as_tagged(heap).as_heap_object() else {
+                                unreachable!("classified above");
                             };
+                            let map = scope.handle(h.map(heap));
                             if Prototype::indexed_store_chain_ok(heap, &scope, &recv, &map, i) {
                                 let obj = scope
                                     .cast::<Object>(heap, recv.as_tagged(heap))
@@ -520,27 +509,20 @@ pub fn keyed_store<'a>(
                 } else {
                     let mut direct = false;
                     if let Some(hobj) = recv.as_tagged(heap).as_heap_object()
-                        && hobj.as_ref().is_array(heap)
+                        && hobj.is_array(heap)
                     {
-                        let map = hobj.as_ref().map(heap);
+                        let map = hobj.map(heap);
                         if map
-                            .as_ref()
                             .published_validity_cell(heap)
-                            .is_some_and(|cell| cell.as_ref().is_valid(heap))
+                            .is_some_and(|cell| cell.is_valid(heap))
                         {
                             direct = true;
                         } else {
                             let map = scope.handle(map);
-                            direct =
-                                Prototype::indexed_store_chain_ok(heap, &scope, &recv, &map, i)
-                                    || {
-                                        // uncacheably dirty chains still store
-                                        // directly when THIS index is unintercepted
-                                        let heap_ref: &Heap = heap;
-                                        !recv
-                                            .as_tagged(heap_ref)
-                                            .chain_holds_index_name(heap_ref, i)
-                                    };
+                            direct = Prototype::indexed_store_chain_ok(heap, &scope, &recv, &map, i)
+                                    // uncacheably dirty chains still store
+                                    // directly when THIS index is unintercepted
+                                    || !recv.as_tagged(heap).chain_holds_index_name(heap, i);
                         }
                     }
                     if !direct {
@@ -785,7 +767,7 @@ fn store_named_tail_scoped<'a>(
     let prev = recv
         .as_tagged(heap)
         .as_heap_object()
-        .map(|o| scope.handle(o.as_ref().map(heap)));
+        .map(|o| scope.handle(o.map(heap)));
     let outcome = match recv.as_tagged(heap).erase().store_lookup(
         heap,
         &scope,
@@ -887,7 +869,7 @@ pub fn construct<'a>(
         let Some(obj) = callee.as_tagged(heap).as_heap_object() else {
             return ctx.raise_tag(VmError::Type);
         };
-        if !obj.as_ref().map(heap).kind().is_constructor() {
+        if !obj.map(heap).kind().is_constructor() {
             return ctx.raise_tag(VmError::Type);
         }
         let args = ctx.stack().args(ctx.frame_base(), args_base, count);
@@ -901,15 +883,8 @@ pub fn construct<'a>(
         // a derived constructor's `this` is the hole until `super()` binds
         // it; ordinary and
         // base-class constructors synthesize the receiver
-        let derived = obj
-            .as_ref()
-            .header
-            .map
-            .get(heap)
-            .kind()
-            .is_class_constructor()
+        let derived = obj.map(heap).kind().is_class_constructor()
             && obj
-                .as_ref()
                 .callable_info(heap)
                 .is_some_and(|info| info.function_kind().is_derived_class_constructor());
         let callee = scope

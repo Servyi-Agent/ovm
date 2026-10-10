@@ -823,7 +823,7 @@ impl Heap {
         map: Handle<'a, Map>,
         capacity: usize,
     ) -> Tagged<'_, Object> {
-        let capacity = capacity.max(map.as_tagged(self).as_ref().value_slot_count());
+        let capacity = capacity.max(map.as_tagged(self).value_slot_count());
         let slots: Handle<'a, FixedArray> = if capacity == 0 {
             self.known().empty_fixed_array
         } else {

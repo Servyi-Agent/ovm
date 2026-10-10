@@ -138,24 +138,21 @@ fn start<'b>(
             let stack = &state.stack();
             // one shared anchor covers every read feeding the frame push;
             // the push itself never allocates, so the anchor may span it
-            let frame = {
-                let heap: &Heap = heap;
-                let new_target_value = match &new_target {
-                    Some(nt) => nt.as_tagged(heap).erase(),
-                    None => heap.known().undefined.as_tagged(heap).erase(),
-                };
-                stack.push_frame(
-                    heap,
-                    FrameMeta::ROOT,
-                    Callee {
-                        callable: target.erase(),
-                        info,
-                        context: context.erase(),
-                    },
-                    new_target_value,
-                    stack.stage_slice(args.as_tagged())?,
-                )?
+            let new_target_value = match &new_target {
+                Some(nt) => nt.as_tagged(heap).erase(),
+                None => heap.known().undefined.as_tagged(heap).erase(),
             };
+            let frame = stack.push_frame(
+                heap,
+                FrameMeta::ROOT,
+                Callee {
+                    callable: target.erase(),
+                    info,
+                    context: context.erase(),
+                },
+                new_target_value,
+                stack.stage_slice(args.as_tagged())?,
+            )?;
             state.set_frame_base(frame.base);
             state.set_frame_active(true);
             // the interpreter context: raw pointers + anchors shared by
@@ -180,10 +177,8 @@ fn run_callee<'a>(ctx: &Ctx<'a>) -> Result<Tagged<'a, Value>, VmError> {
     }
     // a fresh context per callee (its accumulator starts undefined: the
     // push seeded the callee's slot)
-    let value = {
-        let callee_ctx = unsafe { ctx.child(ctx.frame_base()) };
-        dispatch(&callee_ctx)?
-    };
+    let callee_ctx = unsafe { ctx.child(ctx.frame_base()) };
+    let value = dispatch(&callee_ctx)?;
     // the callee's anchor `Return` left its frame pushed with the value as
     // the dispatch result: pop back into the caller
     let caller = stack.pop_frame(ctx.frame_base());
@@ -819,29 +814,27 @@ fn step<'a>(
         }
         Opcode::LoadContextSlot => {
             let depth = ops.uimm(1);
-            let v = {
-                let mut context = match stack
-                    .frame_header(frame_base)
-                    .context_slot()
-                    .get(heap)
-                    .get_as::<ContextObject>(heap)
-                {
+            let mut context = match stack
+                .frame_header(frame_base)
+                .context_slot()
+                .get(heap)
+                .get_as::<ContextObject>(heap)
+            {
+                Some(context) => context,
+                None => throw_err!(ctx, VmError::Type),
+            };
+            for _ in 0..depth {
+                context = match context.as_ref().outer.get(heap) {
                     Some(context) => context,
                     None => throw_err!(ctx, VmError::Type),
                 };
-                for _ in 0..depth {
-                    context = match context.as_ref().outer.get(heap) {
-                        Some(context) => context,
-                        None => throw_err!(ctx, VmError::Type),
-                    };
-                }
-                context
-                    .slots
-                    .get(heap)
-                    .as_ref()
-                    .element_slot(ops.idx(0))
-                    .get(heap)
-            };
+            }
+            let v = context
+                .slots
+                .get(heap)
+                .as_ref()
+                .element_slot(ops.idx(0))
+                .get(heap);
             acc.store(v);
             Flow::Next
         }
@@ -1059,25 +1052,23 @@ fn step<'a>(
                         throw_err!(ctx, VmError::Type);
                     }
                     // one shared anchor covers every read feeding the push
-                    let frame = {
-                        let context = context.erase();
-                        let callee = callee.erase();
-                        let undefined = heap.known().undefined.as_tagged(heap).erase();
-                        fold!(
-                            ctx,
-                            stack.push_frame(
-                                heap,
-                                ctx.caller_meta(next_pc, pc),
-                                Callee {
-                                    callable: callee,
-                                    info,
-                                    context,
-                                },
-                                undefined,
-                                stack.window(frame_base, args_base, count),
-                            )
+                    let context = context.erase();
+                    let callee = callee.erase();
+                    let undefined = heap.known().undefined.as_tagged(heap).erase();
+                    let frame = fold!(
+                        ctx,
+                        stack.push_frame(
+                            heap,
+                            ctx.caller_meta(next_pc, pc),
+                            Callee {
+                                callable: callee,
+                                info,
+                                context,
+                            },
+                            undefined,
+                            stack.window(frame_base, args_base, count),
                         )
-                    };
+                    );
                     // record the site before the callee runs (the
                     // become interpreter's miss-path ordering)
                     InlineCache::call_update(
@@ -1147,25 +1138,23 @@ fn step<'a>(
                         throw_err!(ctx, VmError::Type);
                     }
                     // one shared anchor covers every read feeding the push
-                    let frame = {
-                        let context = context.erase();
-                        let callee = callee.erase();
-                        let undefined = heap.known().undefined.as_tagged(heap).erase();
-                        fold!(
-                            ctx,
-                            stack.push_frame(
-                                heap,
-                                ctx.caller_meta(next_pc, pc),
-                                Callee {
-                                    callable: callee,
-                                    info,
-                                    context,
-                                },
-                                undefined,
-                                stack.window(frame_base, args_base, count),
-                            )
+                    let context = context.erase();
+                    let callee = callee.erase();
+                    let undefined = heap.known().undefined.as_tagged(heap).erase();
+                    let frame = fold!(
+                        ctx,
+                        stack.push_frame(
+                            heap,
+                            ctx.caller_meta(next_pc, pc),
+                            Callee {
+                                callable: callee,
+                                info,
+                                context,
+                            },
+                            undefined,
+                            stack.window(frame_base, args_base, count),
                         )
-                    };
+                    );
                     ctx.set_frame_base(frame.base);
                     // blocking call: run the callee to completion; its
                     // value becomes the caller's accumulator

@@ -338,17 +338,9 @@ impl Stack {
     pub fn super_constructor<'a>(&self, heap: &'a Heap, base: usize) -> Option<Tagged<'a, Value>> {
         let callable = self.frame_header(base).callable_slot().get(heap);
         let obj = callable.as_heap_object()?;
-        let proto = obj.as_ref().prototype(heap);
-        // must be a real constructor
+        let proto = obj.prototype(heap);
         let proto_obj = proto.as_heap_object()?;
-        proto_obj
-            .as_ref()
-            .header
-            .map
-            .get(heap)
-            .kind()
-            .is_constructor()
-            .then_some(proto)
+        proto_obj.map(heap).kind().is_constructor().then_some(proto)
     }
 
     /// The frame's current context, re-read under a heap borrow.
@@ -486,7 +478,7 @@ impl Stack {
         count: usize,
         write: P,
     ) -> Result<FrameMeta, VmError> {
-        let (register_count, formal_min) = callee.info.as_ref().frame_facts();
+        let (register_count, formal_min) = callee.info.frame_facts();
         let padded = count.max(formal_min);
         let low = self.top();
         if low + register_count + HEADER_SLOTS + padded > self.slots.len() {
@@ -514,8 +506,6 @@ impl Stack {
         ))
     }
 
-    /// Copy whole parameter words into the arena: the destination slots
-    /// are GC roots, the staged source is rooted by its staging scope.
     #[inline(always)]
     fn write_params(&self, dst: usize, values: &[Tagged<'_, Value>]) {
         if values.is_empty() {
@@ -531,8 +521,6 @@ impl Stack {
         }
     }
 
-    /// Whole-word, overlap-safe copy from an argument window into the
-    /// arena.
     #[inline(always)]
     fn copy_params(&self, dst: usize, src: core::ptr::NonNull<Value>, count: usize) {
         unsafe {
@@ -544,8 +532,6 @@ impl Stack {
         }
     }
 
-    /// An [`Args`] over `count` words starting at the absolute slot
-    /// `src` (rooted by this stack).
     #[inline(always)]
     fn args_at(&self, src: usize, count: usize) -> Args {
         // Safety: derived from this stack's own rooted arena.
@@ -703,7 +689,7 @@ impl Stack {
         caller: FrameMeta,
         register_count: usize,
     ) -> FrameMeta {
-        let info = callee.info.as_ref();
+        let info = callee.info;
         let bytecode = info.bytecode.get(heap);
         let constants = info.constants.get(heap);
         let feedback = info.feedback.get(heap).map_or_else(

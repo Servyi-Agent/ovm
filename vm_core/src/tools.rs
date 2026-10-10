@@ -52,18 +52,16 @@ impl KetteTools {
         scope: &HandleScope<'_>,
     ) -> Result<(), VmError> {
         let global = heap.known().global_object;
-        let tools = {
-            let map = heap.allocate_handle::<Map>(
-                MapInit {
-                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                    value_slot_count: 0,
-                    descriptors: &[],
-                    prototype: heap.known().object_prototype.erase(),
-                },
-                scope,
-            );
-            scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY))
-        };
+        let map = heap.allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: heap.known().object_prototype.erase(),
+            },
+            scope,
+        );
+        let tools = scope.handle(heap.new_object(scope, map, HandleSlice::EMPTY));
 
         let methods: &[(&str, NativeIndex)] = &[
             (
@@ -80,7 +78,7 @@ impl KetteTools {
             ),
         ];
         for (name, index) in methods {
-            let method = Object::native_plain_function(heap, scope, *index)?;
+            let method = Object::native_function(heap, scope, *index)?;
             let name_str = interner.intern_str(heap, scope, name);
             let method_name = scope.handle(name_str.as_tagged(heap));
             Object::define_own_property(

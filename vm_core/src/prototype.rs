@@ -36,12 +36,12 @@ impl Prototype {
         heap: &'a Heap,
         map: Tagged<'a, Map>,
     ) -> Option<Tagged<'a, Map>> {
-        if map.as_ref().is_prototype() {
+        if map.is_prototype() {
             return Some(map);
         }
-        let proto = map.as_ref().prototype.get(heap);
+        let proto = map.prototype.get(heap);
         let object = trackable_prototype(heap, proto)?;
-        Some(object.as_ref().map(heap))
+        Some(object.map(heap))
     }
 
     pub fn get_or_create_prototype_chain_validity_cell<'s>(
@@ -68,11 +68,8 @@ impl Prototype {
         let _guard = heap.prototype_registry().lock();
         lazy_register_prototype_user_locked(heap, scope, holder);
 
-        if let Some(cell) = holder
-            .as_tagged(heap)
-            .as_ref()
-            .published_validity_cell(heap)
-            && cell.as_ref().is_valid(heap)
+        if let Some(cell) = holder.as_tagged(heap).published_validity_cell(heap)
+            && cell.is_valid(heap)
         {
             return Some(cell.as_handle(scope));
         }
@@ -85,7 +82,6 @@ impl Prototype {
         );
         holder
             .as_tagged(heap)
-            .as_ref()
             .set_validity_cell(heap, cell.as_tagged(heap));
         Some(cell)
     }
@@ -100,7 +96,7 @@ impl Prototype {
         map: Handle<'s, Map>,
     ) -> Option<Handle<'s, Cell>> {
         if let Some(cell) = map.as_tagged(heap).published_validity_cell(heap)
-            && cell.as_ref().is_valid(heap)
+            && cell.is_valid(heap)
         {
             return Some(cell.as_handle(scope));
         }
@@ -144,22 +140,14 @@ impl Prototype {
         scope: &'s HandleScope<'_>,
         map: Handle<'s, Map>,
     ) {
-        if map
-            .as_tagged(heap)
-            .as_ref()
-            .is_prototype_validity_cell_valid(heap)
-        {
+        if map.as_tagged(heap).is_prototype_validity_cell_valid(heap) {
             return;
         }
         match Self::get_or_create_prototype_chain_validity_cell(heap, scope, map) {
             Some(cell) => map
                 .as_tagged(heap)
-                .as_ref()
                 .set_validity_cell(heap, cell.as_tagged(heap)),
-            None => map
-                .as_tagged(heap)
-                .as_ref()
-                .set_validity_cell_sentinel(heap),
+            None => map.as_tagged(heap).set_validity_cell_sentinel(heap),
         }
     }
 
@@ -236,9 +224,8 @@ impl Prototype {
     ) -> bool {
         if map
             .as_tagged(heap)
-            .as_ref()
             .published_validity_cell(heap)
-            .is_some_and(|cell| cell.as_ref().is_valid(heap))
+            .is_some_and(|cell| cell.is_valid(heap))
         {
             return true;
         }
@@ -268,7 +255,7 @@ fn trackable_prototype<'a>(heap: &'a Heap, value: Tagged<'a, Value>) -> Option<T
         return None;
     }
     let object = value.get_as::<Object>(heap)?;
-    if !object.as_ref().map(heap).kind().kind().is_js_receiver() {
+    if !object.map(heap).kind().kind().is_js_receiver() {
         return None;
     }
     Some(object)
@@ -346,7 +333,7 @@ fn lazy_register_prototype_user_locked<'s>(
         let Some(proto) = trackable_prototype(heap, proto_word) else {
             break;
         };
-        let proto_map = scope.handle(proto.as_ref().map(heap));
+        let proto_map = scope.handle(proto.map(heap));
         proto_map.as_tagged(heap).mark_prototype(heap);
         let proto_info = Prototype::get_or_create_prototype_info(heap, scope, proto_map);
         let current_info = Prototype::get_or_create_prototype_info(heap, scope, current);
@@ -355,7 +342,7 @@ fn lazy_register_prototype_user_locked<'s>(
         let registered = slot >= 1 && {
             let users = proto_info.as_tagged(heap).prototype_users(heap);
             users.is_some_and(|users| {
-                let users = users.as_ref();
+                let users = users;
                 (slot as usize) < users.len()
                     && users
                         .element_slot(slot as usize)
@@ -393,7 +380,7 @@ fn append_prototype_child<'s, T: 's>(
     let plan = match info.as_tagged(heap).prototype_users(heap) {
         None => Plan::Init,
         Some(array) => {
-            let array = array.as_ref();
+            let array = array;
             let len = array.len();
             if len == 0 {
                 Plan::Init
@@ -420,10 +407,9 @@ fn append_prototype_child<'s, T: 's>(
         Plan::Reuse(slot) => {
             let array = info
                 .as_tagged(heap)
-                .as_ref()
                 .prototype_users(heap)
                 .expect("planned against an existing registry");
-            let array = array.as_ref();
+            let array = array;
             let next = array.element_slot(slot).get(heap).to_i64().unwrap_or(0);
             array.set_weak(heap, slot, child.as_tagged(heap).erase());
             array.set(heap, 0, Smi::new(next).into_tagged().as_maybe_weak());
@@ -444,7 +430,6 @@ fn append_prototype_child<'s, T: 's>(
             );
             let host = info.as_tagged(heap).erase();
             info.as_tagged(heap)
-                .as_ref()
                 .prototype_users
                 .set(heap, host, array.as_tagged(heap));
             1
@@ -455,10 +440,9 @@ fn append_prototype_child<'s, T: 's>(
                 |token, heap| {
                     let old = info
                         .as_tagged(heap)
-                        .as_ref()
                         .prototype_users(heap)
                         .expect("planned against an existing registry");
-                    let old = old.as_ref();
+                    let old = old;
                     let mut values: Vec<Tagged<'_, MaybeWeak<Value>>> = Vec::with_capacity(len + 1);
                     for i in 0..len {
                         values.push(old.element_slot(i).get(heap));
@@ -471,7 +455,6 @@ fn append_prototype_child<'s, T: 's>(
             );
             let host = info.as_tagged(heap).erase();
             info.as_tagged(heap)
-                .as_ref()
                 .prototype_users
                 .set(heap, host, array.as_tagged(heap));
             len as i64
@@ -479,7 +462,7 @@ fn append_prototype_child<'s, T: 's>(
     }
 }
 
-fn mark_slot_empty(heap: &Heap, array: &WeakFixedArray, index: usize) {
+fn mark_slot_empty(heap: &Heap, array: Tagged<'_, WeakFixedArray>, index: usize) {
     let previous = array.element_slot(0).get(heap);
     array.set(heap, index, previous);
     array.set(
@@ -490,8 +473,8 @@ fn mark_slot_empty(heap: &Heap, array: &WeakFixedArray, index: usize) {
 }
 
 fn invalidate_one_prototype_validity_cell(heap: &Heap, map: Tagged<'_, Map>) {
-    if let Some(cell) = map.as_ref().published_validity_cell(heap) {
-        let cell = cell.as_ref();
+    if let Some(cell) = map.published_validity_cell(heap) {
+        let cell = cell;
         if cell.is_valid(heap) {
             cell.clear();
         }
@@ -504,13 +487,13 @@ fn invalidate_prototype_chains(heap: &Heap, map: Tagged<'_, Map>) {
     while let Some(m) = current {
         invalidate_one_prototype_validity_cell(heap, m);
 
-        let Some(info) = m.as_ref().try_get_prototype_info(heap) else {
+        let Some(info) = m.try_get_prototype_info(heap) else {
             return;
         };
-        let Some(users) = info.as_ref().prototype_users(heap) else {
+        let Some(users) = info.prototype_users(heap) else {
             return;
         };
-        let users = users.as_ref();
+        let users = users;
         for i in 1..users.len() {
             let Some(child) = users.element_slot(i).get(heap).as_strong() else {
                 continue;

@@ -465,7 +465,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- Function (constructor: dynamic bodies via eval, ES 20.2.1) --------
         let function_prototype = thread.heap().known().function_prototype;
-        let function_fn = Object::native_function(thread.heap(), &scope, idx.function_constructor)?;
+        let function_fn =
+            Object::native_constructor(thread.heap(), &scope, idx.function_constructor)?;
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -501,14 +502,14 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             idx.function_to_string,
         )?;
         // call/apply are plain (non-constructor) runtime functions
-        Object::install_plain_method(
+        Object::install_method(
             thread,
             &scope,
             function_prototype,
             "call",
             idx.function_call,
         )?;
-        Object::install_plain_method(
+        Object::install_method(
             thread,
             &scope,
             function_prototype,
@@ -582,7 +583,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // %Object.prototype% already exists from bootstrap; link the
         // constructor to it (like Array below)
         let object_prototype = thread.heap().known().object_prototype;
-        let object_fn = Object::native_function(thread.heap(), &scope, idx.object)?;
+        let object_fn = Object::native_constructor(thread.heap(), &scope, idx.object)?;
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -647,7 +648,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // ---- Array ---------------------------------------------------------------
         // %Array.prototype% already exists from bootstrap (an array object
         // whose prototype is %Object.prototype%); just link the constructor
-        let array_fn = Object::native_function(thread.heap(), &scope, idx.array)?;
+        let array_fn = Object::native_constructor(thread.heap(), &scope, idx.array)?;
         let array_prototype = thread.heap().known().array_prototype;
         Object::define_own_property(
             thread.heap(),
@@ -688,10 +689,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         {
-            let get_fn =
-                Object::native_plain_function(thread.heap(), &scope, idx.array_length_get)?;
-            let set_fn =
-                Object::native_plain_function(thread.heap(), &scope, idx.array_length_set)?;
+            let get_fn = Object::native_function(thread.heap(), &scope, idx.array_length_get)?;
+            let set_fn = Object::native_function(thread.heap(), &scope, idx.array_length_set)?;
             let get_fn = scope.handle(get_fn.as_tagged(&*thread.heap()).erase());
             let set_fn = scope.handle(set_fn.as_tagged(&*thread.heap()).erase());
             let pair = thread
@@ -735,7 +734,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             },
         )?;
 
-        let date_fn = Object::native_function(thread.heap(), &scope, idx.date)?;
+        let date_fn = Object::native_constructor(thread.heap(), &scope, idx.date)?;
         let date_prototype = thread.heap().known().date_prototype;
         Object::define_own_property(
             thread.heap(),
@@ -780,7 +779,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             "toUTCString",
             idx.date_to_gmt_string,
         )?;
-        let date_parse_fn = Object::native_plain_function(thread.heap(), &scope, idx.date_parse)?;
+        let date_parse_fn = Object::native_function(thread.heap(), &scope, idx.date_parse)?;
         let date_parse_name = thread.intern(&scope, "parse");
         // Safety: fresh interned word, rooted below before the define.
         let date_parse_name = scope.handle(date_parse_name.as_tagged(&*thread.heap()));
@@ -791,7 +790,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             date_parse_name,
             PropertyDescriptor::data(date_parse_fn.erase()),
         )?;
-        let date_now_fn = Object::native_plain_function(thread.heap(), &scope, idx.date_now)?;
+        let date_now_fn = Object::native_function(thread.heap(), &scope, idx.date_now)?;
         let date_now_name = thread.intern(&scope, "now");
         // Safety: fresh interned word, rooted below before the define.
         let date_now_name = scope.handle(date_now_name.as_tagged(&*thread.heap()));
@@ -828,18 +827,17 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- Array iteration (the iterator protocol minimum) ---------------------
         // %ArrayIteratorPrototype%: next + @@iterator (returns the receiver)
-        let array_iterator_prototype = {
-            let map = thread.heap().allocate_handle::<Map>(
-                MapInit {
-                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                    value_slot_count: 0,
-                    descriptors: &[],
-                    prototype: object_prototype.erase(),
-                },
-                &scope,
-            );
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY))
-        };
+        let map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.erase(),
+            },
+            &scope,
+        );
+        let array_iterator_prototype =
+            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(
             thread,
             &scope,
@@ -891,15 +889,15 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         }));
 
         // iterator-result map: { value, done } both {w+, e+, c+}
-        let iterator_result_map = {
-            let value_name = thread.intern(&scope, "value");
-            let done_name = thread.intern(&scope, "done");
-            let flags = SlotFlags::WRITABLE
-                .union(SlotFlags::CONFIGURABLE)
-                .union(SlotFlags::ENUMERABLE);
-            // Safety: fresh root-slot word, rooted below before any allocation.
-            let proto = scope
-                .handle(unsafe { Tagged::<Value>::from_value_unchecked(object_prototype.raw()) });
+        let value_name = thread.intern(&scope, "value");
+        let done_name = thread.intern(&scope, "done");
+        let flags = SlotFlags::WRITABLE
+            .union(SlotFlags::CONFIGURABLE)
+            .union(SlotFlags::ENUMERABLE);
+        // Safety: fresh root-slot word, rooted below before any allocation.
+        let proto =
+            scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(object_prototype.raw()) });
+        let iterator_result_map =
             thread
                 .heap()
                 .allocate_token_enter_heap(Map::layout_for(2), |token, heap| {
@@ -922,8 +920,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
                         descriptors: &descriptors,
                         prototype: proto,
                     }))
-                })
-        };
+                });
 
         let mut known = *thread.heap().known();
         known.array_iterator_map = array_iterator_map;
@@ -942,18 +939,17 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         thread.heap().set_known(known);
 
         // ---- Math (namespace object; not callable, not a constructor) --------
-        let math_object = {
-            let map = thread.heap().allocate_handle::<Map>(
-                MapInit {
-                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                    value_slot_count: 0,
-                    descriptors: &[],
-                    prototype: object_prototype.erase(),
-                },
-                &scope,
-            );
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY))
-        };
+        let map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.erase(),
+            },
+            &scope,
+        );
+        let math_object =
+            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(thread, &scope, math_object, "sqrt", idx.math_sqrt)?;
         Object::install_method(thread, &scope, math_object, "log", idx.math_log)?;
         Object::install_method(thread, &scope, math_object, "pow", idx.math_pow)?;
@@ -999,19 +995,18 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         // ---- console (namespace object; shell convenience, not ES) -----------
-        let console_object = {
-            let map = thread.heap().allocate_handle::<Map>(
-                MapInit {
-                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                    value_slot_count: 0,
-                    descriptors: &[],
-                    prototype: object_prototype.erase(),
-                },
-                &scope,
-            );
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY))
-        };
-        Object::install_plain_method(thread, &scope, console_object, "log", idx.console_log)?;
+        let map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.erase(),
+            },
+            &scope,
+        );
+        let console_object =
+            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
+        Object::install_method(thread, &scope, console_object, "log", idx.console_log)?;
         let console_name = thread.intern(&scope, "console");
         // Safety: fresh interned word, rooted below before the define.
         let console_name = scope.handle(console_name.as_tagged(&*thread.heap()));
@@ -1036,7 +1031,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         // ---- print / performance (shell conveniences; not ES) --------------------
-        let print_fn = Object::native_plain_function(thread.heap(), &scope, idx.print)?;
+        let print_fn = Object::native_function(thread.heap(), &scope, idx.print)?;
         let print_name = thread.intern(&scope, "print");
         // Safety: fresh interned word, rooted below before the define.
         let print_name = scope.handle(print_name.as_tagged(&*thread.heap()));
@@ -1048,18 +1043,17 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::data(print_fn.erase()),
         )?;
 
-        let performance_object = {
-            let map = thread.heap().allocate_handle::<Map>(
-                MapInit {
-                    kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
-                    value_slot_count: 0,
-                    descriptors: &[],
-                    prototype: object_prototype.erase(),
-                },
-                &scope,
-            );
-            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY))
-        };
+        let map = thread.heap().allocate_handle::<Map>(
+            MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: object_prototype.erase(),
+            },
+            &scope,
+        );
+        let performance_object =
+            roots.create_handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
         Object::install_method(
             thread,
             &scope,
@@ -1108,7 +1102,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // The Proxy constructor is a runtime function *without* a
         // `.prototype` property (ES 20.2.1: "Proxy.prototype is
         // undefined"); `install_constructor` cannot be used.
-        let proxy_fn = Object::native_function(thread.heap(), &scope, idx.proxy)?;
+        let proxy_fn = Object::native_constructor(thread.heap(), &scope, idx.proxy)?;
         let two = scope.handle(Smi::new(2));
         Object::define_own_property(
             thread.heap(),
@@ -1137,8 +1131,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // Proxy.revocable: a non-constructor function returning
         // { proxy, revoke }; the revoke closure is the JS template
         // installed by REVOKE_PRELUDE (runtimes cannot carry state).
-        let revocable_fn =
-            Object::native_plain_function(thread.heap(), &scope, idx.proxy_revocable)?;
+        let revocable_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revocable)?;
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1164,7 +1157,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::data(revocable_fn.erase()),
         )?;
         // hidden revoke runtime used by the REVOKE_PRELUDE closure
-        let revoke_fn = Object::native_plain_function(thread.heap(), &scope, idx.proxy_revoke)?;
+        let revoke_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revoke)?;
         let revoke_name = thread.intern(&scope, "__revokeProxy");
         // Safety: fresh interned word, rooted below before the define.
         let revoke_name = scope.handle(revoke_name.as_tagged(&*thread.heap()));

@@ -159,7 +159,6 @@ pub unsafe fn object_kind(addr: NonNull<()>) -> ObjectKind {
     // so the map word read from the visited header is promoted unsafely.
     let map = header.map.raw();
     unsafe { Tagged::<Map>::from_value_unchecked(map) }
-        .as_ref()
         .kind()
         .kind()
 }
