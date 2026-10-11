@@ -1,3 +1,4 @@
-unstable_features = true
-# keep the one-line `slow_handler!(name |ip, regs, acc, ctx, float| { .. })` head
-skip_macro_invocations = ["slow_handler"]
+# closure-style handler heads (`handler!(name, Op, |bindings| { .. })`)
+# ride rustfmt's trailing-closure layout, whose signature portion is
+# measured against fn_call_width — 90 covers the longest head
+fn_call_width = 90
