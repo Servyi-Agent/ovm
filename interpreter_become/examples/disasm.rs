@@ -56,11 +56,7 @@ fn main() {
                 };
                 rendered.push(format!("{raw}"));
             }
-            println!(
-                "  @{pc:>4}: {:<24} {}",
-                format!("{op:?}"),
-                rendered.join(", ")
-            );
+            println!("  @{pc:>4}: {:<24} {}", format!("{op:?}"), rendered.join(", "));
             pc = next;
         }
         if !f.constants.is_empty() {

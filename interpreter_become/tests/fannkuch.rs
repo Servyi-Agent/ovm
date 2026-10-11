@@ -7,10 +7,7 @@ use vm_core::VM;
 #[test]
 fn fannkuch() {
     let src = [
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../benchmarks/fannkuch/fannkuch.js"
-        ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/fannkuch/fannkuch.js"),
         "benchmarks/fannkuch/fannkuch.js",
     ]
     .iter()

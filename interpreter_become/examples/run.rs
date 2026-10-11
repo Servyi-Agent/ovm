@@ -19,11 +19,7 @@ fn main() {
         parts.push(src);
     }
     let joined = parts.join("\n");
-    match thread.run_source(
-        &joined,
-        js_compiler::compile_js,
-        js_compiler::SourceMode::Script,
-    ) {
+    match thread.run_source(&joined, js_compiler::compile_js, js_compiler::SourceMode::Script) {
         Ok(_) => {
             if let Some(ex) = thread.take_pending_exception() {
                 eprintln!("uncaught exception: {ex:?}");

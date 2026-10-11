@@ -3,17 +3,22 @@
 //! Parallel universe next to the live interpreter: a heap-owning `Ctx`,
 //! raw-`Value` accumulator threading, and the first ported handlers.
 //! NOT wired into dispatch — this file exists to compare the generated
-//! assembly of `new::op_*` against the originals. The `handler!` macro
-//! keeps every signature on one line (bodies are written
-//! slow_handler!-style: rustfmt does not enter macro bodies, same
-//! trade-off slow.rs already makes).
+//! assembly of `new::op_*` against the originals.
+//!
+//! rustfmt: plain `cargo fmt` owns this file (and the crate); the
+//! crate-level `fn_call_width = 90` keeps the closure-style heads
+//! (`handler!(name, Op, |bindings| { .. })`) on one line while the
+//! bodies are formatted normally.
 //!
 //! not-yet-wired items are expected dead.
 //!
 //! Ported: Load, Store, Add (+ float path + slow paths), CallRuntime,
-//! and the `resume` edge. `size` in CallRuntime was dead in the
-//! original and is dropped. Throw routing is stubbed (`throw_dispatch`
-//! is not ported yet — the file is not runnable end-to-end).
+//! the `resume` edge, and throw routing. `throw_dispatch` folds the
+//! frame walk in (unlike the original, whose `Unwind` result carried a
+//! `Tagged` across the walk — here the taken exception is parked as an
+//! `Acc` word, so the dispatch continuation re-takes `ctx` exclusively
+//! with no borrow gymnastics). `size` in CallRuntime was dead in the
+//! original and is dropped.
 
 #![allow(dead_code)]
 
@@ -29,12 +34,20 @@ pub struct Ctx<'s, 'h> {
     vm: &'s VM,
     state: &'s ThreadState,
     heap: &'h mut Heap,
+    /// Anchor of the frame `execute` entered: a return at this anchor ends
+    /// the execution instead of unwinding into a caller.
+    base_anchor: usize,
 }
 
 impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
-    pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap) -> Self {
-        Ctx { vm, state, heap }
+    pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
+        Ctx {
+            vm,
+            state,
+            heap,
+            base_anchor,
+        }
     }
 
     #[inline(always)]
@@ -65,6 +78,17 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn frame_base(&self) -> usize {
         self.state.frame_base()
+    }
+
+    #[inline(always)]
+    pub fn base_anchor(&self) -> usize {
+        self.base_anchor
+    }
+
+    /// Switch the current frame (after a push, pop, or unwind).
+    #[inline(always)]
+    pub fn set_frame_base(&self, base: usize) {
+        self.state.set_frame_base(base);
     }
 
     #[inline(always)]
@@ -138,10 +162,7 @@ impl Acc {
     }
 }
 
-pub struct TableArg<'h>(
-    pub &'static [Handler; 256],
-    core::marker::PhantomData<&'h ()>,
-);
+pub struct TableArg<'h>(pub &'static [Handler; 256], core::marker::PhantomData<&'h ()>);
 
 impl<'h> TableArg<'h> {
     #[inline(always)]
@@ -190,7 +211,7 @@ macro_rules! next {
 }
 
 macro_rules! handler {
-    ($name:ident, $op:ident |$ip:ident, $ops:ident, $regs:ident, $acc:ident, $ctx:ident, $table:ident, $roots:ident, $float:ident| $body:block) => {
+    ($name:ident, $op:ident, |$ip:ident, $ops:ident, $regs:ident, $acc:ident, $ctx:ident, $table:ident, $roots:ident, $float:ident| $body:block) => {
         #[rustc_align(32)]
         extern "rust-preserve-none" fn $name<'h, const STRIDE: usize>(
             $ip: *const u8,
@@ -207,8 +228,11 @@ macro_rules! handler {
     };
 }
 
-macro_rules! slow_handler {
-    ($name:ident |$ip:ident, $ops:ident, $regs:ident, $acc:ident, $ctx:ident, $float:ident| $body:block) => {
+/// The cold-path twin (its own name: the crate-wide
+/// `skip_macro_invocations = ["slow_handler"]` shields slow.rs's
+/// old-grammar invocations and would freeze these bodies too).
+macro_rules! cold_handler {
+    ($name:ident, |$ip:ident, $ops:ident, $regs:ident, $acc:ident, $ctx:ident, $float:ident| $body:block) => {
         #[cold]
         #[inline(never)]
         #[rustc_align(32)]
@@ -278,7 +302,7 @@ extern "rust-preserve-none" fn op_trap<'h>(
     unreachable!("trap opcode")
 }
 
-/// The after-slow-path re-entry edge (throw routing not ported yet).
+/// The after-slow-path re-entry edge.
 #[inline(never)]
 #[rustc_align(32)]
 extern "rust-preserve-none" fn resume<'h>(
@@ -290,113 +314,110 @@ extern "rust-preserve-none" fn resume<'h>(
     roots: RootsArg<'h>,
     float: FloatReg,
 ) -> Acc {
-    let fault_pc = fault_ip as usize - ctx.code_ptr() as usize;
     if ctx.is_throw(acc) {
-        // TODO(port): become throw_dispatch
-        return acc;
+        become throw_dispatch(fault_ip, _regs, acc, ctx, table, roots, float)
     }
-    let ip = unsafe { slow_next_pc(ctx.code_ptr().add(fault_pc)) };
+    // fault_ip is freshly re-derived by every resume caller, so it
+    // still pairs with the current base
+    let ip = slow_next_pc(fault_ip);
     let regs = unsafe { Regs::new(ctx.regs_ptr()) };
     let h = table.get(unsafe { *ip });
     become h(ip, regs, acc, ctx, table, roots, float)
 }
 
-handler!(
-    op_load,
-    Load | ip,
-    ops,
-    regs,
-    acc,
-    ctx,
-    table,
-    roots,
-    float | {
-        let r = ops.signed::<0>();
-        next!(
-            Load,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Acc::set(regs.get(r, ctx.heap()))
-        )
-    }
-);
-
-handler!(
-    op_store,
-    Store | ip,
-    ops,
-    regs,
-    acc,
-    ctx,
-    table,
-    roots,
-    float | {
-        let r = ops.signed::<0>();
-        regs.set(r, acc.get(ctx.heap()));
-        next!(Store, ip, regs, ctx, table, roots, float, acc)
-    }
-);
-
-handler!(
-    op_add,
-    Add | ip,
-    ops,
-    regs,
-    acc,
-    ctx,
-    table,
-    roots,
-    float | {
-        let r = ops.signed::<0>();
-        let h = ctx.heap();
-        let lhs = regs.get(r, h);
-        if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
-            && let Some(sum) = a.checked_add(b)
-        {
-            next!(
-                Add,
-                ip,
-                regs,
-                ctx,
-                table,
-                roots,
-                float,
-                Acc::from_smi_bits(sum)
-            )
+#[cold]
+#[inline(never)]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn throw_dispatch<'h>(
+    fault_ip: *const u8,
+    _regs: Regs,
+    _acc: Acc,
+    ctx: &mut Ctx<'_, 'h>,
+    table: TableArg<'h>,
+    roots: RootsArg<'h>,
+    float: FloatReg,
+) -> Acc {
+    let mut pc = fault_ip as usize - ctx.code_ptr() as usize;
+    loop {
+        let base = ctx.frame_base();
+        let handled = if ctx.state().termination().is_some() {
+            // A termination is not an exception: no handler (catch or
+            // finally in any frame) may observe or intercept it.
+            None
+        } else {
+            let callable = ctx
+                .stack()
+                .frame_header(base)
+                .callable_slot()
+                .get(ctx.heap());
+            callable
+                .as_heap_object()
+                .and_then(|obj| obj.callable_info(ctx.heap()))
+                .and_then(|info| info.handlers.get(ctx.heap()))
+                .and_then(|handlers| handlers.lookup(pc))
+        };
+        if let Some(handler_pc) = handled {
+            // park the word before the continuation re-takes ctx
+            // exclusively: an Acc carries no heap borrow
+            let ex = Acc::set(
+                ctx.state()
+                    .take_pending_exception_tagged(ctx.heap())
+                    .expect("pending exception must be set while unwinding"),
+            );
+            let code = ctx.code_ptr();
+            let regs = unsafe { Regs::new(ctx.regs_ptr()) };
+            let ip = unsafe { code.add(handler_pc) };
+            let h = table.get(unsafe { *ip });
+            become h(ip, regs, ex, ctx, table, roots, float)
         }
-        if let (Some(a), Some(b)) = (lhs.as_number(h), acc.get(h).as_number(h)) {
-            let sum = a + b;
-            if let Some(s) = Smi::from_f64(sum) {
-                next!(
-                    Add,
-                    ip,
-                    regs,
-                    ctx,
-                    table,
-                    roots,
-                    float,
-                    Acc::set(s.into_tagged())
-                )
-            }
-            if let Some(v) = ctx.heap_mut().try_new_float(sum) {
-                let acc = Acc::set(v);
-                next!(Add, ip, regs, ctx, table, roots, float, acc)
-            }
-            become slow_box_number::<STRIDE>(ip, regs, acc, ctx, table, roots, FloatReg::new(sum))
+        if base == ctx.base_anchor() {
+            return Acc::set(ctx.exception_word());
         }
-        become slow_add::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
+        let caller = ctx.stack().pop_frame(base);
+        ctx.set_frame_base(caller.base);
+        pc = caller.handler_pc;
     }
-);
+}
 
-slow_handler!(slow_box_number |_ip, _ops, _regs, _acc, ctx, _float| {
+handler!(op_load, Load, |ip, ops, regs, acc, ctx, table, roots, float| {
+    let r = ops.signed::<0>();
+    next!(Load, ip, regs, ctx, table, roots, float, Acc::set(regs.get(r, ctx.heap())))
+});
+
+handler!(op_store, Store, |ip, ops, regs, acc, ctx, table, roots, float| {
+    let r = ops.signed::<0>();
+    regs.set(r, acc.get(ctx.heap()));
+    next!(Store, ip, regs, ctx, table, roots, float, acc)
+});
+
+handler!(op_add, Add, |ip, ops, regs, acc, ctx, table, roots, float| {
+    let r = ops.signed::<0>();
+    let h = ctx.heap();
+    let lhs = regs.get(r, h);
+    if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
+        && let Some(sum) = a.checked_add(b)
+    {
+        next!(Add, ip, regs, ctx, table, roots, float, Acc::from_smi_bits(sum))
+    }
+    if let (Some(a), Some(b)) = (lhs.as_number(h), acc.get(h).as_number(h)) {
+        let sum = a + b;
+        if let Some(s) = Smi::from_f64(sum) {
+            next!(Add, ip, regs, ctx, table, roots, float, Acc::set(s.into_tagged()))
+        }
+        if let Some(v) = ctx.heap_mut().try_new_float(sum) {
+            let acc = Acc::set(v);
+            next!(Add, ip, regs, ctx, table, roots, float, acc)
+        }
+        become slow_box_number::<STRIDE>(ip, regs, acc, ctx, table, roots, FloatReg::new(sum))
+    }
+    become slow_add::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
+});
+
+cold_handler!(slow_box_number, |_ip, _ops, _regs, _acc, ctx, _float| {
     Acc::set(ctx.heap_mut().new_number(_float.get()))
 });
 
-slow_handler!(slow_add |_ip, ops, regs, acc, ctx, _float| {
+cold_handler!(slow_add, |_ip, ops, regs, acc, ctx, _float| {
     let state = ctx.state;
     state.handle_scope(|scope| {
         let lhs = scope.handle(regs.get(ops.signed::<0>(), ctx.heap()));
@@ -454,44 +475,26 @@ fn add(ctx: &mut Ctx<'_, '_>, lhs: Handle<'_, Value>, rhs: Handle<'_, Value>) ->
     })
 }
 
-handler!(
-    op_call_runtime,
-    CallRuntime | ip,
-    ops,
-    regs,
-    acc,
-    ctx,
-    table,
-    roots,
-    float | {
-        let pc = ip as usize - ctx.code_ptr() as usize;
-        let rt = ops.unsigned::<0>();
-        let base = ops.signed::<1>();
-        let count = ops.unsigned::<2>();
-        let (vm, state) = (ctx.vm, ctx.state);
-        let f = vm.runtime(NativeIndex(rt));
-        let args = state.stack().window(state.frame_base(), base, count);
-        let nctx = HostCtx::new(vm, ctx.heap_mut(), state);
-        let v = f(nctx, None, args);
-        // the callee's result view is fresh, but a view may not cross the
-        // continuation's heap-exclusive use — and raw()-ing it here would
-        // just trade that for a freshness convention. Park it in the acc
-        // slot (collector-updated) and re-read the raw word: safe even if
-        // the continuation ever grows an allocation.
-        let acc_slot = state.acc_slot();
-        acc_slot.store(v);
-        let w = Acc::set(acc_slot.get(ctx.heap()));
-        become resume(
-            unsafe { ctx.code_ptr().add(pc) },
-            regs,
-            w,
-            ctx,
-            table,
-            roots,
-            float,
-        )
-    }
-);
+handler!(op_call_runtime, CallRuntime, |ip, ops, regs, acc, ctx, table, roots, float| {
+    let pc = ip as usize - ctx.code_ptr() as usize;
+    let rt = ops.unsigned::<0>();
+    let base = ops.signed::<1>();
+    let count = ops.unsigned::<2>();
+    let (vm, state) = (ctx.vm, ctx.state);
+    let f = vm.runtime(NativeIndex(rt));
+    let args = state.stack().window(state.frame_base(), base, count);
+    let nctx = HostCtx::new(vm, ctx.heap_mut(), state);
+    let v = f(nctx, None, args);
+    // the callee's result view is fresh, but a view may not cross the
+    // continuation's heap-exclusive use — and raw()-ing it here would
+    // just trade that for a freshness convention. Park it in the acc
+    // slot (collector-updated) and re-read the raw word: safe even if
+    // the continuation ever grows an allocation.
+    let acc_slot = state.acc_slot();
+    acc_slot.store(v);
+    let w = Acc::set(acc_slot.get(ctx.heap()));
+    become resume(unsafe { ctx.code_ptr().add(pc) }, regs, w, ctx, table, roots, float)
+});
 
 // ---------------------------------------------------------------------------
 // table: forces monomorphization (STRIDE = 1) for codegen comparison

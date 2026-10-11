@@ -398,16 +398,7 @@ extern "rust-preserve-none" fn op_load<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Load);
     let r = ops.signed::<0>();
-    next!(
-        Load,
-        ip,
-        regs,
-        ctx,
-        table,
-        roots,
-        float,
-        regs.get(r, ctx.heap())
-    )
+    next!(Load, ip, regs, ctx, table, roots, float, regs.get(r, ctx.heap()))
 }
 
 #[rustc_align(32)]
@@ -456,16 +447,7 @@ extern "rust-preserve-none" fn op_load_smi<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::LoadSmi);
     let imm = ops.signed::<0>();
-    next!(
-        LoadSmi,
-        ip,
-        regs,
-        ctx,
-        table,
-        roots,
-        float,
-        Smi::new(imm as i64).into_tagged()
-    )
+    next!(LoadSmi, ip, regs, ctx, table, roots, float, Smi::new(imm as i64).into_tagged())
 }
 
 #[rustc_align(32)]
@@ -495,16 +477,7 @@ extern "rust-preserve-none" fn op_load_zero<'a, const STRIDE: usize>(
     float: FloatReg,
 ) -> Tagged<'a, Value> {
     Ops::<STRIDE>::new(ip, Opcode::LoadZero);
-    next!(
-        LoadZero,
-        ip,
-        regs,
-        ctx,
-        table,
-        roots,
-        float,
-        Smi::new(0).into_tagged()
-    )
+    next!(LoadZero, ip, regs, ctx, table, roots, float, Smi::new(0).into_tagged())
 }
 
 #[rustc_align(32)]
@@ -588,16 +561,7 @@ extern "rust-preserve-none" fn op_add<'a, const STRIDE: usize>(
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && let Some(sum) = a.checked_add(b)
     {
-        next!(
-            Add,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(sum)
-        )
+        next!(Add, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(sum))
     }
     if let (Some(a), Some(b)) = (lhs.as_number(ctx.heap()), acc.as_number(ctx.heap())) {
         let sum = a + b;
@@ -628,16 +592,7 @@ extern "rust-preserve-none" fn op_sub<'a, const STRIDE: usize>(
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && let Some(diff) = a.checked_sub(b)
     {
-        next!(
-            Sub,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(diff)
-        )
+        next!(Sub, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(diff))
     }
     if let (Some(a), Some(b)) = (lhs.as_number(ctx.heap()), acc.as_number(ctx.heap())) {
         let diff = a - b;
@@ -668,16 +623,7 @@ extern "rust-preserve-none" fn op_mul<'a, const STRIDE: usize>(
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && let Some(product) = (a >> 1).checked_mul(b)
     {
-        next!(
-            Mul,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(product)
-        )
+        next!(Mul, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(product))
     }
     if let (Some(a), Some(b)) = (lhs.as_number(ctx.heap()), acc.as_number(ctx.heap())) {
         let product = a * b;
@@ -709,16 +655,7 @@ extern "rust-preserve-none" fn op_add_immediate<'a, const STRIDE: usize>(
     if let Some(bits) = lhs.smi_bits()
         && let Some(sum) = bits.checked_add((imm as i64) << 1)
     {
-        next!(
-            AddImmediate,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(sum)
-        )
+        next!(AddImmediate, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(sum))
     }
     become slow_add_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -740,16 +677,7 @@ extern "rust-preserve-none" fn op_sub_immediate<'a, const STRIDE: usize>(
     if let Some(bits) = lhs.smi_bits()
         && let Some(diff) = bits.checked_sub((imm as i64) << 1)
     {
-        next!(
-            SubImmediate,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(diff)
-        )
+        next!(SubImmediate, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(diff))
     }
     become slow_numeric_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -834,16 +762,7 @@ extern "rust-preserve-none" fn op_equal<'a, const STRIDE: usize>(
     let r = ops.signed::<0>();
     let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
-        next!(
-            Equal,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Convert::boolean(ctx.heap(), a == b)
-        )
+        next!(Equal, ip, regs, ctx, table, roots, float, Convert::boolean(ctx.heap(), a == b))
     }
     become slow_equal::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -862,16 +781,7 @@ extern "rust-preserve-none" fn op_less_than<'a, const STRIDE: usize>(
     let r = ops.signed::<0>();
     let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
-        next!(
-            LessThan,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Convert::boolean(ctx.heap(), a < b)
-        )
+        next!(LessThan, ip, regs, ctx, table, roots, float, Convert::boolean(ctx.heap(), a < b))
     }
     become slow_less_than::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -890,16 +800,7 @@ extern "rust-preserve-none" fn op_greater_than<'a, const STRIDE: usize>(
     let r = ops.signed::<0>();
     let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
-        next!(
-            GreaterThan,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Convert::boolean(ctx.heap(), a > b)
-        )
+        next!(GreaterThan, ip, regs, ctx, table, roots, float, Convert::boolean(ctx.heap(), a > b))
     }
     become slow_greater_than::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -1347,16 +1248,7 @@ extern "rust-preserve-none" fn op_div<'a, const STRIDE: usize>(
         && let Some(quotient) = a.checked_div(b)
         && let Some(encoded) = quotient.checked_mul(2)
     {
-        next!(
-            Div,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(encoded)
-        )
+        next!(Div, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(encoded))
     }
     if let (Some(a), Some(b)) = (lhs.as_number(ctx.heap()), acc.as_number(ctx.heap())) {
         let quotient = a / b;
@@ -1387,16 +1279,7 @@ extern "rust-preserve-none" fn op_mod<'a, const STRIDE: usize>(
     if let (Some(a), Some(b)) = (lhs.to_i64(), acc.to_i64())
         && b != 0
     {
-        next!(
-            Mod,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Smi::new(a % b).into_tagged()
-        )
+        next!(Mod, ip, regs, ctx, table, roots, float, Smi::new(a % b).into_tagged())
     }
     become slow_numeric::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -1419,16 +1302,7 @@ extern "rust-preserve-none" fn op_mul_immediate<'a, const STRIDE: usize>(
         && let Some(product) = (bits >> 1).checked_mul(imm as i64)
         && let Some(encoded) = product.checked_mul(2)
     {
-        next!(
-            MulImmediate,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(encoded)
-        )
+        next!(MulImmediate, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(encoded))
     }
     become slow_numeric_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
 }
@@ -1454,16 +1328,7 @@ extern "rust-preserve-none" fn op_div_immediate<'a, const STRIDE: usize>(
             && let Some(quotient) = value.checked_div(imm as i64)
             && let Some(encoded) = quotient.checked_mul(2)
         {
-            next!(
-                DivImmediate,
-                ip,
-                regs,
-                ctx,
-                table,
-                roots,
-                float,
-                Tagged::from_smi_bits(encoded)
-            )
+            next!(DivImmediate, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(encoded))
         }
     }
     become slow_numeric_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
@@ -1530,16 +1395,7 @@ extern "rust-preserve-none" fn op_negate<'a, const STRIDE: usize>(
         && bits != 0
         && let Some(neg) = bits.checked_neg()
     {
-        next!(
-            Negate,
-            ip,
-            regs,
-            ctx,
-            table,
-            roots,
-            float,
-            Tagged::from_smi_bits(neg)
-        )
+        next!(Negate, ip, regs, ctx, table, roots, float, Tagged::from_smi_bits(neg))
     }
     if let Some(a) = acc.as_number(ctx.heap()) {
         let neg = -a;
@@ -1734,15 +1590,7 @@ extern "rust-preserve-none" fn op_jump_loop<'a, const STRIDE: usize>(
         let target = ip.wrapping_offset(off as isize);
         let pc = target as usize - ctx.code_ptr() as usize;
         let acc = ctx.acc_slot().get(ctx.heap());
-        reenter!(
-            ctx,
-            unsafe { ctx.code_ptr().add(pc) },
-            0,
-            acc,
-            table,
-            roots,
-            float
-        )
+        reenter!(ctx, unsafe { ctx.code_ptr().add(pc) }, 0, acc, table, roots, float)
     } else {
         jump!(ip, off, acc, regs, ctx, table, roots, float)
     }
@@ -1847,16 +1695,7 @@ extern "rust-preserve-none" fn op_store_keyed_no_shadow<'a, const STRIDE: usize>
             .store_array_element_in_place(ctx.heap(), idx as usize, acc)
             .is_ok()
         {
-            next!(
-                StoreKeyedPropertyNoShadow,
-                ip,
-                regs,
-                ctx,
-                table,
-                roots,
-                float,
-                acc
-            )
+            next!(StoreKeyedPropertyNoShadow, ip, regs, ctx, table, roots, float, acc)
         }
         if let Some(v) = InlineCache::try_store_element(
             ctx.heap(),
@@ -1866,16 +1705,7 @@ extern "rust-preserve-none" fn op_store_keyed_no_shadow<'a, const STRIDE: usize>
             idx as usize,
             acc,
         ) {
-            next!(
-                StoreKeyedPropertyNoShadow,
-                ip,
-                regs,
-                ctx,
-                table,
-                roots,
-                float,
-                v
-            )
+            next!(StoreKeyedPropertyNoShadow, ip, regs, ctx, table, roots, float, v)
         }
     }
     become slow_keyed_store_no_shadow::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
@@ -2307,16 +2137,7 @@ extern "rust-preserve-none" fn op_throw_reference_error_if_hole<'a, const STRIDE
     if acc == ctx.heap().known().the_hole.as_tagged(ctx.heap()).erase() {
         bail!(acc, ip, regs, ctx, table, roots, float, VmError::Reference)
     }
-    next!(
-        ThrowReferenceErrorIfHole,
-        ip,
-        regs,
-        ctx,
-        table,
-        roots,
-        float,
-        acc
-    )
+    next!(ThrowReferenceErrorIfHole, ip, regs, ctx, table, roots, float, acc)
 }
 
 #[rustc_align(32)]
@@ -2355,16 +2176,7 @@ extern "rust-preserve-none" fn op_test_typeof<'a, const STRIDE: usize>(
     float: FloatReg,
 ) -> Tagged<'a, Value> {
     Ops::<STRIDE>::new(ip, Opcode::TestTypeof);
-    next!(
-        TestTypeof,
-        ip,
-        regs,
-        ctx,
-        table,
-        roots,
-        float,
-        Object::type_of(ctx.heap(), acc)
-    )
+    next!(TestTypeof, ip, regs, ctx, table, roots, float, Object::type_of(ctx.heap(), acc))
 }
 
 #[rustc_align(32)]
@@ -2688,15 +2500,7 @@ extern "rust-preserve-none" fn op_call_runtime<'a, const STRIDE: usize>(
     let args = ctx.stack().window(ctx.frame_base(), base, count);
     let nctx = HostCtx::new(ctx.vm(), unsafe { ctx.heap_mut() }, ctx.state());
     let v = f(nctx, None, args);
-    become resume(
-        unsafe { ctx.code_ptr().add(pc) },
-        regs,
-        v,
-        ctx,
-        table,
-        roots,
-        float,
-    )
+    become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
 }
 
 #[rustc_align(32)]
@@ -2728,15 +2532,7 @@ extern "rust-preserve-none" fn op_call_method0<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -2784,15 +2580,7 @@ extern "rust-preserve-none" fn op_call_method1<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -2841,15 +2629,7 @@ extern "rust-preserve-none" fn op_call_method2<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -2895,15 +2675,7 @@ extern "rust-preserve-none" fn op_call_function0<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -2950,15 +2722,7 @@ extern "rust-preserve-none" fn op_call_function1<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -3006,15 +2770,7 @@ extern "rust-preserve-none" fn op_call_function2<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -3062,15 +2818,7 @@ extern "rust-preserve-none" fn op_call_ic<'a, const STRIDE: usize>(
     );
     match __mc {
         MethodCall::Value(v) => {
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         MethodCall::Frame(_frame) => dispatch!(
             ctx.code_ptr(),
@@ -3112,15 +2860,7 @@ extern "rust-preserve-none" fn op_call<'a, const STRIDE: usize>(
         }
         Some(CallTarget::Native(rt)) => {
             let v = ctx.call_runtime(rt, ctx.stack().window(ctx.frame_base(), base_r, count));
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         Some(CallTarget::Bytecode {
             target,
@@ -3203,15 +2943,7 @@ extern "rust-preserve-none" fn op_construct<'a, const STRIDE: usize>(
         }
         ConstructStart::Native(rt) => {
             let v = dispatch_runtime_construct(ctx, rt, callee, base_r, count);
-            become resume(
-                unsafe { ctx.code_ptr().add(pc) },
-                regs,
-                v,
-                ctx,
-                table,
-                roots,
-                float,
-            )
+            become resume(unsafe { ctx.code_ptr().add(pc) }, regs, v, ctx, table, roots, float)
         }
         ConstructStart::Threw(()) => {
             become throw_dispatch(
@@ -3636,13 +3368,9 @@ fn call_method_start<'a>(
                 argc,
             )
         }
-        CallProbe::Native(rt) => Ok(MethodCall::Value(dispatch_runtime_scattered(
-            ctx,
-            rt,
-            Recv::Reg(recv),
-            args,
-            argc,
-        ))),
+        CallProbe::Native(rt) => {
+            Ok(MethodCall::Value(dispatch_runtime_scattered(ctx, rt, Recv::Reg(recv), args, argc)))
+        }
         CallProbe::Miss => slow_call_method_miss(ctx, pc, size, callee_word, recv, args, argc, fb),
     }
 }
@@ -3681,13 +3409,9 @@ fn call_function_start<'a>(
                 argc,
             )
         }
-        CallProbe::Native(rt) => Ok(MethodCall::Value(dispatch_runtime_scattered(
-            ctx,
-            rt,
-            Recv::Undefined,
-            args,
-            argc,
-        ))),
+        CallProbe::Native(rt) => {
+            Ok(MethodCall::Value(dispatch_runtime_scattered(ctx, rt, Recv::Undefined, args, argc)))
+        }
         CallProbe::Miss => slow_call_function_miss(ctx, pc, size, callee_word, args, argc, fb),
     }
 }

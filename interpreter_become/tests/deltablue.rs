@@ -15,10 +15,7 @@ function alert(m) { throw new Error("ALERT: " + m); }
 #[test]
 fn deltablue() {
     let src = [
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../benchmarks/octane/deltablue/deltablue.js"
-        ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/octane/deltablue/deltablue.js"),
         "benchmarks/octane/deltablue/deltablue.js",
     ]
     .iter()
