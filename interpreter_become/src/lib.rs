@@ -8,9 +8,9 @@ use bytecode::{OPERAND_SIZES_NARROW, OPERAND_SIZES_WIDE, Opcode};
 use vm_core::ic::{CallHit, CallProbe, ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    Args, CallTarget, Callee, Coercion, Compare, ContextObject, ThreadState, Convert, Ctx, EntryFn,
-    FixedArray, FrameMeta, FunctionKind, Handle, HandleSlice, Heap, Interpreter, Object, Recv,
-    Register, HostCtx, NativeIndex, Smi, Tagged, VM, Value, VmError,
+    Args, CallTarget, Callee, Coercion, Compare, ContextObject, Convert, Ctx, EntryFn, FixedArray,
+    FrameMeta, FunctionKind, Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex, Object,
+    Recv, Register, Smi, Tagged, ThreadState, VM, Value, VmError,
 };
 
 pub struct BecomeInterpreter;
@@ -32,16 +32,17 @@ impl Regs {
 
     /// Safe by the register-file invariant: slots hold strong, valid
     /// values from frame setup until the frame pops (the collector
-    /// updates them in place). The `Ctx` argument anchors the returned
+    /// updates them in place). The `&Heap` argument anchors the returned
     /// value to the GC epoch, like `Register::get(heap)`.
     #[inline(always)]
-    pub fn read<'h>(&self, i: i32, _ctx: &Ctx<'h>) -> Tagged<'h, Value> {
+    pub fn get<'h>(&self, i: i32, heap: &'h Heap) -> Tagged<'h, Value> {
+        let _ = heap;
         // Safety: the invariant above.
         unsafe { Tagged::from_value_unchecked((*self.0.offset(i as isize)).raw()) }
     }
 
     #[inline(always)]
-    pub fn write(&self, i: i32, v: Tagged<'_, Value>) {
+    pub fn set(&self, i: i32, v: Tagged<'_, Value>) {
         // Safety: the window invariant covers this slot.
         unsafe {
             (*self.0.offset(i as isize)).store(v);
@@ -330,7 +331,7 @@ macro_rules! next {
         {
             if star_lookahead(Opcode::$op) && unsafe { *p } == Opcode::Store as u8 {
                 let dst = unsafe { *p.add(1) } as i8 as i32;
-                $r.write(dst, $a);
+                $r.set(dst, $a);
                 dispatch!(unsafe { p.add(2) }, $a, $r, $x, $t, $k, $f)
             } else {
                 dispatch!(p, $a, $r, $x, $t, $k, $f)
@@ -397,7 +398,16 @@ extern "rust-preserve-none" fn op_load<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Load);
     let r = ops.signed::<0>();
-    next!(Load, ip, regs, ctx, table, roots, float, regs.read(r, ctx))
+    next!(
+        Load,
+        ip,
+        regs,
+        ctx,
+        table,
+        roots,
+        float,
+        regs.get(r, ctx.heap())
+    )
 }
 
 #[rustc_align(32)]
@@ -413,8 +423,8 @@ extern "rust-preserve-none" fn op_move<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::Move);
     let dst = ops.signed::<0>();
     let src = ops.signed::<1>();
-    let v = regs.read(src, ctx);
-    regs.write(dst, v);
+    let v = regs.get(src, ctx.heap());
+    regs.set(dst, v);
     next!(Move, ip, regs, ctx, table, roots, float, acc)
 }
 
@@ -430,7 +440,7 @@ extern "rust-preserve-none" fn op_store<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Store);
     let r = ops.signed::<0>();
-    regs.write(r, acc);
+    regs.set(r, acc);
     next!(Store, ip, regs, ctx, table, roots, float, acc)
 }
 
@@ -574,7 +584,7 @@ extern "rust-preserve-none" fn op_add<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Add);
     let r = ops.signed::<0>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && let Some(sum) = a.checked_add(b)
     {
@@ -614,7 +624,7 @@ extern "rust-preserve-none" fn op_sub<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Sub);
     let r = ops.signed::<0>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && let Some(diff) = a.checked_sub(b)
     {
@@ -654,7 +664,7 @@ extern "rust-preserve-none" fn op_mul<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Mul);
     let r = ops.signed::<0>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && let Some(product) = (a >> 1).checked_mul(b)
     {
@@ -695,7 +705,7 @@ extern "rust-preserve-none" fn op_add_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::AddImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let Some(bits) = lhs.smi_bits()
         && let Some(sum) = bits.checked_add((imm as i64) << 1)
     {
@@ -726,7 +736,7 @@ extern "rust-preserve-none" fn op_sub_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::SubImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let Some(bits) = lhs.smi_bits()
         && let Some(diff) = bits.checked_sub((imm as i64) << 1)
     {
@@ -756,21 +766,21 @@ extern "rust-preserve-none" fn op_inc_loc<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::IncLoc);
     let r = ops.signed::<0>();
-    let v = regs.read(r, ctx);
+    let v = regs.get(r, ctx.heap());
     if let Some(bits) = v.smi_bits()
         && let Some(new) = bits.checked_add(2)
     {
-        regs.write(r, Tagged::from_smi_bits(new));
+        regs.set(r, Tagged::from_smi_bits(new));
         next!(IncLoc, ip, regs, ctx, table, roots, float, v)
     }
     if let Some(n) = v.as_number(ctx.heap()) {
         let new = n + 1.0;
         if let Some(s) = Smi::from_f64(new) {
-            regs.write(r, s.into_tagged());
+            regs.set(r, s.into_tagged());
             next!(IncLoc, ip, regs, ctx, table, roots, float, v)
         }
         if let Some(t) = unsafe { ctx.heap_mut() }.try_new_float(new) {
-            regs.write(r, t);
+            regs.set(r, t);
             next!(IncLoc, ip, regs, ctx, table, roots, float, v)
         }
     }
@@ -789,21 +799,21 @@ extern "rust-preserve-none" fn op_dec_loc<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::DecLoc);
     let r = ops.signed::<0>();
-    let v = regs.read(r, ctx);
+    let v = regs.get(r, ctx.heap());
     if let Some(bits) = v.smi_bits()
         && let Some(new) = bits.checked_sub(2)
     {
-        regs.write(r, Tagged::from_smi_bits(new));
+        regs.set(r, Tagged::from_smi_bits(new));
         next!(DecLoc, ip, regs, ctx, table, roots, float, v)
     }
     if let Some(n) = v.as_number(ctx.heap()) {
         let new = n - 1.0;
         if let Some(s) = Smi::from_f64(new) {
-            regs.write(r, s.into_tagged());
+            regs.set(r, s.into_tagged());
             next!(DecLoc, ip, regs, ctx, table, roots, float, v)
         }
         if let Some(t) = unsafe { ctx.heap_mut() }.try_new_float(new) {
-            regs.write(r, t);
+            regs.set(r, t);
             next!(DecLoc, ip, regs, ctx, table, roots, float, v)
         }
     }
@@ -822,7 +832,7 @@ extern "rust-preserve-none" fn op_equal<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Equal);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
         next!(
             Equal,
@@ -850,7 +860,7 @@ extern "rust-preserve-none" fn op_less_than<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::LessThan);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
         next!(
             LessThan,
@@ -878,7 +888,7 @@ extern "rust-preserve-none" fn op_greater_than<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::GreaterThan);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
         next!(
             GreaterThan,
@@ -985,7 +995,7 @@ extern "rust-preserve-none" fn op_bitwise_or<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::BitwiseOr);
     let r = ops.signed::<0>();
-    let (Some(a), Some(b)) = (regs.read(r, ctx).to_i64(), acc.to_i64()) else {
+    let (Some(a), Some(b)) = (regs.get(r, ctx.heap()).to_i64(), acc.to_i64()) else {
         become slow_bitwise::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1012,7 +1022,7 @@ extern "rust-preserve-none" fn op_bitwise_xor<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::BitwiseXor);
     let r = ops.signed::<0>();
-    let (Some(a), Some(b)) = (regs.read(r, ctx).to_i64(), acc.to_i64()) else {
+    let (Some(a), Some(b)) = (regs.get(r, ctx.heap()).to_i64(), acc.to_i64()) else {
         become slow_bitwise::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1039,7 +1049,7 @@ extern "rust-preserve-none" fn op_bitwise_and<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::BitwiseAnd);
     let r = ops.signed::<0>();
-    let (Some(a), Some(b)) = (regs.read(r, ctx).to_i64(), acc.to_i64()) else {
+    let (Some(a), Some(b)) = (regs.get(r, ctx.heap()).to_i64(), acc.to_i64()) else {
         become slow_bitwise::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1066,7 +1076,7 @@ extern "rust-preserve-none" fn op_shift_left<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::ShiftLeft);
     let r = ops.signed::<0>();
-    let (Some(a), Some(b)) = (regs.read(r, ctx).to_i64(), acc.to_i64()) else {
+    let (Some(a), Some(b)) = (regs.get(r, ctx.heap()).to_i64(), acc.to_i64()) else {
         become slow_bitwise::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1093,7 +1103,7 @@ extern "rust-preserve-none" fn op_shift_right<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::ShiftRight);
     let r = ops.signed::<0>();
-    let (Some(a), Some(b)) = (regs.read(r, ctx).to_i64(), acc.to_i64()) else {
+    let (Some(a), Some(b)) = (regs.get(r, ctx.heap()).to_i64(), acc.to_i64()) else {
         become slow_bitwise::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1120,7 +1130,7 @@ extern "rust-preserve-none" fn op_shift_right_logical<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::ShiftRightLogical);
     let r = ops.signed::<0>();
-    let (Some(a), Some(b)) = (regs.read(r, ctx).to_i64(), acc.to_i64()) else {
+    let (Some(a), Some(b)) = (regs.get(r, ctx.heap()).to_i64(), acc.to_i64()) else {
         become slow_bitwise::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1148,7 +1158,7 @@ extern "rust-preserve-none" fn op_bitwise_or_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::BitwiseOrImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let Some(a) = regs.read(r, ctx).to_i64() else {
+    let Some(a) = regs.get(r, ctx.heap()).to_i64() else {
         become slow_bitwise_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1176,7 +1186,7 @@ extern "rust-preserve-none" fn op_bitwise_xor_immediate<'a, const STRIDE: usize>
     let ops = Ops::<STRIDE>::new(ip, Opcode::BitwiseXorImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let Some(a) = regs.read(r, ctx).to_i64() else {
+    let Some(a) = regs.get(r, ctx.heap()).to_i64() else {
         become slow_bitwise_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1204,7 +1214,7 @@ extern "rust-preserve-none" fn op_bitwise_and_immediate<'a, const STRIDE: usize>
     let ops = Ops::<STRIDE>::new(ip, Opcode::BitwiseAndImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let Some(a) = regs.read(r, ctx).to_i64() else {
+    let Some(a) = regs.get(r, ctx.heap()).to_i64() else {
         become slow_bitwise_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1232,7 +1242,7 @@ extern "rust-preserve-none" fn op_shift_left_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::ShiftLeftImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let Some(a) = regs.read(r, ctx).to_i64() else {
+    let Some(a) = regs.get(r, ctx.heap()).to_i64() else {
         become slow_bitwise_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1260,7 +1270,7 @@ extern "rust-preserve-none" fn op_shift_right_immediate<'a, const STRIDE: usize>
     let ops = Ops::<STRIDE>::new(ip, Opcode::ShiftRightImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let Some(a) = regs.read(r, ctx).to_i64() else {
+    let Some(a) = regs.get(r, ctx.heap()).to_i64() else {
         become slow_bitwise_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1288,7 +1298,7 @@ extern "rust-preserve-none" fn op_shift_right_logical_immediate<'a, const STRIDE
     let ops = Ops::<STRIDE>::new(ip, Opcode::ShiftRightLogicalImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let Some(a) = regs.read(r, ctx).to_i64() else {
+    let Some(a) = regs.get(r, ctx.heap()).to_i64() else {
         become slow_bitwise_immediate::<STRIDE>(ip, regs, acc, ctx, table, roots, float)
     };
     next!(
@@ -1330,7 +1340,7 @@ extern "rust-preserve-none" fn op_div<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Div);
     let r = ops.signed::<0>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.smi_bits(), acc.smi_bits())
         && b != 0
         && a % b == 0
@@ -1373,7 +1383,7 @@ extern "rust-preserve-none" fn op_mod<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::Mod);
     let r = ops.signed::<0>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.to_i64(), acc.to_i64())
         && b != 0
     {
@@ -1404,7 +1414,7 @@ extern "rust-preserve-none" fn op_mul_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::MulImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let Some(bits) = lhs.smi_bits()
         && let Some(product) = (bits >> 1).checked_mul(imm as i64)
         && let Some(encoded) = product.checked_mul(2)
@@ -1436,7 +1446,7 @@ extern "rust-preserve-none" fn op_div_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::DivImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if let Some(bits) = lhs.smi_bits() {
         let value = bits >> 1;
         if imm != 0
@@ -1472,7 +1482,7 @@ extern "rust-preserve-none" fn op_mod_immediate<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::ModImmediate);
     let r = ops.signed::<0>();
     let imm = ops.signed::<1>();
-    let lhs = regs.read(r, ctx);
+    let lhs = regs.get(r, ctx.heap());
     if imm != 0
         && let Some(bits) = lhs.smi_bits()
     {
@@ -1558,7 +1568,7 @@ extern "rust-preserve-none" fn op_compare_jump<'a, const STRIDE: usize>(
     let r = ops.signed::<0>();
     let kind = ops.unsigned::<1>();
     let off = ops.signed::<2>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     let cmp = (kind / 2) as u8;
     let falsy_jump = kind % 2 == 1;
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
@@ -1637,24 +1647,24 @@ extern "rust-preserve-none" fn op_add_loc<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::AddLoc);
     let dst = ops.signed::<0>();
     let src = ops.signed::<1>();
-    let lhs = regs.read(dst, ctx);
-    let rhs = regs.read(src, ctx);
+    let lhs = regs.get(dst, ctx.heap());
+    let rhs = regs.get(src, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.smi_bits(), rhs.smi_bits())
         && let Some(sum) = a.checked_add(b)
     {
         let v = Tagged::from_smi_bits(sum);
-        regs.write(dst, v);
+        regs.set(dst, v);
         next!(AddLoc, ip, regs, ctx, table, roots, float, v)
     }
     if let (Some(a), Some(b)) = (lhs.as_number(ctx.heap()), rhs.as_number(ctx.heap())) {
         let sum = a + b;
         if let Some(s) = Smi::from_f64(sum) {
             let v = s.into_tagged();
-            regs.write(dst, v);
+            regs.set(dst, v);
             next!(AddLoc, ip, regs, ctx, table, roots, float, v)
         }
         if let Some(v) = unsafe { ctx.heap_mut() }.try_new_float(sum) {
-            regs.write(dst, v);
+            regs.set(dst, v);
             next!(AddLoc, ip, regs, ctx, table, roots, float, v)
         }
         become slow_box_add_loc::<STRIDE>(ip, regs, acc, ctx, table, roots, FloatReg::new(sum))
@@ -1675,24 +1685,24 @@ extern "rust-preserve-none" fn op_sub_loc<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::SubLoc);
     let dst = ops.signed::<0>();
     let src = ops.signed::<1>();
-    let lhs = regs.read(dst, ctx);
-    let rhs = regs.read(src, ctx);
+    let lhs = regs.get(dst, ctx.heap());
+    let rhs = regs.get(src, ctx.heap());
     if let (Some(a), Some(b)) = (lhs.smi_bits(), rhs.smi_bits())
         && let Some(diff) = a.checked_sub(b)
     {
         let v = Tagged::from_smi_bits(diff);
-        regs.write(dst, v);
+        regs.set(dst, v);
         next!(SubLoc, ip, regs, ctx, table, roots, float, v)
     }
     if let (Some(a), Some(b)) = (lhs.as_number(ctx.heap()), rhs.as_number(ctx.heap())) {
         let diff = a - b;
         if let Some(s) = Smi::from_f64(diff) {
             let v = s.into_tagged();
-            regs.write(dst, v);
+            regs.set(dst, v);
             next!(SubLoc, ip, regs, ctx, table, roots, float, v)
         }
         if let Some(v) = unsafe { ctx.heap_mut() }.try_new_float(diff) {
-            regs.write(dst, v);
+            regs.set(dst, v);
             next!(SubLoc, ip, regs, ctx, table, roots, float, v)
         }
         become slow_box_sub_loc::<STRIDE>(ip, regs, acc, ctx, table, roots, FloatReg::new(diff))
@@ -1752,8 +1762,8 @@ extern "rust-preserve-none" fn op_load_keyed_reg<'a, const STRIDE: usize>(
     let recv = ops.signed::<0>();
     let key = ops.signed::<1>();
     let fb = ops.unsigned::<2>();
-    let recv = regs.read(recv, ctx);
-    let key = regs.read(key, ctx);
+    let recv = regs.get(recv, ctx.heap());
+    let key = regs.get(key, ctx.heap());
     if let Some(idx) = key.to_i64()
         && idx >= 0
     {
@@ -1789,12 +1799,15 @@ extern "rust-preserve-none" fn op_store_keyed<'a, const STRIDE: usize>(
     let recv = ops.signed::<0>();
     let key = ops.signed::<1>();
     let fb = ops.unsigned::<2>();
-    let recv_w = regs.read(recv, ctx);
-    let key_w = regs.read(key, ctx);
+    let recv_w = regs.get(recv, ctx.heap());
+    let key_w = regs.get(key, ctx.heap());
     if let Some(idx) = key_w.to_i64()
         && idx >= 0
     {
-        if recv_w.store_array_element_in_place(ctx.heap(), idx as usize, acc).is_ok() {
+        if recv_w
+            .store_array_element_in_place(ctx.heap(), idx as usize, acc)
+            .is_ok()
+        {
             next!(StoreKeyedProperty, ip, regs, ctx, table, roots, float, acc)
         }
         if let Some(v) = InlineCache::try_store_element(
@@ -1825,12 +1838,15 @@ extern "rust-preserve-none" fn op_store_keyed_no_shadow<'a, const STRIDE: usize>
     let recv = ops.signed::<0>();
     let key = ops.signed::<1>();
     let fb = ops.unsigned::<2>();
-    let recv_w = regs.read(recv, ctx);
-    let key_w = regs.read(key, ctx);
+    let recv_w = regs.get(recv, ctx.heap());
+    let key_w = regs.get(key, ctx.heap());
     if let Some(idx) = key_w.to_i64()
         && idx >= 0
     {
-        if recv_w.store_array_element_in_place(ctx.heap(), idx as usize, acc).is_ok() {
+        if recv_w
+            .store_array_element_in_place(ctx.heap(), idx as usize, acc)
+            .is_ok()
+        {
             next!(
                 StoreKeyedPropertyNoShadow,
                 ip,
@@ -1878,7 +1894,7 @@ extern "rust-preserve-none" fn op_load_named<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::LoadNamedProperty);
     let r = ops.signed::<0>();
     let fb = ops.unsigned::<2>();
-    let recv = regs.read(r, ctx);
+    let recv = regs.get(r, ctx.heap());
     match InlineCache::probe_mono(ctx.heap(), ctx.feedback_ref(ctx.heap()), fb, recv) {
         MonoProbe::Value(v) => next!(LoadNamedProperty, ip, regs, ctx, table, roots, float, v),
         MonoProbe::Handler(obj, handler) => {
@@ -1916,7 +1932,7 @@ extern "rust-preserve-none" fn op_load_keyed<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::LoadKeyedProperty);
     let r = ops.signed::<0>();
     let fb = ops.unsigned::<1>();
-    let recv = regs.read(r, ctx);
+    let recv = regs.get(r, ctx.heap());
     if let Some(idx) = acc.to_i64()
         && idx >= 0
     {
@@ -1952,7 +1968,7 @@ extern "rust-preserve-none" fn op_load_element_imm<'a, const STRIDE: usize>(
     let r = ops.signed::<0>();
     let idx = ops.unsigned::<1>();
     let fb = ops.unsigned::<2>();
-    let recv = regs.read(r, ctx);
+    let recv = regs.get(r, ctx.heap());
     if let Some(obj) = recv.as_heap_object()
         && let Some(v) = obj.as_ref().element_value_dense(ctx.heap(), idx)
     {
@@ -2010,7 +2026,7 @@ extern "rust-preserve-none" fn op_store_named<'a, const STRIDE: usize>(
     let r = ops.signed::<0>();
     let name_idx = ops.unsigned::<1>();
     let fb = ops.unsigned::<2>();
-    let recv = regs.read(r, ctx);
+    let recv = regs.get(r, ctx.heap());
     // The constant-pool name is a stable interned string; the word stays
     // valid for the allocation-free fast path.
     let name_word = ctx
@@ -2018,8 +2034,7 @@ extern "rust-preserve-none" fn op_store_named<'a, const STRIDE: usize>(
         .as_ref()
         .at(ctx.heap(), name_idx)
         .raw();
-    let name: Tagged<'_, vm_core::SlotName> =
-        unsafe { Tagged::from_value_unchecked(name_word) };
+    let name: Tagged<'_, vm_core::SlotName> = unsafe { Tagged::from_value_unchecked(name_word) };
     if InlineCache::try_store_fast(
         unsafe { ctx.heap_mut() },
         ctx.feedback_ref(ctx.heap()),
@@ -2051,13 +2066,19 @@ extern "rust-preserve-none" fn op_load_context_slot<'a, const STRIDE: usize>(
         let heap = ctx.heap();
         let context_word = ctx.stack().frame_header(base).context_slot().get(heap);
         let context = unsafe { context_word.cast::<ContextObject>() };
-        let slots = context.as_ref().slots(heap);
+        let slots = context.as_ref().slots.get(heap);
         let slots = unsafe { slots.cast::<FixedArray>() };
         let v = slots.as_ref().element_slot(slot).get(heap);
         next!(LoadContextSlot, ip, regs, ctx, table, roots, float, v)
     }
     let heap = ctx.heap();
-    let Some(mut context) = ctx.stack().frame_header(base).context_slot().get(heap).get_as::<ContextObject>(heap) else {
+    let Some(mut context) = ctx
+        .stack()
+        .frame_header(base)
+        .context_slot()
+        .get(heap)
+        .get_as::<ContextObject>(heap)
+    else {
         bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type);
     };
     for _ in 0..depth {
@@ -2067,7 +2088,8 @@ extern "rust-preserve-none" fn op_load_context_slot<'a, const STRIDE: usize>(
         };
     }
     let v = context
-        .slots(heap)
+        .slots
+        .get(heap)
         .as_ref()
         .element_slot(slot)
         .get(heap);
@@ -2089,7 +2111,13 @@ extern "rust-preserve-none" fn op_store_context_slot<'a, const STRIDE: usize>(
     let depth = ops.unsigned::<1>();
     let base = ctx.frame_base();
     let heap = ctx.heap();
-    let Some(mut context) = ctx.stack().frame_header(base).context_slot().get(heap).get_as::<ContextObject>(heap) else {
+    let Some(mut context) = ctx
+        .stack()
+        .frame_header(base)
+        .context_slot()
+        .get(heap)
+        .get_as::<ContextObject>(heap)
+    else {
         bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type);
     };
     for _ in 0..depth {
@@ -2121,8 +2149,12 @@ extern "rust-preserve-none" fn op_push_context<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::PushContext);
     let r = ops.signed::<0>();
     let base = ctx.frame_base();
-    let old = ctx.stack().frame_header(base).context_slot().get(ctx.heap());
-    regs.write(r, old);
+    let old = ctx
+        .stack()
+        .frame_header(base)
+        .context_slot()
+        .get(ctx.heap());
+    regs.set(r, old);
     if acc.get_as::<ContextObject>(ctx.heap()).is_none() {
         bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type);
     }
@@ -2143,7 +2175,7 @@ extern "rust-preserve-none" fn op_pop_context<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::PopContext);
     let r = ops.signed::<0>();
     let base = ctx.frame_base();
-    let context = regs.read(r, ctx);
+    let context = regs.get(r, ctx.heap());
     if context.get_as::<ContextObject>(ctx.heap()).is_none() {
         bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type);
     }
@@ -2299,7 +2331,7 @@ extern "rust-preserve-none" fn op_test_reference_equal<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::TestReferenceEqual);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     next!(
         TestReferenceEqual,
         ip,
@@ -2347,7 +2379,7 @@ extern "rust-preserve-none" fn op_equal_strict<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::EqualStrict);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     next!(
         EqualStrict,
         ip,
@@ -2390,7 +2422,7 @@ extern "rust-preserve-none" fn op_less_than_or_equal<'a, const STRIDE: usize>(
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::LessThanOrEqual);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
         next!(
             LessThanOrEqual,
@@ -2418,7 +2450,7 @@ extern "rust-preserve-none" fn op_greater_than_or_equal<'a, const STRIDE: usize>
 ) -> Tagged<'a, Value> {
     let ops = Ops::<STRIDE>::new(ip, Opcode::GreaterThanOrEqual);
     let r = ops.signed::<0>();
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     if let (Some(a), Some(b)) = (acc.smi_bits(), other.smi_bits()) {
         next!(
             GreaterThanOrEqual,
@@ -2611,7 +2643,7 @@ extern "rust-preserve-none" fn op_load_named_fast<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::new(ip, Opcode::LoadNamedPropertyFast);
     let r = ops.signed::<0>();
     let fb = ops.unsigned::<2>();
-    let recv = regs.read(r, ctx);
+    let recv = regs.get(r, ctx.heap());
     match InlineCache::probe_mono(ctx.heap(), ctx.feedback_ref(ctx.heap()), fb, recv) {
         MonoProbe::Value(v) => next!(LoadNamedPropertyFast, ip, regs, ctx, table, roots, float, v),
         MonoProbe::Handler(obj, handler) => {
@@ -2682,7 +2714,7 @@ extern "rust-preserve-none" fn op_call_method0<'a, const STRIDE: usize>(
     let pc = ip as usize - ctx.code_ptr() as usize;
     let callee = ops.signed::<0>();
     let recv = ops.signed::<1>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<2>();
     let __mc = slow_start!(
         ip,
@@ -2738,7 +2770,7 @@ extern "rust-preserve-none" fn op_call_method1<'a, const STRIDE: usize>(
     let callee = ops.signed::<0>();
     let recv = ops.signed::<1>();
     let arg0 = ops.signed::<2>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<3>();
     let __mc = slow_start!(
         ip,
@@ -2795,7 +2827,7 @@ extern "rust-preserve-none" fn op_call_method2<'a, const STRIDE: usize>(
     let recv = ops.signed::<1>();
     let arg0 = ops.signed::<2>();
     let arg1 = ops.signed::<3>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<4>();
     let __mc = slow_start!(
         ip,
@@ -2849,7 +2881,7 @@ extern "rust-preserve-none" fn op_call_function0<'a, const STRIDE: usize>(
     let size = base::<STRIDE>() + STRIDE * const { Opcode::CallFunction0.operands().len() };
     let pc = ip as usize - ctx.code_ptr() as usize;
     let callee = ops.signed::<0>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<1>();
     let __mc = slow_start!(
         ip,
@@ -2904,7 +2936,7 @@ extern "rust-preserve-none" fn op_call_function1<'a, const STRIDE: usize>(
     let pc = ip as usize - ctx.code_ptr() as usize;
     let callee = ops.signed::<0>();
     let arg0 = ops.signed::<1>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<2>();
     let __mc = slow_start!(
         ip,
@@ -2960,7 +2992,7 @@ extern "rust-preserve-none" fn op_call_function2<'a, const STRIDE: usize>(
     let callee = ops.signed::<0>();
     let arg0 = ops.signed::<1>();
     let arg1 = ops.signed::<2>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<3>();
     let __mc = slow_start!(
         ip,
@@ -3016,7 +3048,7 @@ extern "rust-preserve-none" fn op_call_ic<'a, const STRIDE: usize>(
     let callee = ops.signed::<0>();
     let base_r = ops.signed::<1>();
     let count = ops.unsigned::<2>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let fb = ops.unsigned::<3>();
     let __mc = slow_start!(
         ip,
@@ -3072,7 +3104,7 @@ extern "rust-preserve-none" fn op_call<'a, const STRIDE: usize>(
     let callee = ops.signed::<0>();
     let base_r = ops.signed::<1>();
     let count = ops.unsigned::<2>();
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     match callee_word.call_target(ctx.heap()) {
         None => bail!(acc, ip, regs, ctx, table, roots, float, VmError::Type),
         Some(CallTarget::Proxy(_)) => {
@@ -3231,12 +3263,10 @@ fn construct_start<'a>(
     base: i32,
     count: usize,
 ) -> Result<ConstructStart, VmError> {
-    let callee_word = regs.read(callee, ctx);
-    let constructible = callee_word.as_heap_object().is_some_and(|o| {
-        o.map(ctx.heap())
-            .kind()
-            .is_constructor()
-    });
+    let callee_word = regs.get(callee, ctx.heap());
+    let constructible = callee_word
+        .as_heap_object()
+        .is_some_and(|o| o.map(ctx.heap()).kind().is_constructor());
     if !constructible {
         return Ok(ConstructStart::Slow);
     }
@@ -3260,7 +3290,7 @@ fn construct_start<'a>(
             None => return Ok(ConstructStart::Threw(())),
         }
     };
-    let callee_word = regs.read(callee, ctx);
+    let callee_word = regs.get(callee, ctx.heap());
     let Some(CallTarget::Bytecode {
         target,
         info,
@@ -3279,9 +3309,9 @@ fn construct_start<'a>(
         return Ok(ConstructStart::Slow);
     }
     let heap = unsafe { ctx.heap_mut() };
-    let staged =
-        ctx.stack()
-            .stage_construct(ctx.frame_base(), receiver, base, count)?;
+    let staged = ctx
+        .stack()
+        .stage_construct(ctx.frame_base(), receiver, base, count)?;
     let frame = ctx.stack().push_frame(
         heap,
         ctx.caller_meta(pc + size, pc),
@@ -3334,8 +3364,9 @@ fn construct_receiver_fast<'a>(
         // Root the word: the returned `Tagged` keeps the `&mut Heap` borrow
         // alive, which would conflict with the cast's shared map read.
         let obj = scope.handle(obj);
-        let obj: vm_core::Handle<Object> =
-            scope.cast::<Object>(heap, obj.as_tagged(heap)).expect("receiver is an object");
+        let obj: vm_core::Handle<Object> = scope
+            .cast::<Object>(heap, obj.as_tagged(heap))
+            .expect("receiver is an object");
         construct_cache_record(heap, state, &scope, callee, obj);
         Ok(Some(obj.as_tagged(heap).erase()))
     })
@@ -3405,7 +3436,7 @@ extern "rust-preserve-none" fn construct_trampoline<'a>(
         )
     }
     // `this` lives in parameter register 0 of the callee window
-    let this_val = regs.read(0, ctx.heap());
+    let this_val = regs.get(0, ctx.heap());
     let caller = ctx.stack().pop_frame(frame_base);
     ctx.set_frame_base(caller.base);
     let v = if acc.is_primitive(ctx.heap()) {
@@ -3612,9 +3643,7 @@ fn call_method_start<'a>(
             args,
             argc,
         ))),
-        CallProbe::Miss => {
-            slow_call_method_miss(ctx, pc, size, callee_word, recv, args, argc, fb)
-        }
+        CallProbe::Miss => slow_call_method_miss(ctx, pc, size, callee_word, recv, args, argc, fb),
     }
 }
 
@@ -3659,9 +3688,7 @@ fn call_function_start<'a>(
             args,
             argc,
         ))),
-        CallProbe::Miss => {
-            slow_call_function_miss(ctx, pc, size, callee_word, args, argc, fb)
-        }
+        CallProbe::Miss => slow_call_function_miss(ctx, pc, size, callee_word, args, argc, fb),
     }
 }
 
@@ -3934,14 +3961,9 @@ fn enter<'a>(
             let args = args.as_args();
             let result = match new_target {
                 None => Proxy::apply(vm, heap, state, callable.erase(), args),
-                Some(nt) => Proxy::construct(
-                    vm,
-                    heap,
-                    state,
-                    callable.erase(),
-                    args.slice_from(1),
-                    nt,
-                ),
+                Some(nt) => {
+                    Proxy::construct(vm, heap, state, callable.erase(), args.slice_from(1), nt)
+                }
             };
             match result {
                 Ok(Coercion::Value(v)) => Ok(scope.handle(v).as_tagged(heap).erase()),
@@ -4038,3 +4060,5 @@ pub fn execute<'a>(
 impl Interpreter for BecomeInterpreter {
     const EXECUTE: EntryFn = execute;
 }
+
+mod new;

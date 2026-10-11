@@ -8,19 +8,22 @@
 
 use bytecode::Opcode;
 use vm_core::ic::{CallRecord, InlineCache};
-use vm_core::interpreter::{unwind, Unwind};
+use vm_core::interpreter::{Unwind, unwind};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    CallTarget, CallableInfoObject, Callee, Coercion, ContextObject, ContextInit, ThreadState, Convert,
-    Ctx, FixedArray, HandleSlice, Heap, Object, Recv, ScopeInfo, Smi, StoreSemantics, Tagged,
-    Value, VmError,
+    CallTarget, CallableInfoObject, Callee, Coercion, ContextInit, ContextObject, Convert, Ctx,
+    FixedArray, HandleSlice, Heap, Object, Recv, ScopeInfo, Smi, StoreSemantics, Tagged,
+    ThreadState, Value, VmError,
 };
 
 use crate::{
     FloatReg, MethodCall, Ops, Regs, RootsArg, TableArg, base, dispatch_runtime_scattered,
     push_callee_frame, push_scattered_frame, read_signed, resume, slow_next_pc,
 };
-use vm_core::cold::{ add, bitwise, compare, construct, global_load, keyed_load, keyed_load_imm, keyed_store, named_load, negate, numeric, store_global, store_named, store_named_no_shadow };
+use vm_core::cold::{
+    add, bitwise, compare, construct, global_load, keyed_load, keyed_load_imm, keyed_store,
+    named_load, negate, numeric, store_global, store_named, store_named_no_shadow,
+};
 
 /// Define a become-interpreter slow-path handler (always `pub`). The
 /// expansion snapshots the faulting instruction's code-relative pc
@@ -80,7 +83,7 @@ slow_handler!(slow_box_add_loc |ip, ops, regs, acc, ctx, float| {
     let dst = ops.signed::<0>();
     let v = unsafe { ctx.heap_mut() }.new_number(float.get());
     let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-    regs.write(dst, v);
+    regs.set(dst, v);
     v
 });
 
@@ -88,17 +91,17 @@ slow_handler!(slow_box_sub_loc |ip, ops, regs, acc, ctx, float| {
     let dst = ops.signed::<0>();
     let v = unsafe { ctx.heap_mut() }.new_number(float.get());
     let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-    regs.write(dst, v);
+    regs.set(dst, v);
     v
 });
 
 slow_handler!(slow_add |ip, ops, regs, acc, ctx, float| {
-    let lhs = regs.read(ops.signed::<0>(), ctx);
+    let lhs = regs.get(ops.signed::<0>(), ctx.heap());
     add(ctx, lhs, acc)
 });
 
 slow_handler!(slow_numeric |ip, ops, regs, acc, ctx, float| {
-    let lhs = regs.read(ops.signed::<0>(), ctx);
+    let lhs = regs.get(ops.signed::<0>(), ctx.heap());
     let op = unsafe { ops.op() };
     let f: fn(f64, f64) -> f64 = match op {
         Opcode::Sub => |a, b| a - b,
@@ -112,13 +115,13 @@ slow_handler!(slow_numeric |ip, ops, regs, acc, ctx, float| {
 });
 
 slow_handler!(slow_add_immediate |ip, ops, regs, acc, ctx, float| {
-    let lhs = regs.read(ops.signed::<0>(), ctx);
+    let lhs = regs.get(ops.signed::<0>(), ctx.heap());
     let imm = Smi::new(ops.signed::<1>() as i64).into_tagged();
     add(ctx, lhs, imm)
 });
 
 slow_handler!(slow_numeric_immediate |ip, ops, regs, acc, ctx, float| {
-    let lhs = regs.read(ops.signed::<0>(), ctx);
+    let lhs = regs.get(ops.signed::<0>(), ctx.heap());
     let imm = Smi::new(ops.signed::<1>() as i64).into_tagged();
     let op = unsafe { ops.op() };
     let f: fn(f64, f64) -> f64 = match op {
@@ -149,13 +152,13 @@ fn bitwise_kind(op: Opcode) -> u8 {
 }
 
 slow_handler!(slow_bitwise |ip, ops, regs, acc, ctx, float| {
-    let lhs = regs.read(ops.signed::<0>(), ctx);
+    let lhs = regs.get(ops.signed::<0>(), ctx.heap());
     let kind = bitwise_kind(unsafe { ops.op() });
     bitwise(ctx, kind, lhs, acc)
 });
 
 slow_handler!(slow_bitwise_immediate |ip, ops, regs, acc, ctx, float| {
-    let lhs = regs.read(ops.signed::<0>(), ctx);
+    let lhs = regs.get(ops.signed::<0>(), ctx.heap());
     let imm = Smi::new(ops.signed::<1>() as i64).into_tagged();
     let kind = bitwise_kind(unsafe { ops.op() });
     bitwise(ctx, kind, lhs, imm)
@@ -180,24 +183,24 @@ slow_handler!(slow_sub_loc |ip, ops, regs, acc, ctx, float| {
 });
 
 slow_handler!(slow_keyed_load_reg |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
-    let key = regs.read(ops.signed::<1>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
+    let key = regs.get(ops.signed::<1>(), ctx.heap());
     let fb = ops.unsigned::<2>();
     keyed_load(ctx, recv, key, Some(fb))
 });
 
 slow_handler!(slow_equal |ip, ops, regs, acc, ctx, float| {
-    let other = regs.read(ops.signed::<0>(), ctx);
+    let other = regs.get(ops.signed::<0>(), ctx.heap());
     compare(ctx, 0, acc, other)
 });
 
 slow_handler!(slow_less_than |ip, ops, regs, acc, ctx, float| {
-    let other = regs.read(ops.signed::<0>(), ctx);
+    let other = regs.get(ops.signed::<0>(), ctx.heap());
     compare(ctx, 2, acc, other)
 });
 
 slow_handler!(slow_greater_than |ip, ops, regs, acc, ctx, float| {
-    let other = regs.read(ops.signed::<0>(), ctx);
+    let other = regs.get(ops.signed::<0>(), ctx.heap());
     compare(ctx, 4, acc, other)
 });
 
@@ -223,7 +226,7 @@ pub extern "rust-preserve-none" fn slow_compare_jump<'a, const STRIDE: usize>(
     let kind = ops.unsigned::<1>();
     let off = ops.signed::<2>();
     let jump_pc = (pc as isize + off as isize) as usize;
-    let other = regs.read(r, ctx);
+    let other = regs.get(r, ctx.heap());
     let cmp = (kind / 2) as u8;
     let b = match (acc.as_number(ctx.heap()), other.as_number(ctx.heap())) {
         (Some(a), Some(b)) => match cmp {
@@ -264,35 +267,35 @@ pub extern "rust-preserve-none" fn slow_compare_jump<'a, const STRIDE: usize>(
 }
 
 slow_handler!(slow_named_load |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
     let name_idx = ops.unsigned::<1>();
     let fb_slot = ops.unsigned::<2>();
     named_load(ctx, recv, name_idx, fb_slot)
 });
 
 slow_handler!(slow_keyed_load |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
     let fb = ops.unsigned::<1>();
     keyed_load(ctx, recv, acc, Some(fb))
 });
 
 slow_handler!(slow_keyed_load_imm |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
     let idx = ops.unsigned::<1>();
     let fb = ops.unsigned::<2>();
     keyed_load_imm(ctx, recv, idx, Some(fb as usize))
 });
 
 slow_handler!(slow_keyed_store |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
-    let key = regs.read(ops.signed::<1>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
+    let key = regs.get(ops.signed::<1>(), ctx.heap());
     let fb = ops.unsigned::<2>();
     keyed_store(ctx, recv, key, acc, Some(fb), StoreSemantics::Shadow)
 });
 
 slow_handler!(slow_keyed_store_no_shadow |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
-    let key = regs.read(ops.signed::<1>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
+    let key = regs.get(ops.signed::<1>(), ctx.heap());
     let fb = ops.unsigned::<2>();
     keyed_store(ctx, recv, key, acc, Some(fb), StoreSemantics::WriteThrough)
 });
@@ -304,14 +307,14 @@ slow_handler!(slow_global_load |ip, ops, regs, acc, ctx, float| {
 });
 
 slow_handler!(slow_store_named |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
     let name_idx = ops.unsigned::<1>();
     let fb_slot = ops.unsigned::<2>();
     store_named(ctx, recv, name_idx, fb_slot, acc)
 });
 
 slow_handler!(slow_construct |ip, ops, regs, acc, ctx, float| {
-    let callee = regs.read(ops.signed::<0>(), ctx);
+    let callee = regs.get(ops.signed::<0>(), ctx.heap());
     let args_base = ops.signed::<1>();
     let count = ops.unsigned::<2>();
     construct(ctx, callee, args_base, count)
@@ -367,7 +370,7 @@ slow_handler!(slow_create_block_context |ip, ops, regs, acc, ctx, float| {
 });
 
 slow_handler!(slow_less_than_or_equal |ip, ops, regs, acc, ctx, float| {
-    let other = regs.read(ops.signed::<0>(), ctx);
+    let other = regs.get(ops.signed::<0>(), ctx.heap());
     compare(ctx, 3, acc, other)
 });
 
@@ -383,23 +386,23 @@ slow_handler!(slow_store_global |ip, ops, regs, acc, ctx, float| {
 });
 
 slow_handler!(slow_store_named_no_shadow |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
     let name_idx = ops.unsigned::<1>();
     store_named_no_shadow(ctx, recv, name_idx, acc)
 });
 
 slow_handler!(slow_instance_of |ip, ops, regs, acc, ctx, float| {
-    let callable = regs.read(ops.signed::<0>(), ctx);
+    let callable = regs.get(ops.signed::<0>(), ctx.heap());
     slow_try!(ctx, instance_of_slow(ctx, acc, callable))
 });
 
 slow_handler!(slow_greater_than_or_equal |ip, ops, regs, acc, ctx, float| {
-    let other = regs.read(ops.signed::<0>(), ctx);
+    let other = regs.get(ops.signed::<0>(), ctx.heap());
     compare(ctx, 5, acc, other)
 });
 
 slow_handler!(slow_add_parent |ip, ops, regs, acc, ctx, float| {
-    let recv = regs.read(ops.signed::<0>(), ctx);
+    let recv = regs.get(ops.signed::<0>(), ctx.heap());
     let name_idx = ops.unsigned::<1>();
     slow_try!(ctx, add_parent_slow(ctx, recv, name_idx, acc))
 });
@@ -410,7 +413,7 @@ slow_handler!(slow_create_function_context |ip, ops, regs, acc, ctx, float| {
 });
 
 slow_handler!(slow_proxy_apply |ip, ops, regs, acc, ctx, float| {
-    let callee = regs.read(ops.signed::<0>(), ctx);
+    let callee = regs.get(ops.signed::<0>(), ctx.heap());
     let args_base = ops.signed::<1>();
     let count = ops.unsigned::<2>();
     slow_try!(ctx, proxy_apply_slow(ctx, callee, args_base, count))
@@ -424,7 +427,7 @@ slow_handler!(slow_call_method_proxy |ip, ops, regs, acc, ctx, float| {
         Opcode::CallMethod1 => 1,
         _ => 2,
     };
-    let callee = regs.read(ops.signed::<0>(), ctx);
+    let callee = regs.get(ops.signed::<0>(), ctx.heap());
     let recv = ops.signed::<1>();
     let mut pargs = [0i32; 2];
     for (i, arg) in pargs.iter_mut().enumerate().take(argc) {
@@ -441,7 +444,7 @@ slow_handler!(slow_call_function_proxy |ip, ops, regs, acc, ctx, float| {
         Opcode::CallFunction1 => 1,
         _ => 2,
     };
-    let callee = regs.read(ops.signed::<0>(), ctx);
+    let callee = regs.get(ops.signed::<0>(), ctx.heap());
     let mut pargs = [0i32; 2];
     for (i, arg) in pargs.iter_mut().enumerate().take(argc) {
         *arg = read_signed(ip, base + (i + 1) * STRIDE, STRIDE);
@@ -468,9 +471,8 @@ pub fn construct_cache_record(
 
     // Safety: fresh synthesized-receiver word; read before any allocation
     // below, and no collection can run until then.
-    let map: Tagged<vm_core::Map> = unsafe {
-        Tagged::from_value_unchecked(obj.as_tagged(heap).map(heap).raw())
-    };
+    let map: Tagged<vm_core::Map> =
+        unsafe { Tagged::from_value_unchecked(obj.as_tagged(heap).map(heap).raw()) };
     // find the closure's `.prototype` data-property slot
     let proto_name = heap.known().strings.prototype.as_tagged(heap);
     let closure_map = callee.as_tagged(heap).map(heap);
@@ -516,7 +518,10 @@ fn create_closure_slow<'a>(ctx: &Ctx<'a>, info_idx: usize) -> Result<Tagged<'a, 
             return Err(VmError::Type);
         };
         let context = scope
-            .cast::<ContextObject>(heap, ctx.stack().frame_header(base).context_slot().get(heap))
+            .cast::<ContextObject>(
+                heap,
+                ctx.stack().frame_header(base).context_slot().get(heap),
+            )
             .expect("frame context slot holds a ContextObject");
         let obj = Object::create_closure(heap, &scope, info, context)?;
         Ok(obj.erase())
@@ -534,7 +539,10 @@ fn create_function_context_slow<'a>(
     state.handle_scope(|scope| -> Result<Tagged<'a, Value>, VmError> {
         let base = ctx.frame_base();
         let outer = scope
-            .cast::<ContextObject>(heap, ctx.stack().frame_header(base).context_slot().get(heap))
+            .cast::<ContextObject>(
+                heap,
+                ctx.stack().frame_header(base).context_slot().get(heap),
+            )
             .expect("frame context slot holds a ContextObject");
         let count = ctx
             .constants_ref(heap)
@@ -657,11 +665,11 @@ fn incdec_slow<'a, const STRIDE: usize>(
 ) -> Result<Tagged<'a, Value>, VmError> {
     let ops = Ops::<STRIDE>::from_ip(ip);
     let r = ops.signed::<0>();
-    let old = regs.read(r, ctx);
+    let old = regs.get(r, ctx.heap());
     let heap = unsafe { ctx.heap_mut() };
     if let Some(bits) = old.smi_bits() {
         let new = heap.new_number((bits >> 1) as f64 + delta);
-        regs.write(r, new);
+        regs.set(r, new);
         return Ok(old);
     }
     let vm = ctx.vm();
@@ -678,7 +686,7 @@ fn incdec_slow<'a, const STRIDE: usize>(
                 scope.handle(heap.new_number(n))
             };
         let new = heap.new_number(n + delta);
-        regs.write(r, new);
+        regs.set(r, new);
         Ok(old_num.as_tagged(heap))
     })
 }
@@ -692,15 +700,15 @@ fn loc_op_slow<'a, const STRIDE: usize>(
     let ops = Ops::<STRIDE>::from_ip(ip);
     let dst = ops.signed::<0>();
     let src = ops.signed::<1>();
-    let lhs = regs.read(dst, ctx);
-    let rhs = regs.read(src, ctx);
+    let lhs = regs.get(dst, ctx.heap());
+    let rhs = regs.get(src, ctx.heap());
     let v = if sub {
         numeric(ctx, lhs, rhs, |a, b| a - b)
     } else {
         add(ctx, lhs, rhs)
     };
     if !ctx.is_throw(v) {
-        regs.write(dst, v);
+        regs.set(dst, v);
     }
     Ok(v)
 }
@@ -901,7 +909,10 @@ fn create_block_context_slow<'a>(
     state.handle_scope(|scope| -> Result<Tagged<'a, Value>, VmError> {
         let base = ctx.frame_base();
         let outer = scope
-            .cast::<ContextObject>(heap, ctx.stack().frame_header(base).context_slot().get(heap))
+            .cast::<ContextObject>(
+                heap,
+                ctx.stack().frame_header(base).context_slot().get(heap),
+            )
             .expect("frame context slot holds a ContextObject");
         let slots = if count == 0 {
             heap.known().empty_fixed_array
