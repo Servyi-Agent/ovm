@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use bytecode::{OPERAND_SIZES_NARROW, OPERAND_SIZES_WIDE, Opcode};
+use bytecode::Opcode;
 use vm_core::{
     Coercion, Convert, DenseString, Handle, Heap, Hint, HostCtx, NativeIndex, Object, Register,
     Smi, Tagged, ThreadState, VM, Value, VmError, Word, raise_runtime,
@@ -12,8 +12,7 @@ pub struct Ctx<'s, 'h> {
     vm: &'s VM,
     state: &'s ThreadState,
     heap: &'h mut Heap,
-    /// Anchor of the frame `execute` entered: a return at this anchor ends
-    /// the execution instead of unwinding into a caller.
+    /// Anchor of the frame `execute` entered
     base_anchor: usize,
 }
 
@@ -80,21 +79,6 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn regs_ptr(&self) -> *mut Register {
         unsafe { self.stack().slots_ptr().add(self.frame_base()) }
-    }
-
-    #[inline(always)]
-    pub fn exception_word(&self) -> Tagged<'_, Value> {
-        self.heap().known().exception.as_tagged(self.heap()).erase()
-    }
-
-    #[inline(always)]
-    pub fn is_throw(&self, acc: Acc) -> bool {
-        acc.get(self.heap()).raw().to_bits() == self.exception_word().raw().to_bits()
-    }
-
-    #[inline(always)]
-    pub fn undefined_word(&self) -> Tagged<'_, Value> {
-        self.heap().known().undefined.as_tagged(self.heap()).erase()
     }
 
     #[inline(always)]
@@ -175,33 +159,40 @@ macro_rules! next {
     }};
 }
 
+macro_rules! reenter {
+    ($op:ident, $pc:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr) => {{
+        let fault_ip = unsafe { $ctx.code_ptr().add($pc) };
+        if $acc.get($ctx.heap()).raw().to_bits()
+            == $ctx
+                .heap()
+                .known()
+                .exception
+                .as_tagged($ctx.heap())
+                .erase()
+                .raw()
+                .to_bits()
+        {
+            become throw_dispatch(fault_ip, $regs, $acc, $ctx, $table, $roots, $float)
+        }
+        let p = fault_ip.wrapping_add(
+            (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::$op.operands().len() },
+        );
+        let regs = unsafe { Regs::new($ctx.regs_ptr()) };
+        let h = $table.get(unsafe { *p });
+        become h(p, regs, $acc, $ctx, $table, $roots, $float)
+    }};
+}
+
 macro_rules! next_slow {
-    ($ip:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr, $slow:path) => {{
+    ($op:ident, $ip:expr, $regs:expr, $acc:expr, $ctx:expr, $table:expr, $roots:expr, $float:expr, $slow:path) => {{
         let pc = $ip as usize - $ctx.code_ptr() as usize;
         let v: Acc = $slow($ip, $regs, $acc, $ctx, $float);
         let state: &ThreadState = $ctx.state;
         let acc_slot = state.acc_slot();
         acc_slot.store(v.get($ctx.heap()));
         let acc = Acc::set(acc_slot.get($ctx.heap()));
-        become resume(unsafe { $ctx.code_ptr().add(pc) }, $regs, acc, $ctx, $table, $roots, $float)
+        reenter!($op, pc, $regs, acc, $ctx, $table, $roots, $float)
     }};
-}
-
-#[inline(always)]
-fn exception_word(heap: &Heap) -> Tagged<'_, Value> {
-    heap.known().exception.as_tagged(heap).erase()
-}
-
-#[inline(always)]
-fn slow_next_pc(ip: *const u8) -> *const u8 {
-    let wide = unsafe { *ip } == Opcode::Wide as u8;
-    let op = unsafe { *ip.add(wide as usize) } as usize;
-    let size = if wide {
-        *unsafe { OPERAND_SIZES_WIDE.get_unchecked(op) }
-    } else {
-        *unsafe { OPERAND_SIZES_NARROW.get_unchecked(op) }
-    } as usize;
-    unsafe { ip.add(wide as usize + 1 + size) }
 }
 
 extern "rust-preserve-none" fn op_trap<'h>(
@@ -214,29 +205,6 @@ extern "rust-preserve-none" fn op_trap<'h>(
     _float: FloatReg,
 ) -> Acc {
     unreachable!("trap opcode")
-}
-
-/// The after-slow-path re-entry edge.
-#[inline(never)]
-#[rustc_align(32)]
-extern "rust-preserve-none" fn resume<'h>(
-    fault_ip: *const u8,
-    _regs: Regs,
-    acc: Acc,
-    ctx: &mut Ctx<'_, 'h>,
-    table: TableArg<'h>,
-    roots: RootsArg<'h>,
-    float: FloatReg,
-) -> Acc {
-    if ctx.is_throw(acc) {
-        become throw_dispatch(fault_ip, _regs, acc, ctx, table, roots, float)
-    }
-    // fault_ip is freshly re-derived by every resume caller, so it
-    // still pairs with the current base
-    let ip = slow_next_pc(fault_ip);
-    let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-    let h = table.get(unsafe { *ip });
-    become h(ip, regs, acc, ctx, table, roots, float)
 }
 
 #[cold]
@@ -285,7 +253,7 @@ extern "rust-preserve-none" fn throw_dispatch<'h>(
             become h(ip, regs, ex, ctx, table, roots, float)
         }
         if base == ctx.base_anchor() {
-            return Acc::set(ctx.exception_word());
+            return Acc::set(ctx.heap().known().exception.as_tagged(ctx.heap()).erase());
         }
         let caller = ctx.stack().pop_frame(base);
         ctx.set_frame_base(caller.base);
@@ -331,9 +299,9 @@ extern "rust-preserve-none" fn op_add<'h, const STRIDE: usize>(ip: *const u8, re
             let acc = Acc::set(v);
             next!(Add, ip, regs, ctx, table, roots, float, acc)
         }
-        next_slow!(ip, regs, acc, ctx, table, roots, FloatReg::new(sum), slow_box_number::<STRIDE>)
+        next_slow!(Add, ip, regs, acc, ctx, table, roots, FloatReg::new(sum), slow_box_number::<STRIDE>)
     }
-    next_slow!(ip, regs, acc, ctx, table, roots, float, slow_add::<STRIDE>)
+    next_slow!(Add, ip, regs, acc, ctx, table, roots, float, slow_add::<STRIDE>)
 }
 
 #[cold]
@@ -360,12 +328,12 @@ fn add(ctx: &mut Ctx<'_, '_>, lhs: Handle<'_, Value>, rhs: Handle<'_, Value>) ->
     let heap = ctx.heap_mut();
     state.handle_scope(|scope| {
         let lhs = match Object::to_primitive(vm, heap, state, lhs, Hint::Default) {
-            Ok(Coercion::Threw) => return Acc::set(exception_word(heap)),
+            Ok(Coercion::Threw) => return Acc::set(heap.known().exception.as_tagged(heap).erase()),
             Ok(Coercion::Value(v)) => scope.handle(v),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         let rhs = match Object::to_primitive(vm, heap, state, rhs, Hint::Default) {
-            Ok(Coercion::Threw) => return Acc::set(exception_word(heap)),
+            Ok(Coercion::Threw) => return Acc::set(heap.known().exception.as_tagged(heap).erase()),
             Ok(Coercion::Value(v)) => scope.handle(v),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
@@ -419,7 +387,7 @@ extern "rust-preserve-none" fn op_call_runtime<'h, const STRIDE: usize>(ip: *con
     let acc_slot = state.acc_slot();
     acc_slot.store(v);
     let w = Acc::set(acc_slot.get(ctx.heap()));
-    become resume(unsafe { ctx.code_ptr().add(pc) }, regs, w, ctx, table, roots, float)
+    reenter!(CallRuntime, pc, regs, w, ctx, table, roots, float)
 }
 
 const fn new_table() -> [Handler; 256] {
