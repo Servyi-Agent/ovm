@@ -1,9 +1,13 @@
 #![allow(dead_code)]
 
+use core::cell::Cell;
+
 use bytecode::Opcode;
+use vm_core::proxy::Proxy;
 use vm_core::{
-    Coercion, Convert, DenseString, Handle, Heap, Hint, HostCtx, NativeIndex, Object, Register,
-    Smi, Tagged, ThreadState, VM, Value, VmError, Word, raise_runtime,
+    Args, CallTarget, Callee, Coercion, Convert, DenseString, FrameMeta, Handle, Heap, Hint,
+    HostCtx, NativeIndex, Object, Register, Smi, Tagged, ThreadState, VM, Value, VmError, Word,
+    interpreter::SAFEPOINT_INTERVAL, raise_runtime,
 };
 
 use crate::{FloatReg, Ops, Regs, RootsArg, star_lookahead};
@@ -14,6 +18,7 @@ pub struct Ctx<'s, 'h> {
     heap: &'h mut Heap,
     /// Anchor of the frame `execute` entered
     base_anchor: usize,
+    safepoints: Cell<u32>,
 }
 
 impl<'s, 'h> Ctx<'s, 'h> {
@@ -24,6 +29,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
             state,
             heap,
             base_anchor,
+            safepoints: Cell::new(SAFEPOINT_INTERVAL),
         }
     }
 
@@ -79,6 +85,48 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn regs_ptr(&self) -> *mut Register {
         unsafe { self.stack().slots_ptr().add(self.frame_base()) }
+    }
+
+    /// One loop back-edge: `true` every `SAFEPOINT_INTERVAL` ticks.
+    #[inline(always)]
+    pub fn safepoint_tick(&self) -> bool {
+        let n = self.safepoints.get();
+        if n == 0 {
+            self.safepoints.set(SAFEPOINT_INTERVAL);
+            true
+        } else {
+            self.safepoints.set(n - 1);
+            false
+        }
+    }
+
+    #[inline(always)]
+    pub fn caller_meta(&self, pc: usize, handler_pc: usize) -> FrameMeta {
+        let base = self.frame_base();
+        FrameMeta {
+            base,
+            pc,
+            register_count: self.stack().regcount(base),
+            handler_pc,
+        }
+    }
+
+    #[inline(always)]
+    pub fn call_runtime(&mut self, rt: NativeIndex, args: Args) -> Acc {
+        let (vm, state) = (self.vm, self.state);
+        let f = vm.runtime(rt);
+        let stack = state.stack();
+        let saved = stack.top();
+        let bump = stack.rooting_top(args);
+        if let Some(top) = bump {
+            stack.set_top(top);
+        }
+        let nctx = HostCtx::new(vm, self.heap_mut(), state);
+        let v = f(nctx, None, args);
+        if bump.is_some() {
+            stack.set_top(saved);
+        }
+        Acc::set(v)
     }
 
     #[inline(always)]
@@ -322,6 +370,26 @@ fn slow_add<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &
     })
 }
 
+#[cold]
+#[rustfmt::skip]
+fn slow_proxy_apply<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, _acc: Acc, ctx: &mut Ctx<'_, 'h>, _float: FloatReg) -> Acc {
+    let ops = Ops::<STRIDE>::from_ip(ip);
+    let args_base = ops.signed::<1>();
+    let count = ops.unsigned::<2>();
+    let vm = ctx.vm;
+    let state = ctx.state;
+    let heap = ctx.heap_mut();
+    state.handle_scope(|scope| {
+        let callee = scope.handle(regs.get(ops.signed::<0>(), heap));
+        let staged = state.stack().args(state.frame_base(), args_base, count);
+        match Proxy::apply(vm, heap, state, callee, staged) {
+            Ok(Coercion::Threw) => Acc::set(heap.known().exception.as_tagged(heap).erase()),
+            Ok(Coercion::Value(v)) => Acc::set(v),
+            Err(err) => Acc::set(raise_runtime(vm, heap, state, err)),
+        }
+    })
+}
+
 fn add(ctx: &mut Ctx<'_, '_>, lhs: Handle<'_, Value>, rhs: Handle<'_, Value>) -> Acc {
     let vm = ctx.vm;
     let state = ctx.state;
@@ -390,12 +458,144 @@ extern "rust-preserve-none" fn op_call_runtime<'h, const STRIDE: usize>(ip: *con
     reenter!(CallRuntime, pc, regs, w, ctx, table, roots, float)
 }
 
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_jump<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    let off = Ops::<STRIDE>::new(ip, Opcode::Jump).signed::<0>();
+    dispatch!(ip.wrapping_offset(off as isize), acc, regs, ctx, table, roots, float)
+}
+
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_jump_if_truthy<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    let off = Ops::<STRIDE>::new(ip, Opcode::JumpIfTruthy).signed::<0>();
+    if acc.get(ctx.heap()).is_truthy(ctx.heap()) {
+        dispatch!(ip.wrapping_offset(off as isize), acc, regs, ctx, table, roots, float)
+    }
+    next!(JumpIfTruthy, ip, regs, ctx, table, roots, float, acc)
+}
+
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_jump_if_falsy<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    let off = Ops::<STRIDE>::new(ip, Opcode::JumpIfFalsy).signed::<0>();
+    if !acc.get(ctx.heap()).is_truthy(ctx.heap()) {
+        dispatch!(ip.wrapping_offset(off as isize), acc, regs, ctx, table, roots, float)
+    }
+    next!(JumpIfFalsy, ip, regs, ctx, table, roots, float, acc)
+}
+
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_jump_if_not_undefined<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    let off = Ops::<STRIDE>::new(ip, Opcode::JumpIfNotUndefined).signed::<0>();
+    if acc.get(ctx.heap()) != ctx.heap().known().undefined.as_tagged(ctx.heap()).erase() {
+        dispatch!(ip.wrapping_offset(off as isize), acc, regs, ctx, table, roots, float)
+    }
+    next!(JumpIfNotUndefined, ip, regs, ctx, table, roots, float, acc)
+}
+
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_jump_loop<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    let target = ip.wrapping_offset(Ops::<STRIDE>::new(ip, Opcode::JumpLoop).signed::<0>() as isize);
+    if ctx.safepoint_tick() {
+        let state = ctx.state;
+        let acc_slot = state.acc_slot();
+        acc_slot.store(acc.get(ctx.heap()));
+        if ctx.heap_mut().safepoint_poll() {
+            state.set_termination(vm_core::Termination::Shutdown);
+            state.set_pending_exception(ctx.heap().known().undefined.as_tagged(ctx.heap()));
+            become throw_dispatch(ip, regs, acc, ctx, table, roots, float)
+        }
+        let pc = target as usize - ctx.code_ptr() as usize;
+        let acc = Acc::set(acc_slot.get(ctx.heap()));
+        let p = unsafe { ctx.code_ptr().add(pc) };
+        let regs = unsafe { Regs::new(ctx.regs_ptr()) };
+        dispatch!(p, acc, regs, ctx, table, roots, float)
+    }
+    dispatch!(target, acc, regs, ctx, table, roots, float)
+}
+
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_return<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    Ops::<STRIDE>::new(ip, Opcode::Return);
+    if ctx.frame_base() == ctx.base_anchor() {
+        return acc;
+    }
+    let caller = ctx.stack().pop_frame(ctx.frame_base());
+    ctx.set_frame_base(caller.base);
+    let regs = unsafe { Regs::new(ctx.regs_ptr()) };
+    dispatch!(unsafe { ctx.code_ptr().add(caller.pc) }, acc, regs, ctx, table, roots, float)
+}
+
+#[rustfmt::skip]
+#[rustc_align(32)]
+extern "rust-preserve-none" fn op_call<'h, const STRIDE: usize>(ip: *const u8, regs: Regs, acc: Acc, ctx: &mut Ctx<'_, 'h>, table: TableArg<'h>, roots: RootsArg<'h>, float: FloatReg) -> Acc {
+    let ops = Ops::<STRIDE>::new(ip, Opcode::CallNoFeedback);
+    let pc = ip as usize - ctx.code_ptr() as usize;
+    let size = (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::CallNoFeedback.operands().len() };
+    let callee_r = ops.signed::<0>();
+    let base_r = ops.signed::<1>();
+    let count = ops.unsigned::<2>();
+    let ct = regs.get(callee_r, ctx.heap()).call_target(ctx.heap());
+    match ct {
+        None => {
+            let acc = ctx.raise_tag(VmError::Type);
+            become throw_dispatch(ip, regs, acc, ctx, table, roots, float)
+        }        Some(CallTarget::Proxy(_)) => {
+            next_slow!(CallNoFeedback, ip, regs, acc, ctx, table, roots, float, slow_proxy_apply::<STRIDE>)
+        }
+        Some(CallTarget::Native(rt)) => {
+            let v = ctx.call_runtime(rt, ctx.stack().window(ctx.frame_base(), base_r, count));
+            let state = ctx.state;
+            let acc_slot = state.acc_slot();
+            acc_slot.store(v.get(ctx.heap()));
+            let v = Acc::set(acc_slot.get(ctx.heap()));
+            reenter!(CallNoFeedback, pc, regs, v, ctx, table, roots, float)
+        }
+        Some(CallTarget::Bytecode { target, info, context, kind, .. }) => {
+            if kind.is_class_constructor() {
+                let acc = ctx.raise_tag(VmError::Type);
+                become throw_dispatch(ip, regs, acc, ctx, table, roots, float)
+            }
+            let state = ctx.state;
+            let meta = ctx.caller_meta(pc + size, pc);
+            let args = state.stack().window(state.frame_base(), base_r, count);
+            let heap = ctx.heap();
+            let undefined = heap.known().undefined.as_tagged(heap).erase();
+            let frame = match state.stack().push_frame(
+                heap,
+                meta,
+                Callee { callable: target.erase(), info, context: context.erase() },
+                undefined,
+                args,
+            ) {
+                Ok(frame) => frame,
+                Err(err) => return ctx.raise_tag(err),
+            };
+            state.set_frame_base(frame.base);
+            let entry = state.stack().frame_header(frame.base).code(heap).as_ptr();
+            let regs = unsafe { Regs::new(state.stack().slots_ptr().add(frame.base)) };
+            dispatch!(entry, Acc::set(undefined), regs, ctx, table, roots, float)
+        }
+    }
+}
+
 const fn new_table() -> [Handler; 256] {
     let mut t = [op_trap as Handler; 256];
     t[Opcode::Load as usize] = op_load::<1> as Handler;
     t[Opcode::Store as usize] = op_store::<1> as Handler;
     t[Opcode::Add as usize] = op_add::<1> as Handler;
     t[Opcode::CallRuntime as usize] = op_call_runtime::<1> as Handler;
+    t[Opcode::Jump as usize] = op_jump::<1> as Handler;
+    t[Opcode::JumpIfTruthy as usize] = op_jump_if_truthy::<1> as Handler;
+    t[Opcode::JumpIfFalsy as usize] = op_jump_if_falsy::<1> as Handler;
+    t[Opcode::JumpIfNotUndefined as usize] = op_jump_if_not_undefined::<1> as Handler;
+    t[Opcode::JumpLoop as usize] = op_jump_loop::<1> as Handler;
+    t[Opcode::Return as usize] = op_return::<1> as Handler;
+    t[Opcode::CallNoFeedback as usize] = op_call::<1> as Handler;
     t
 }
 
