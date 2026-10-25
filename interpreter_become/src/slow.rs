@@ -339,7 +339,13 @@ macro_rules! box_number_slow {
     };
 }
 
-box_number_slow!(Add, slow_box_number);
+#[handler(Add)]
+#[cold]
+pub fn slow_box_number(frame: Frame) {
+    let pc = frame.pc();
+    frame.set_acc(frame.ctx().heap_mut().new_number(frame.float()));
+    reenter!(pc)
+}
 box_number_slow!(Sub, slow_box_number_sub);
 box_number_slow!(Mul, slow_box_number_mul);
 box_number_slow!(Div, slow_box_number_div);

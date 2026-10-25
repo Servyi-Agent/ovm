@@ -29,3 +29,23 @@ fn source(relative: &str) -> String {
 fn fannkuch() {
     run::<MatchInterpreter>(&source("benchmarks/fannkuch/fannkuch.js"));
 }
+
+#[test]
+fn nbody() {
+    run::<MatchInterpreter>(&source("benchmarks/nbody/nbody.js"));
+}
+
+/// Octane's harness objects are not part of the VM; deltablue only needs
+/// the constructors so suite registration doesn't throw.
+const PRELUDE: &str = r#"
+function BenchmarkSuite() {}
+function Benchmark() {}
+function alert(m) { throw new Error("ALERT: " + m); }
+"#;
+
+#[test]
+fn deltablue() {
+    let src =
+        format!("{PRELUDE}{}\ndeltaBlue();\n", source("benchmarks/octane/deltablue/deltablue.js"));
+    run::<MatchInterpreter>(&src);
+}

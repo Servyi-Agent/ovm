@@ -93,7 +93,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{
     Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream as TokenStream2, TokenTree,
 };
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::Token;
 use syn::parse_macro_input;
 use syn::punctuated::Punctuated;
@@ -173,6 +173,7 @@ const PARAM_NAMES: &[&str] = &[
 /// The two handler forms; every form has the full dispatch ABI and
 /// the stride. What a form may use follows from the one thing it may
 /// not know: the opcode (instruction-size math).
+#[derive(Clone)]
 enum HandlerForm {
     /// `#[handler(Add)]`: opcode known. Hot handlers are listed in
     /// `handler_table!`; cold ones (`#[cold]`) are tail-called through
@@ -193,25 +194,84 @@ impl HandlerForm {
     }
 }
 
-#[proc_macro_attribute]
-pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let func: syn::ItemFn = parse_macro_input!(item as syn::ItemFn);
-    let form = if attr.is_empty() {
-        HandlerForm::Trampoline
-    } else {
-        match syn::parse::<Ident>(attr) {
-            Ok(op) => HandlerForm::Dispatch(op),
-            Err(_) => return syn::Error::new(
-                Span::call_site(),
-                "#[handler] takes either no argument (dispatch trampoline) or an Opcode variant",
-            )
-            .to_compile_error()
-            .into(),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    Both,
+    Become,
+    Match,
+}
+
+fn parse_handler_attr(attr: TokenStream) -> syn::Result<(HandlerForm, Backend)> {
+    let tts: Vec<TokenTree> = TokenStream2::from(attr).into_iter().collect();
+    if tts.is_empty() {
+        return Ok((HandlerForm::Trampoline, Backend::Become));
+    }
+    let op = match &tts[0] {
+        TokenTree::Ident(i) => Ident::new(&i.to_string(), i.span()),
+        _ => {
+            return Err(syn::Error::new(
+                tts[0].span(),
+                "#[handler] expects an Opcode variant",
+            ));
         }
     };
-    match expand(form, &func) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
+    let form = HandlerForm::Dispatch(op);
+    let backend = match tts.as_slice() {
+        [_] => Backend::Both,
+        [_, TokenTree::Punct(p), TokenTree::Ident(mode)] if p.as_char() == ',' => {
+            match mode.to_string().as_str() {
+                "become" => Backend::Become,
+                "match_loop" => Backend::Match,
+                other => {
+                    return Err(syn::Error::new(
+                        mode.span(),
+                        format!("unknown handler backend `{other}` (use `become` or `match_loop`)"),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "#[handler] takes `Opcode`, `Opcode, become`, or `Opcode, match_loop`",
+            ));
+        }
+    };
+    Ok((form, backend))
+}
+
+#[proc_macro_attribute]
+pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut func: syn::ItemFn = parse_macro_input!(item as syn::ItemFn);
+    func.attrs.retain(|a| !a.path().is_ident("handler"));
+    let (form, backend) = match parse_handler_attr(attr) {
+        Ok(v) => v,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let became = match backend {
+        Backend::Become | Backend::Both => Some(match expand(form.clone(), &func) {
+            Ok(tokens) => tokens,
+            Err(err) => return err.to_compile_error().into(),
+        }),
+        Backend::Match => None,
+    };
+    let mat = match backend {
+        Backend::Become => None,
+        Backend::Both | Backend::Match => {
+            let Some(op) = form.op() else {
+                unreachable!("an opcode form is required for the match backend")
+            };
+            Some(match expand_match(op, &func, backend == Backend::Both) {
+                Ok(tokens) => tokens,
+                Err(err) => return err.to_compile_error().into(),
+            })
+        }
+    };
+    match (became, mat) {
+        (Some(b), Some(m)) => quote!(#b #m).into(),
+        (Some(b), None) => b.into(),
+        (None, Some(m)) => m.into(),
+        (None, None) => unreachable!(),
     }
 }
 
@@ -507,6 +567,225 @@ impl Rewriter {
 /// name, an optional turbofish, the arguments, the span of the
 /// argument group (so the emitted call can map back onto the written
 /// one), and the next index.
+/// Match-loop expansion of the same handler body.
+struct MatchRewriter {
+    op: Ident,
+    recv: String,
+    prefixed: bool,
+}
+
+impl MatchRewriter {
+    fn rewrite(&mut self, tokens: TokenStream2) -> TokenStream2 {
+        let tts: Vec<TokenTree> = tokens.into_iter().collect();
+        let mut out: Vec<TokenTree> = Vec::with_capacity(tts.len());
+        let mut i = 0;
+        while i < tts.len() {
+            if let Some((method, turbo, args, group, next)) = match_method(&tts, i, &self.recv) {
+                let args = self.rewrite(args);
+                let bang = method.span();
+                match self.expand_method(&method, turbo, args) {
+                    Ok(ts) => out.extend(respan_exit(ts, bang, group)),
+                    Err(err) => out.extend(err.to_compile_error()),
+                }
+                i = next;
+            } else if let Some((name, bang, args, group, next)) = match_exit(&tts, i) {
+                let args = self.rewrite(args);
+                match self.expand_exit(&name, args) {
+                    Ok(ts) => out.extend(respan_exit(ts, bang, group)),
+                    Err(err) => out.extend(err.to_compile_error()),
+                }
+                i = next;
+            } else {
+                match &tts[i] {
+                    TokenTree::Group(g) => {
+                        let mut ng = Group::new(g.delimiter(), self.rewrite(g.stream()));
+                        ng.set_span(g.span());
+                        out.push(TokenTree::Group(ng));
+                    }
+                    t => out.push(t.clone()),
+                }
+                i += 1;
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    fn expand_method(
+        &mut self,
+        method: &Ident,
+        turbo: Option<TokenStream2>,
+        args: TokenStream2,
+    ) -> syn::Result<TokenStream2> {
+        let op = &self.op;
+        match method.to_string().as_str() {
+            "ip" => no_args(method, &args).map(|_| quote!(ip)),
+            "regs" => no_args(method, &args).map(|_| quote!(regs)),
+            "acc" => no_args(method, &args).map(|_| quote!(acc.get(ctx.heap()))),
+            "float" => no_args(method, &args).map(|_| quote!(float)),
+            "pc" => no_args(method, &args).map(|_| quote!(ip as usize - ctx.code_ptr() as usize)),
+            "ctx" => no_args(method, &args).map(|_| quote!(ctx)),
+            "ctx_ref" => no_args(method, &args).map(|_| quote!(&*ctx)),
+
+            "opcode_check" => no_args(method, &args)
+                .map(|_| quote!(vm_core::Ops::<STRIDE>::new(ip, bytecode::Opcode::#op))),
+
+            "set_acc" => one_arg(method, args).map(|a| quote!(*acc = vm_core::Acc::set(#a))),
+            "set_acc_smi" => {
+                one_arg(method, args).map(|a| quote!(*acc = vm_core::Acc::from_smi_bits(#a)))
+            }
+            "set_float" => one_arg(method, args).map(|a| quote!(float = #a)),
+
+            "signed" | "unsigned" => {
+                no_args(method, &args)?;
+                let n = const_arg(method, turbo)?;
+                Ok(quote!(
+                    vm_core::Ops::<STRIDE>::new(ip, bytecode::Opcode::#op).#method::<#n>()
+                ))
+            }
+
+            "next" | "dispatch" | "tail" | "reenter" | "dispatch_frame" => Err(syn::Error::new(
+                method.span(),
+                format!("`{method}` is a control transfer: write `{method}!(..)` instead"),
+            )),
+
+            _ => Err(syn::Error::new(
+                method.span(),
+                format!(
+                    "unknown `Frame` method `{method}`: use `frame.ctx().{method}(..)` for context access"
+                ),
+            )),
+        }
+    }
+
+    fn expand_exit(&mut self, name: &Ident, args: TokenStream2) -> syn::Result<TokenStream2> {
+        let op = &self.op;
+        match name.to_string().as_str() {
+            "next" => {
+                no_args(name, &args)?;
+                Ok(quote!(
+                    return unsafe {
+                        ip.add(
+                            vm_core::interpreter::base::<STRIDE>()
+                                + STRIDE * const { bytecode::Opcode::#op.operands().len() },
+                        )
+                    };
+                ))
+            }
+            "dispatch" => {
+                let p = one_arg(name, args)?;
+                Ok(quote!(return #p;))
+            }
+            "tail" => {
+                let path = one_arg(name, args)?;
+                reject_turbofish(name, &path)?;
+                let path: Ident = syn::parse2(path)?;
+                if path == "throw_dispatch" {
+                    return Ok(quote!(
+                        return {
+                            let __pc = ip as usize - ctx.code_ptr() as usize;
+                            ctx.set_throw_pc(__pc);
+                            crate::match_loop::throw_ptr()
+                        };
+                    ));
+                }
+                if !path.to_string().starts_with("slow_") {
+                    return Err(syn::Error::new(
+                        path.span(),
+                        "match handler_both currently only supports tailing to `slow_*` handlers",
+                    ));
+                }
+                if self.prefixed {
+                    let target = format_ident!("match_{}", path);
+                    Ok(quote!(
+                        return crate::slow::#target::<STRIDE>(ip, regs, acc, ctx, roots, float);
+                    ))
+                } else {
+                    Ok(quote!(
+                        return #path::<STRIDE>(ip, regs, acc, ctx, roots, float);
+                    ))
+                }
+            }
+            "reenter" => {
+                let pc = one_arg(name, args)?;
+                Ok(quote!(
+                    return {
+                        let __next_pc = #pc
+                            + vm_core::interpreter::base::<STRIDE>()
+                            + STRIDE * const { bytecode::Opcode::#op.operands().len() };
+                        let __raw = acc.get(ctx.heap()).raw().to_bits();
+                        let __sentinel = {
+                            let __heap = ctx.heap();
+                            __heap
+                                .known()
+                                .exception
+                                .as_tagged(__heap)
+                                .raw()
+                                .to_bits()
+                        };
+                        ctx.reload_code();
+                        if __raw == __sentinel {
+                            ctx.set_throw_pc(#pc);
+                            crate::match_loop::throw_ptr()
+                        } else {
+                            crate::match_loop::offset(ctx.code_ptr(), __next_pc)
+                        }
+                    };
+                ))
+            }
+            "call_enter" | "dispatch_frame" => Err(syn::Error::new(
+                name.span(),
+                format!("`{name}!` is not implemented for the match backend yet"),
+            )),
+            _ => unreachable!("match_exit only yields known exit names"),
+        }
+    }
+}
+
+fn expand_match(op: &Ident, func: &syn::ItemFn, prefixed: bool) -> syn::Result<TokenStream2> {
+    let (recv, _) = validate_sig(func)?;
+    let name = &func.sig.ident;
+    let match_name = if prefixed {
+        format_ident!("match_{}", name)
+    } else {
+        name.clone()
+    };
+    let block = &func.block;
+    let cold = func.attrs.iter().any(|a| a.path().is_ident("cold"))
+        || name.to_string().starts_with("slow_");
+    let mut rw = MatchRewriter {
+        op: op.clone(),
+        recv: recv.to_string(),
+        prefixed,
+    };
+    let body = rw.rewrite(quote!(#block));
+    let attr = if cold {
+        quote!(#[cold])
+    } else {
+        quote!(#[inline(always)])
+    };
+    let (float_param, float_local) = if cold {
+        (quote!(mut float: f64,), quote!())
+    } else {
+        (quote!(), quote!(let mut float = f64::NAN;))
+    };
+    Ok(quote! {
+        #[rustfmt::skip]
+        #[allow(unused_variables, unused_mut)]
+        #attr
+        pub(crate) fn #match_name<'h, const STRIDE: usize>(
+            ip: *const u8,
+            regs: vm_core::Regs,
+            acc: &mut vm_core::Acc,
+            ctx: &mut vm_core::Ctx<'h, 'h>,
+            roots: crate::RootsArg<'h>,
+            #float_param
+        ) -> *const u8 {
+            #float_local
+            #body
+        }
+    })
+}
+
 fn match_method(
     tts: &[TokenTree],
     i: usize,

@@ -1298,7 +1298,7 @@ fn op_jump_if_not_undefined(frame: Frame) {
     next!()
 }
 
-#[handler(JumpLoop)]
+#[handler(JumpLoop, become)]
 fn op_jump_loop(frame: Frame) {
     let target = frame.ip().wrapping_offset(frame.signed::<0>() as isize);
     if frame.ctx().safepoint_tick() {
@@ -1336,7 +1336,7 @@ fn op_jump_loop(frame: Frame) {
     dispatch!(target)
 }
 
-#[handler(Return)]
+#[handler(Return, become)]
 fn op_return(frame: Frame) {
     frame.opcode_check();
     if frame.ctx().frame_base() == frame.ctx().base_anchor() {
@@ -1387,7 +1387,7 @@ fn op_return(frame: Frame) {
 
 // --- calls ---
 
-#[handler(Call)]
+#[handler(Call, become)]
 fn op_call(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1404,7 +1404,7 @@ fn op_call(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler(CallNoFeedback)]
+#[handler(CallNoFeedback, become)]
 fn op_call_no_feedback(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1443,7 +1443,7 @@ fn op_call_runtime(frame: Frame) {
     reenter!(pc)
 }
 
-#[handler(CallMethod0)]
+#[handler(CallMethod0, become)]
 fn op_call_method0(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1461,7 +1461,7 @@ fn op_call_method0(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler(CallMethod1)]
+#[handler(CallMethod1, become)]
 fn op_call_method1(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1480,7 +1480,7 @@ fn op_call_method1(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler(CallMethod2)]
+#[handler(CallMethod2, become)]
 fn op_call_method2(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1500,7 +1500,7 @@ fn op_call_method2(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler(CallFunction0)]
+#[handler(CallFunction0, become)]
 fn op_call_function0(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1521,7 +1521,7 @@ fn op_call_function0(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler(CallFunction1)]
+#[handler(CallFunction1, become)]
 fn op_call_function1(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1543,7 +1543,7 @@ fn op_call_function1(frame: Frame) {
     call_enter!(result, pc)
 }
 
-#[handler(CallFunction2)]
+#[handler(CallFunction2, become)]
 fn op_call_function2(frame: Frame) {
     let pc = frame.pc();
     let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
@@ -1864,7 +1864,7 @@ fn op_throw(frame: Frame) {
     tail!(throw_dispatch)
 }
 
-#[handler(Construct)]
+#[handler(Construct, become)]
 fn op_construct(frame: Frame) {
     let pc = frame.pc();
     let size =
