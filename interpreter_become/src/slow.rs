@@ -15,7 +15,7 @@ use crate::{Acc, Ctx, TableArg, throw_dispatch};
 use crate::{FloatReg, Ops, Regs, RootsArg};
 
 #[inline(always)]
-fn add_body<'a>(
+pub(crate) fn add_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -69,7 +69,7 @@ fn add_body<'a>(
     })
 }
 
-fn bitwise_body<'a>(
+pub(crate) fn bitwise_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -105,7 +105,7 @@ fn bitwise_body<'a>(
 /// The compare cold tail: `cmp` selects the relation (0 = loose `==`,
 /// 2 = `<`, 3 = `<=`, 4 = `>`, 5 = `>=`). Returns the boolean result
 /// value or the sentinel (a coercion threw).
-fn compare_body<'a>(
+pub(crate) fn compare_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -161,7 +161,7 @@ fn compare_body<'a>(
 /// The `IncLoc`/`DecLoc` cold tail shared by both handlers: writes the
 /// incremented register and returns the numeric *old* value (postfix
 /// semantics). The smi tail covers tagged-range overflow.
-fn incdec_body<'a>(
+pub(crate) fn incdec_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -198,7 +198,7 @@ fn incdec_body<'a>(
 /// Apply a store outcome: transitions define the own property, setters
 /// run as a blocking call (their return value is ignored; the stored
 /// value stays the expression's result). `Err(())` = threw (pending set).
-fn apply_store_outcome_body(
+pub(crate) fn apply_store_outcome_body(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
@@ -1013,7 +1013,7 @@ pub fn slow_named_load(frame: Frame) {
     reenter!(pc)
 }
 
-fn global_load_body<'a>(
+pub(crate) fn global_load_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -1118,7 +1118,7 @@ pub fn slow_global_load_nothrow(frame: Frame) {
 
 // --- stores ---
 
-fn keyed_store_body<'a>(
+pub(crate) fn keyed_store_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,

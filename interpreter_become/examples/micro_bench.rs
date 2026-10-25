@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use bytecode::{Opcode, emit};
 use interpreter_become::BecomeInterpreter;
+use interpreter_become::match_loop::MatchInterpreter as BecomeMatchInterpreter;
 use interpreter_match_loop::MatchLoopInterpreter;
-use interpreter_match_loop::new::NewInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, Handle, HandleScope, Heap,
@@ -136,7 +136,7 @@ fn main() {
 
     for (op, program) in [("load", &load), ("store", &store), ("add", &add)] {
         bench::<MatchLoopInterpreter>("old match", op, program, reps);
-        bench::<NewInterpreter>("new match", op, program, reps);
+        bench::<BecomeMatchInterpreter>("become match", op, program, reps);
         bench::<BecomeInterpreter>("become", op, program, reps);
     }
 }

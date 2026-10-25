@@ -13,8 +13,6 @@ use vm_core::{
     ScopeInfo, Smi, StoreSemantics, Tagged, Termination, ThreadState, VM, Value, VmError,
 };
 
-pub mod new;
-
 /// The per-instruction control flow of the dispatch loop (the error
 /// channel is the exception sentinel, never a variant).
 enum Flow {

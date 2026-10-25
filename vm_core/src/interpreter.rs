@@ -154,6 +154,10 @@ pub struct Ctx<'s, 'h> {
     /// Data pointer of the current frame's bytecode (`ip - code`)
     code: Cell<*const u8>,
     safepoints: Cell<u32>,
+    /// Faulting pc of the last match-loop throw. The match loop signals
+    /// throws with a sentinel successor pointer; the pc rides here so
+    /// the per-instruction dispatch path stays two pointer compares.
+    throw_pc: Cell<usize>,
 }
 
 impl<'s, 'h> Ctx<'s, 'h> {
@@ -171,6 +175,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
             base_anchor,
             code: Cell::new(code),
             safepoints: Cell::new(SAFEPOINT_INTERVAL),
+            throw_pc: Cell::new(0),
         }
     }
 
@@ -323,6 +328,18 @@ impl<'s, 'h> Ctx<'s, 'h> {
             self.safepoints.set(n - 1);
             false
         }
+    }
+
+    /// Record the faulting pc for the match loop's throw sentinel.
+    #[inline(always)]
+    pub fn set_throw_pc(&self, pc: usize) {
+        self.throw_pc.set(pc);
+    }
+
+    /// Read the faulting pc recorded by the last throw sentinel.
+    #[inline(always)]
+    pub fn throw_pc(&self) -> usize {
+        self.throw_pc.get()
     }
 
     #[inline(always)]

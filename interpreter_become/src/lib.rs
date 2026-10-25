@@ -20,6 +20,7 @@ use vm_core::{
 };
 
 mod macros;
+pub mod match_loop;
 pub mod register_probe;
 mod slow;
 mod utils;
