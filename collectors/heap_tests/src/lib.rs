@@ -1,11 +1,11 @@
-use vm::{HeapBackend, JSRuntime, MatchLoopInterpreter, VM};
+use vm::{DefaultInterpreter, HeapBackend, JSRuntime, VM};
 
 pub fn vm<B: HeapBackend>(config: B::Config) -> VM {
-    VM::new::<B, MatchLoopInterpreter>(config).expect("failed to create heap")
+    VM::new::<B, DefaultInterpreter>(config).expect("failed to create heap")
 }
 
 pub fn vm_with_builtins<B: HeapBackend>(config: B::Config) -> VM {
-    let vm = VM::new::<B, MatchLoopInterpreter>(config)
+    let vm = VM::new::<B, DefaultInterpreter>(config)
         .expect("failed to create heap")
         .add::<JSRuntime>()
         .expect("failed to create heap");

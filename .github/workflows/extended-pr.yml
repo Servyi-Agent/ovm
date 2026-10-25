@@ -236,8 +236,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo +nightly test --workspace --locked --features vm/stress-minor-gc,vm/fast
-          cd interpreter_become
-          cargo +nightly test --release --locked --features stress-minor-gc -- \
+          cd interpreter
+          cargo +nightly test --release --locked --features fast,stress-minor-gc -- \
             --skip bench \
             --skip deltablue \
             --skip fannkuch \

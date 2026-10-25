@@ -2,8 +2,8 @@ use bytecode::Opcode;
 use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, HandleScope, Heap,
-    HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, raise_runtime,
+    Acc, Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, HandleScope,
+    Heap, HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, raise_runtime,
 };
 
 use crate::{Regs, RootsArg};
@@ -260,7 +260,7 @@ pub fn proxy_apply_staged<'a>(
     regs: Regs,
     callee_reg: i32,
     staged: Args,
-) -> Tagged<'a, Value> {
+) -> Acc {
     let vm = x.vm();
     let state = x.state();
     let stack = state.stack();
@@ -271,9 +271,11 @@ pub fn proxy_apply_staged<'a>(
     let v = state.handle_scope(|scope| {
         let callee = scope.handle(regs.get(callee_reg, x.heap()));
         match Proxy::apply(vm, x.heap_mut(), state, callee, staged) {
-            Ok(Coercion::Threw) => roots.known(x.heap()).exception.as_tagged(x.heap()).erase(),
-            Ok(Coercion::Value(v)) => v,
-            Err(err) => raise_runtime(vm, x.heap_mut(), state, err),
+            Ok(Coercion::Threw) => {
+                Acc::set(roots.known(x.heap()).exception.as_tagged(x.heap()).erase())
+            }
+            Ok(Coercion::Value(v)) => Acc::set(v),
+            Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
         }
     });
     stack.set_top(saved_top);

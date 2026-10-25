@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 vm_core = { path = "../vm_core" }
-interpreter_match_loop = { path = "../interpreter_match_loop" }
+interpreter = { path = "../interpreter" }
 js_runtime = { path = "../js/js_runtime" }
 kette_runtime = { path = "../kette/kette_runtime" }
 heap_api = { path = "../collectors/heap_api" }
@@ -19,10 +19,9 @@ kette_compiler = { path = "../kette/kette_compiler" }
 mark_sweep = { path = "../collectors/mark_sweep" }
 dummy_heap = { path = "../collectors/dummy_heap" }
 trace = { path = "../trace" }
-interpreter_become = { path = "../interpreter_become", optional = true }
 
 [features]
 stress-minor-gc = ["vm_core/stress-minor-gc"]
 # Select the tail-call ("become") interpreter over the match-loop one.
 # Requires a nightly toolchain (explicit_tail_calls / rust_preserve_none_cc).
-fast = ["dep:interpreter_become"]
+fast = ["interpreter/fast"]

@@ -1,5 +1,4 @@
-use interpreter_become::BecomeInterpreter;
-use interpreter_match_loop::MatchLoopInterpreter;
+use interpreter::DefaultInterpreter;
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -22,10 +21,8 @@ fn bench<I: Interpreter>(name: &str, src: &str) {
 }
 
 fn once(name: &str, src: &str) {
-    bench::<MatchLoopInterpreter>(&format!("{name}/match_loop"), src);
-    bench::<BecomeInterpreter>(&format!("{name}/become"), src);
-    bench::<MatchLoopInterpreter>(&format!("{name}/match_loop"), src);
-    bench::<BecomeInterpreter>(&format!("{name}/become"), src);
+    bench::<DefaultInterpreter>(&format!("{name}/default"), src);
+    bench::<DefaultInterpreter>(&format!("{name}/default"), src);
 }
 
 // benchmark drivers, not correctness tests: opt in with

@@ -1,4 +1,5 @@
-use interpreter_become::match_loop::MatchInterpreter;
+#![cfg(not(feature = "fast"))]
+use interpreter::match_loop::MatchInterpreter;
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -45,7 +46,9 @@ function alert(m) { throw new Error("ALERT: " + m); }
 
 #[test]
 fn deltablue() {
-    let src =
-        format!("{PRELUDE}{}\ndeltaBlue();\n", source("benchmarks/octane/deltablue/deltablue.js"));
+    let src = format!(
+        "{PRELUDE}{}\ndeltaBlue();\n",
+        source("benchmarks/octane/deltablue/deltablue.js")
+    );
     run::<MatchInterpreter>(&src);
 }

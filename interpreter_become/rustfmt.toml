@@ -1,4 +1,0 @@
-# closure-style handler heads (`handler!(name, Op, |bindings| { .. })`)
-# ride rustfmt's trailing-closure layout, whose signature portion is
-# measured against fn_call_width — 90 covers the longest head
-fn_call_width = 90

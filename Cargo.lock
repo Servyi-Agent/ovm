@@ -237,19 +237,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "913a7d294ad056474749152107309fdee3ec17d2482d1ab70fdc61a81c64b9a3"
 
 [[package]]
-name = "interpreter_become"
+name = "interpreter"
 version = "0.1.0"
 dependencies = [
  "bytecode",
  "handler_derive",
- "vm_core",
-]
-
-[[package]]
-name = "interpreter_match_loop"
-version = "0.1.0"
-dependencies = [
- "bytecode",
+ "js_compiler",
+ "js_runtime",
+ "mark_sweep",
  "vm_core",
 ]
 
@@ -314,7 +309,6 @@ dependencies = [
 name = "kette_runtime"
 version = "0.1.0"
 dependencies = [
- "interpreter_match_loop",
  "kette_compiler",
  "mark_sweep",
  "vm_core",
@@ -1008,8 +1002,7 @@ dependencies = [
  "bytecode",
  "dummy_heap",
  "heap_api",
- "interpreter_become",
- "interpreter_match_loop",
+ "interpreter",
  "js_compiler",
  "js_runtime",
  "kette_compiler",

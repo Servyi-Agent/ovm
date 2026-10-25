@@ -1,4 +1,4 @@
-use interpreter_become::BecomeInterpreter;
+use interpreter::BecomeInterpreter;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use std::time::Instant;
@@ -14,7 +14,11 @@ fn bench(name: &str, src: &str, iters: usize) {
         let mut thread = vm.attach();
         let t = Instant::now();
         let _result = thread
-            .run_source(src, js_compiler::compile_js, js_compiler::SourceMode::Script)
+            .run_source(
+                src,
+                js_compiler::compile_js,
+                js_compiler::SourceMode::Script,
+            )
             .expect("runs");
         let dt = t.elapsed();
         if let Some(ex) = thread.take_pending_exception() {
@@ -69,7 +73,11 @@ fn score_bench(name: &str, src: &str, iters: usize) {
             .unwrap();
         let mut thread = vm.attach();
         let result = thread
-            .run_source(src, js_compiler::compile_js, js_compiler::SourceMode::Script)
+            .run_source(
+                src,
+                js_compiler::compile_js,
+                js_compiler::SourceMode::Script,
+            )
             .expect("runs");
         if let Some(ex) = thread.take_pending_exception() {
             let heap = thread.heap();

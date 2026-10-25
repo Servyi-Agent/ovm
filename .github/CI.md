@@ -19,22 +19,22 @@ persistent Cargo target volume.
 
 `CI` on PRs and `master`:
 - `format`: `cargo fmt --all --check` and `cargo +nightly fmt --check` in
-  `interpreter_become`
+  `interpreter`
 - `build`: builds every variant used by the other jobs, including match and
   nightly become release binaries, test262 examples, match and become test
-  binaries, GC-stress test binaries, and the `interpreter_become` test binaries
+  binaries, GC-stress test binaries, and the `interpreter` test binaries
 - `test`: stable match tests, nightly become tests, and the
-  `interpreter_become` tests
+  `interpreter` tests
 
 `Extended checks (master)` runs on every push to `master`:
 - `test262-match`
 - `test262-become` (nightly become)
 - `gc-stress-match`
 - `gc-stress-become` (workspace become GC stress plus the
-  `interpreter_become` stress suite)
+  `interpreter` stress suite)
 
 Benchmark-style tests (`bench`, `deltablue`, `fannkuch`, `nbody`) are excluded
-from the `interpreter_become` GC-stress run; they still run non-stress in
+from the `interpreter` GC-stress run; they still run non-stress in
 `test`. The workspace GC-stress runs include the normal `vm` tests.
 
 The extended jobs run in this order and share the Cargo target cache. Each

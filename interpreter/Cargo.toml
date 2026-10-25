@@ -1,5 +1,5 @@
 [package]
-name = "interpreter_become"
+name = "interpreter"
 version = "0.1.0"
 edition = "2024"
 
@@ -13,9 +13,21 @@ js_compiler = { path = "../js/js_compiler" }
 js_runtime = { path = "../js/js_runtime" }
 mark_sweep = { path = "../collectors/mark_sweep" }
 
-interpreter_match_loop = { path = "../interpreter_match_loop" }
 
 [features]
 default = ["star_fusion"]
+fast = []
 star_fusion = []
 stress-minor-gc = ["vm_core/stress-minor-gc"]
+
+[[example]]
+name = "abi"
+required-features = ["fast"]
+
+[[example]]
+name = "ab_bench"
+required-features = ["fast"]
+
+[[example]]
+name = "run"
+required-features = ["fast"]

@@ -1,4 +1,7 @@
-use handler_derive::handler;
+#[cfg(feature = "fast")]
+use handler_derive::handler_become as handler;
+#[cfg(not(feature = "fast"))]
+use handler_derive::handler_match as handler;
 
 use bytecode::Opcode;
 use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
@@ -10,12 +13,19 @@ use vm_core::{
     ThreadState, VM, Value, VmError, raise_runtime,
 };
 
-use crate::macros::*;
+#[cfg(not(feature = "fast"))]
+use crate::{Acc, Ctx};
+#[cfg(feature = "fast")]
 use crate::{Acc, Ctx, TableArg, throw_dispatch};
 use crate::{FloatReg, Ops, Regs, RootsArg};
+#[cfg(feature = "fast")]
+use crate::{
+    acc, call_enter, dispatch, dispatch_frame, float, ip, next, pc, reenter, regs, set_acc,
+    set_acc_smi, set_float, tail,
+};
 
 #[inline(always)]
-pub(crate) fn add_body<'a>(
+pub fn add_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -69,7 +79,7 @@ pub(crate) fn add_body<'a>(
     })
 }
 
-pub(crate) fn bitwise_body<'a>(
+pub fn bitwise_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -105,7 +115,7 @@ pub(crate) fn bitwise_body<'a>(
 /// The compare cold tail: `cmp` selects the relation (0 = loose `==`,
 /// 2 = `<`, 3 = `<=`, 4 = `>`, 5 = `>=`). Returns the boolean result
 /// value or the sentinel (a coercion threw).
-pub(crate) fn compare_body<'a>(
+pub fn compare_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -145,7 +155,11 @@ pub(crate) fn compare_body<'a>(
         };
         let b = match cmp {
             0 => Compare::equal(heap, x.as_tagged(heap), y.as_tagged(heap)),
-            1 => Ok(Compare::strict_equal(heap, x.as_tagged(heap), y.as_tagged(heap))),
+            1 => Ok(Compare::strict_equal(
+                heap,
+                x.as_tagged(heap),
+                y.as_tagged(heap),
+            )),
             2 => Compare::less_than(heap, x.as_tagged(heap), y.as_tagged(heap)),
             3 => Compare::less_than_or_equal(heap, x.as_tagged(heap), y.as_tagged(heap)),
             4 => Compare::greater_than(heap, x.as_tagged(heap), y.as_tagged(heap)),
@@ -161,7 +175,7 @@ pub(crate) fn compare_body<'a>(
 /// The `IncLoc`/`DecLoc` cold tail shared by both handlers: writes the
 /// incremented register and returns the numeric *old* value (postfix
 /// semantics). The smi tail covers tagged-range overflow.
-pub(crate) fn incdec_body<'a>(
+pub fn incdec_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -198,7 +212,7 @@ pub(crate) fn incdec_body<'a>(
 /// Apply a store outcome: transitions define the own property, setters
 /// run as a blocking call (their return value is ignored; the stored
 /// value stays the expression's result). `Err(())` = threw (pending set).
-pub(crate) fn apply_store_outcome_body(
+pub fn apply_store_outcome_body(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
@@ -360,17 +374,16 @@ macro_rules! numeric_slow {
             let pc = frame.pc();
             let vm = frame.ctx().vm();
             let state = frame.ctx().state();
-            let val = state.handle_scope(|scope| {
+            state.handle_scope(|scope| {
                 let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
                 let rhs = scope.handle(frame.acc());
                 let heap = frame.ctx().heap_mut();
                 match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
-                    Ok(Some(val)) => val,
-                    Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
-                    Err(e) => raise_runtime(vm, heap, state, e),
+                    Ok(Some(val)) => frame.set_acc(val),
+                    Ok(None) => frame.set_acc(roots.known(heap).exception.as_tagged(heap).erase()),
+                    Err(e) => frame.set_acc(raise_runtime(vm, heap, state, e)),
                 }
             });
-            frame.set_acc(val);
             reenter!(pc)
         }
     };
@@ -381,17 +394,16 @@ macro_rules! numeric_slow {
             let pc = frame.pc();
             let vm = frame.ctx().vm();
             let state = frame.ctx().state();
-            let val = state.handle_scope(|scope| {
+            state.handle_scope(|scope| {
                 let lhs = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
                 let rhs = scope.handle(Smi::new(frame.signed::<1>() as i64).into_tagged());
                 let heap = frame.ctx().heap_mut();
                 match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
-                    Ok(Some(val)) => val,
-                    Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
-                    Err(e) => raise_runtime(vm, heap, state, e),
+                    Ok(Some(val)) => frame.set_acc(val),
+                    Ok(None) => frame.set_acc(roots.known(heap).exception.as_tagged(heap).erase()),
+                    Err(e) => frame.set_acc(raise_runtime(vm, heap, state, e)),
                 }
             });
-            frame.set_acc(val);
             reenter!(pc)
         }
     };
@@ -402,11 +414,13 @@ numeric_slow!(Mul, slow_mul, |a, b| a * b);
 numeric_slow!(Div, slow_div, |a, b| a / b);
 numeric_slow!(Mod, slow_mod, |a, b| a % b);
 numeric_slow!(Exp, slow_exp, |a, b| a.powf(b));
-numeric_slow!(SubImmediate, slow_numeric_immediate, immediate, |a, b| a - b);
+numeric_slow!(SubImmediate, slow_numeric_immediate, immediate, |a, b| a
+    - b);
 numeric_slow!(MulImmediate, slow_mul_immediate, immediate, |a, b| a * b);
 numeric_slow!(DivImmediate, slow_div_immediate, immediate, |a, b| a / b);
 numeric_slow!(ModImmediate, slow_mod_immediate, immediate, |a, b| a % b);
-numeric_slow!(ExpImmediate, slow_exp_immediate, immediate, |a, b| a.powf(b));
+numeric_slow!(ExpImmediate, slow_exp_immediate, immediate, |a, b| a
+    .powf(b));
 
 #[handler(Negate)]
 #[cold]
@@ -493,7 +507,7 @@ macro_rules! loc_slow {
             let vm = frame.ctx().vm();
             let state = frame.ctx().state();
             let window = frame.regs();
-            let val = state.handle_scope(|scope| {
+            state.handle_scope(|scope| {
                 let lhs = scope.handle(frame.regs().get(dst, frame.ctx().heap()));
                 let rhs = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
                 let heap = frame.ctx().heap_mut();
@@ -510,9 +524,8 @@ macro_rules! loc_slow {
                 if val.raw().to_bits() != known.exception.raw().to_bits() {
                     window.set(dst, val);
                 }
-                val
+                frame.set_acc(val);
             });
-            frame.set_acc(val);
             reenter!(pc)
         }
     };
@@ -565,11 +578,31 @@ bitwise_slow!(ShiftLeft, slow_shift_left, 3);
 bitwise_slow!(ShiftRight, slow_shift_right, 4);
 bitwise_slow!(ShiftRightLogical, slow_shift_right_logical, 5);
 bitwise_slow!(BitwiseOrImmediate, slow_bitwise_or_immediate, 0, immediate);
-bitwise_slow!(BitwiseXorImmediate, slow_bitwise_xor_immediate, 1, immediate);
-bitwise_slow!(BitwiseAndImmediate, slow_bitwise_and_immediate, 2, immediate);
+bitwise_slow!(
+    BitwiseXorImmediate,
+    slow_bitwise_xor_immediate,
+    1,
+    immediate
+);
+bitwise_slow!(
+    BitwiseAndImmediate,
+    slow_bitwise_and_immediate,
+    2,
+    immediate
+);
 bitwise_slow!(ShiftLeftImmediate, slow_shift_left_immediate, 3, immediate);
-bitwise_slow!(ShiftRightImmediate, slow_shift_right_immediate, 4, immediate);
-bitwise_slow!(ShiftRightLogicalImmediate, slow_shift_right_logical_immediate, 5, immediate);
+bitwise_slow!(
+    ShiftRightImmediate,
+    slow_shift_right_immediate,
+    4,
+    immediate
+);
+bitwise_slow!(
+    ShiftRightLogicalImmediate,
+    slow_shift_right_logical_immediate,
+    5,
+    immediate
+);
 
 // --- comparisons ---
 
@@ -713,13 +746,18 @@ pub fn slow_create_block_context(frame: Frame) {
     let val = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
         let outer = scope
-            .cast::<ContextObject>(heap, state.stack().frame_header(base).context_slot().get(heap))
+            .cast::<ContextObject>(
+                heap,
+                state.stack().frame_header(base).context_slot().get(heap),
+            )
             .expect("frame context slot holds a ContextObject");
         let slots = if count == 0 {
             roots.known(heap).empty_fixed_array
         } else {
-            let values =
-                scope.stage(&vec![roots.known(heap).the_hole.as_tagged(heap).erase(); count]);
+            let values = scope.stage(&vec![
+                roots.known(heap).the_hole.as_tagged(heap).erase();
+                count
+            ]);
             heap.allocate_handle::<FixedArray>(values, &scope)
         };
         heap.allocate::<ContextObject>(ContextInit {
@@ -744,7 +782,16 @@ pub fn slow_inc_loc(frame: Frame) {
     let state = frame.ctx().state();
     let v = state.handle_scope(|scope| {
         let old = scope.handle(frame.regs().get(r, frame.ctx().heap()));
-        incdec_body(vm, frame.ctx().heap_mut(), state, roots, frame.regs(), r, old, 1.0)
+        incdec_body(
+            vm,
+            frame.ctx().heap_mut(),
+            state,
+            roots,
+            frame.regs(),
+            r,
+            old,
+            1.0,
+        )
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -759,7 +806,16 @@ pub fn slow_dec_loc(frame: Frame) {
     let state = frame.ctx().state();
     let v = state.handle_scope(|scope| {
         let old = scope.handle(frame.regs().get(r, frame.ctx().heap()));
-        incdec_body(vm, frame.ctx().heap_mut(), state, roots, frame.regs(), r, old, -1.0)
+        incdec_body(
+            vm,
+            frame.ctx().heap_mut(),
+            state,
+            roots,
+            frame.regs(),
+            r,
+            old,
+            -1.0,
+        )
     });
     frame.set_acc(v);
     reenter!(pc)
@@ -775,21 +831,23 @@ pub fn slow_keyed_load(frame: Frame) {
     let fb = frame.unsigned::<1>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
+    let v = state.handle_scope(|scope| -> Acc {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.acc());
         let heap = frame.ctx().heap_mut();
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Ok(None) => return Acc::set(roots.known(heap).exception.as_tagged(heap).erase()),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
 
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(v)) => v,
-                Err(e) => raise_runtime(vm, heap, state, e),
+                Ok(Coercion::Threw) => {
+                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
+                }
+                Ok(Coercion::Value(v)) => Acc::set(v),
+                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
         let element_index = match key.as_tagged(heap).erase().classify_key(heap) {
@@ -810,7 +868,7 @@ pub fn slow_keyed_load(frame: Frame) {
                 i,
             );
             if let Some(unit) = DenseString::index_element(heap, &scope, recv, key) {
-                return scope.handle(unit).as_tagged(heap).erase();
+                return Acc::set(scope.handle(unit).as_tagged(heap).erase());
             }
         }
         let out = match recv
@@ -823,14 +881,14 @@ pub fn slow_keyed_load(frame: Frame) {
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return raise_runtime(vm, heap, state, e),
+                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
-        out.as_tagged(heap).erase()
+        Acc::set(out.as_tagged(heap).erase())
     });
-    frame.set_acc(v);
+    frame.set_acc(v.get(frame.ctx().heap()));
     reenter!(pc)
 }
 
@@ -842,20 +900,22 @@ pub fn slow_keyed_load_reg(frame: Frame) {
     let fb = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
+    let v = state.handle_scope(|scope| -> Acc {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Ok(None) => return Acc::set(roots.known(heap).exception.as_tagged(heap).erase()),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(v)) => v,
-                Err(e) => raise_runtime(vm, heap, state, e),
+                Ok(Coercion::Threw) => {
+                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
+                }
+                Ok(Coercion::Value(v)) => Acc::set(v),
+                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
         let element_index = match key.as_tagged(heap).erase().classify_key(heap) {
@@ -876,7 +936,7 @@ pub fn slow_keyed_load_reg(frame: Frame) {
                 i,
             );
             if let Some(unit) = DenseString::index_element(heap, &scope, recv, key) {
-                return scope.handle(unit).as_tagged(heap).erase();
+                return Acc::set(scope.handle(unit).as_tagged(heap).erase());
             }
         }
         let out = match recv
@@ -889,14 +949,14 @@ pub fn slow_keyed_load_reg(frame: Frame) {
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return raise_runtime(vm, heap, state, e),
+                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
-        out.as_tagged(heap).erase()
+        Acc::set(out.as_tagged(heap).erase())
     });
-    frame.set_acc(v);
+    frame.set_acc(v.get(frame.ctx().heap()));
     reenter!(pc)
 }
 
@@ -908,7 +968,7 @@ pub fn slow_keyed_load_imm(frame: Frame) {
     let fb = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
+    let v = state.handle_scope(|scope| -> Acc {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let smi = Smi::new(idx as i64).into_tagged();
@@ -926,13 +986,15 @@ pub fn slow_keyed_load_imm(frame: Frame) {
             idx,
         );
         if let Some(unit) = DenseString::index_element(heap, &scope, recv, key) {
-            return scope.handle(unit).as_tagged(heap).erase();
+            return Acc::set(scope.handle(unit).as_tagged(heap).erase());
         }
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(v)) => v,
-                Err(e) => raise_runtime(vm, heap, state, e),
+                Ok(Coercion::Threw) => {
+                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
+                }
+                Ok(Coercion::Value(v)) => Acc::set(v),
+                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
         let out = match recv
@@ -945,14 +1007,14 @@ pub fn slow_keyed_load_imm(frame: Frame) {
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return raise_runtime(vm, heap, state, e),
+                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
-        out.as_tagged(heap).erase()
+        Acc::set(out.as_tagged(heap).erase())
     });
-    frame.set_acc(v);
+    frame.set_acc(v.get(frame.ctx().heap()));
     reenter!(pc)
 }
 
@@ -964,7 +1026,7 @@ pub fn slow_named_load(frame: Frame) {
     let fb_slot = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
+    let v = state.handle_scope(|scope| -> Acc {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let name = scope.handle(
@@ -975,9 +1037,11 @@ pub fn slow_named_load(frame: Frame) {
         );
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, name.erase()) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(v)) => v,
-                Err(e) => raise_runtime(vm, heap, state, e),
+                Ok(Coercion::Threw) => {
+                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
+                }
+                Ok(Coercion::Value(v)) => Acc::set(v),
+                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
         let out = match recv
@@ -1008,18 +1072,18 @@ pub fn slow_named_load(frame: Frame) {
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return raise_runtime(vm, heap, state, e),
+                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
-        out.as_tagged(heap).erase()
+        Acc::set(out.as_tagged(heap).erase())
     });
-    frame.set_acc(v);
+    frame.set_acc(v.get(frame.ctx().heap()));
     reenter!(pc)
 }
 
-pub(crate) fn global_load_body<'a>(
+pub fn global_load_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -1101,8 +1165,16 @@ pub fn slow_global_load(frame: Frame) {
     let fb_slot = frame.unsigned::<1>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let val =
-        global_load_body(vm, frame.ctx().heap_mut(), state, roots, base, name_idx, fb_slot, true);
+    let val = global_load_body(
+        vm,
+        frame.ctx().heap_mut(),
+        state,
+        roots,
+        base,
+        name_idx,
+        fb_slot,
+        true,
+    );
     frame.set_acc(val);
     reenter!(pc)
 }
@@ -1116,15 +1188,23 @@ pub fn slow_global_load_nothrow(frame: Frame) {
     let fb_slot = frame.unsigned::<1>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let val =
-        global_load_body(vm, frame.ctx().heap_mut(), state, roots, base, name_idx, fb_slot, false);
+    let val = global_load_body(
+        vm,
+        frame.ctx().heap_mut(),
+        state,
+        roots,
+        base,
+        name_idx,
+        fb_slot,
+        false,
+    );
     frame.set_acc(val);
     reenter!(pc)
 }
 
 // --- stores ---
 
-pub(crate) fn keyed_store_body<'a>(
+pub fn keyed_store_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
     state: &'a ThreadState,
@@ -1461,7 +1541,10 @@ pub fn slow_store_global(frame: Frame) {
         );
         let global = scope.handle(roots.known(heap).global_object.as_tagged(heap).erase());
         if mode.is_strict()
-            && matches!(global.as_tagged(heap).lookup(heap, name.as_tagged(heap)), Lookup::NotFound)
+            && matches!(
+                global.as_tagged(heap).lookup(heap, name.as_tagged(heap)),
+                Lookup::NotFound
+            )
         {
             return raise_runtime(vm, heap, state, VmError::Reference);
         }
@@ -1571,17 +1654,19 @@ pub fn slow_construct(frame: Frame) {
         let callee = scope.handle(frame.regs().get(callee_reg, frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let Some(obj) = callee.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
         };
         if !obj.map(heap).kind().is_constructor() {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
         }
         let args = state.stack().args(base, args_base, count);
         if Proxy::is_proxy(heap, callee.as_tagged(heap)) {
             return match Proxy::construct(vm, heap, state, callee, args, callee) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
-                Ok(Coercion::Value(v)) => v,
-                Err(e) => raise_runtime(vm, heap, state, e),
+                Ok(Coercion::Threw) => {
+                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
+                }
+                Ok(Coercion::Value(v)) => Acc::set(v),
+                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
         // a derived constructor's `this` is the hole until `super()` binds
@@ -1598,8 +1683,8 @@ pub fn slow_construct(frame: Frame) {
         } else {
             match Object::create_construct_receiver_value(vm, heap, state, callee_obj.erase()) {
                 Ok(Some(r)) => scope.handle(r),
-                Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
-                Err(e) => return raise_runtime(vm, heap, state, e),
+                Ok(None) => return Acc::set(roots.known(heap).exception.as_tagged(heap).erase()),
+                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
             }
         };
         let mut staged: Vec<Tagged<'_, Value>> = Vec::with_capacity(count + 1);
@@ -1615,20 +1700,20 @@ pub fn slow_construct(frame: Frame) {
             Some(callee_obj.erase()),
         ) {
             Ok(v) => scope.handle(v),
-            Err(e) => return raise_runtime(vm, heap, state, e),
+            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         if result.as_tagged(heap) == roots.known(heap).exception.as_tagged(heap).erase() {
-            return roots.known(heap).exception.as_tagged(heap).erase();
+            return Acc::set(roots.known(heap).exception.as_tagged(heap).erase());
         }
         if result.as_tagged(heap).is_primitive(heap) {
             if derived {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
             }
-            receiver.as_tagged(heap).erase()
+            Acc::set(receiver.as_tagged(heap).erase())
         } else {
-            result.as_tagged(heap).erase()
+            Acc::set(result.as_tagged(heap).erase())
         }
     });
-    frame.set_acc(val);
+    frame.set_acc(val.get(frame.ctx().heap()));
     reenter!(pc)
 }

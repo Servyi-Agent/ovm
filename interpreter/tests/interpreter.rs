@@ -1,5 +1,6 @@
+#![cfg(feature = "fast")]
 use bytecode::{Opcode, emit};
-use interpreter_become::BecomeInterpreter;
+use interpreter::BecomeInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, Handle, HandleScope, Heap,
@@ -254,7 +255,10 @@ fn shift_register_handlers() {
     emit(&mut logical, Opcode::Load, &[2]);
     emit(&mut logical, Opcode::ShiftRightLogical, &[1]); // -8 >>> 2
     emit(&mut logical, Opcode::Return, &[]);
-    assert_eq!(run(&logical, 3, &[smi(0), smi(-8), smi(2)]), smi(1073741822));
+    assert_eq!(
+        run(&logical, 3, &[smi(0), smi(-8), smi(2)]),
+        smi(1073741822)
+    );
 }
 
 /// The immediate bitwise/shift forms.
@@ -449,7 +453,11 @@ fn comparison_handlers() {
         emit(&mut p, Opcode::Load, &[1]);
         emit(&mut p, op, &[2]);
         emit(&mut p, Opcode::Return, &[]);
-        assert_eq!(run_boolean(&p, 3, &[smi(0), smi(a), smi(b)]), expected, "{op:?}");
+        assert_eq!(
+            run_boolean(&p, 3, &[smi(0), smi(a), smi(b)]),
+            expected,
+            "{op:?}"
+        );
     }
 }
 

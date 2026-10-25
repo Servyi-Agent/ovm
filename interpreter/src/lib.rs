@@ -1,31 +1,51 @@
-#![feature(explicit_tail_calls)]
-#![feature(rust_preserve_none_cc)]
+#![cfg_attr(
+    feature = "fast",
+    feature(explicit_tail_calls, rust_preserve_none_cc, fn_align)
+)]
 #![allow(incomplete_features)]
-#![feature(fn_align)]
-#![allow(unused_macros, unused_unsafe, unused_variables)]
+#![allow(unused_imports, unused_macros, unused_unsafe, unused_variables)]
 #![allow(dead_code)]
 
 use core::hint::black_box;
 use std::marker::PhantomData;
 
-use handler_derive::{handler, handler_table};
+#[cfg(not(feature = "fast"))]
+use handler_derive::handler_match as handler;
+#[cfg(feature = "fast")]
+use handler_derive::{handler_become as handler, handler_table};
 
 use bytecode::Opcode;
 use vm_core::bootstrap::WellKnown;
 use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
 use vm_core::{
     Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
-    EntryFn, FixedArray, FrameMeta, Handle, HandleSlice, Heap, HostCtx, Interpreter, NativeIndex,
-    Object, Ops, Regs, ScopeInfo, Smi, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
+    FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs, ScopeInfo, Smi, Tagged,
+    VmError, raise_runtime,
 };
 
-mod macros;
+#[cfg(feature = "fast")]
+#[path = "become.rs"]
+pub mod become_backend;
+#[cfg(not(feature = "fast"))]
 pub mod match_loop;
+#[cfg(feature = "fast")]
 pub mod register_probe;
+
+#[cfg(feature = "fast")]
+pub use become_backend::{BecomeInterpreter, DispatchTable, Handler};
+#[cfg(feature = "fast")]
+use become_backend::{TableArg, throw_dispatch};
+#[cfg(not(feature = "fast"))]
+pub use match_loop::MatchInterpreter;
+pub use vm_core::{EntryFn, Interpreter};
+
+#[cfg(feature = "fast")]
+pub type DefaultInterpreter = become_backend::BecomeInterpreter;
+#[cfg(not(feature = "fast"))]
+pub type DefaultInterpreter = match_loop::MatchInterpreter;
 mod slow;
 mod utils;
 
-use crate::macros::*;
 use crate::slow::*;
 use crate::utils::*;
 
@@ -144,112 +164,6 @@ const fn star_lookahead(op: Opcode) -> bool {
 /// The proc macro rewrites access to it.
 #[doc(hidden)]
 pub struct Frame;
-
-#[repr(C)]
-pub struct DispatchTable {
-    pub narrow: [Handler; 256],
-    pub wide: [Handler; 256],
-}
-
-pub struct TableArg<'h>(pub &'static DispatchTable, core::marker::PhantomData<&'h ()>);
-
-impl<'h> TableArg<'h> {
-    #[inline(always)]
-    pub fn new(table: &'static DispatchTable) -> TableArg<'h> {
-        TableArg(table, core::marker::PhantomData)
-    }
-
-    #[inline(always)]
-    pub fn get(&self, op: u8) -> Handler {
-        self.0.narrow[op as usize]
-    }
-
-    #[inline(always)]
-    pub fn wide(&self, op: u8) -> Handler {
-        self.0.wide[op as usize]
-    }
-}
-
-pub type Handler = for<'h> extern "rust-preserve-none" fn(
-    *const u8,
-    Regs,
-    Acc,
-    &mut Ctx<'_, 'h>,
-    TableArg<'h>,
-    RootsArg<'h>,
-    FloatReg,
-) -> Acc;
-
-// --- trampolines ---
-
-/// Peel the `Wide` prefix and dispatch the stride-2 handler
-/// instantiation, keeping the NARROW table: the next instruction
-/// (whatever its width) dispatches narrow-first, and a following
-/// `Wide` prefix comes back through here. The table argument is
-/// narrow for the whole execution; only the handler stride varies.
-#[handler]
-fn op_wide(frame: Frame) {
-    let h = table.wide(unsafe { *ip.add(1) });
-    become h(ip, regs, acc, ctx, table, roots, float)
-}
-
-#[handler]
-fn op_trap(frame: Frame) {
-    let byte = unsafe { *frame.ip() };
-    unreachable!("unimplemented opcode {:?}", Opcode::from_byte(byte))
-}
-
-#[rustc_align(32)]
-pub extern "rust-preserve-none" fn throw_dispatch<'h, const STRIDE: usize>(
-    ip: *const u8,
-    _regs: Regs,
-    _acc: Acc,
-    ctx: &mut Ctx<'_, 'h>,
-    table: TableArg<'h>,
-    roots: RootsArg<'h>,
-    float: FloatReg,
-) -> Acc {
-    ctx.reload_code();
-    let mut pc = ip as usize - ctx.code_ptr() as usize;
-    loop {
-        let base = ctx.frame_base();
-        let handled = if ctx.state().termination().is_some() {
-            None
-        } else {
-            let callable = ctx
-                .stack()
-                .frame_header(base)
-                .callable_slot()
-                .get(ctx.heap());
-            callable
-                .as_heap_object()
-                .and_then(|obj| obj.callable_info(ctx.heap()))
-                .and_then(|info| info.handlers.get(ctx.heap()))
-                .and_then(|handlers| handlers.lookup(pc))
-        };
-        if let Some(handler_pc) = handled {
-            let ex = ctx
-                .state()
-                .take_pending_exception_tagged(ctx.heap())
-                .expect("pending exception must be set while unwinding");
-            let acc = Acc::set(ex);
-            dispatch_frame!(handler_pc, acc, ctx, table, roots, float)
-        }
-        if base == ctx.base_anchor() {
-            return Acc::set(
-                roots
-                    .known(ctx.heap())
-                    .exception
-                    .as_tagged(ctx.heap())
-                    .erase(),
-            );
-        }
-        let caller = ctx.stack().pop_frame(base);
-        ctx.switch_frame(caller.base);
-        pc = caller.handler_pc;
-    }
-}
-
 // --- loads ---
 
 #[handler(Load)]
@@ -1147,7 +1061,10 @@ fn op_greater_than_or_equal(frame: Frame) {
 fn op_equal_strict(frame: Frame) {
     let heap = frame.ctx().heap();
     let other = frame.regs().get(frame.signed::<0>(), heap);
-    frame.set_acc(Convert::boolean(heap, Compare::strict_equal(heap, frame.acc(), other)));
+    frame.set_acc(Convert::boolean(
+        heap,
+        Compare::strict_equal(heap, frame.acc(), other),
+    ));
     next!()
 }
 
@@ -1297,136 +1214,6 @@ fn op_jump_if_not_undefined(frame: Frame) {
     }
     next!()
 }
-
-#[handler(JumpLoop, become)]
-fn op_jump_loop(frame: Frame) {
-    let target = frame.ip().wrapping_offset(frame.signed::<0>() as isize);
-    if frame.ctx().safepoint_tick() {
-        let pc = target as usize - frame.ctx().code_ptr() as usize;
-        let fault = frame.ip() as usize - frame.ctx().code_ptr() as usize;
-        let state = frame.ctx().state();
-        let acc_slot = state.acc_slot();
-        acc_slot.store(frame.acc());
-        let shutdown = frame.ctx().heap_mut().safepoint_poll();
-        frame.ctx().reload_code();
-        if shutdown {
-            state.set_termination(vm_core::Termination::Shutdown);
-            state.set_pending_exception(
-                roots
-                    .known(frame.ctx().heap())
-                    .undefined
-                    .as_tagged(frame.ctx().heap()),
-            );
-            let fault_ip = unsafe { frame.ctx().code_ptr().add(fault) };
-            become throw_dispatch::<STRIDE>(
-                fault_ip,
-                frame.regs(),
-                acc,
-                frame.ctx(),
-                table,
-                roots,
-                float,
-            )
-        }
-        let acc = Acc::set(acc_slot.get(frame.ctx().heap()));
-        let p = unsafe { frame.ctx().code_ptr().add(pc) };
-        let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
-        dispatch!(p)
-    }
-    dispatch!(target)
-}
-
-#[handler(Return, become)]
-fn op_return(frame: Frame) {
-    frame.opcode_check();
-    if frame.ctx().frame_base() == frame.ctx().base_anchor() {
-        return acc;
-    }
-    // A frame pushed by `Construct` carries the callee in `new.target`
-    let constructing = {
-        let heap = frame.ctx().heap();
-        let new_target = frame
-            .ctx()
-            .stack()
-            .frame_header(frame.ctx().frame_base())
-            .new_target_slot()
-            .get(heap);
-        new_target != roots.known(heap).undefined.as_tagged(heap).erase()
-    };
-
-    if constructing {
-        let heap = frame.ctx().heap();
-        let val = frame.acc();
-        if val.is_primitive(heap) {
-            let this_val = frame.regs().get(0, heap);
-            if this_val == roots.known(heap).the_hole.as_tagged(heap).erase() {
-                // a derived constructor escaped without initializing `this`
-                let caller = frame.ctx().stack().pop_frame(frame.ctx().frame_base());
-                frame.ctx().switch_frame(caller.base);
-                let _ = frame.ctx().raise_tag(VmError::Reference);
-                let fault_ip = unsafe { frame.ctx().code_ptr().add(caller.pc) };
-                become throw_dispatch::<STRIDE>(
-                    fault_ip,
-                    unsafe { Regs::new(core::ptr::null_mut()) },
-                    acc,
-                    frame.ctx(),
-                    table,
-                    roots,
-                    float,
-                )
-            }
-            frame.set_acc(this_val);
-        } else {
-            frame.set_acc(val);
-        }
-    }
-    let caller = frame.ctx().stack().pop_frame(frame.ctx().frame_base());
-    frame.ctx().switch_frame(caller.base);
-    dispatch_frame!(caller.pc)
-}
-
-// --- calls ---
-
-#[handler(Call, become)]
-fn op_call(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let result = call_window_start::<STRIDE>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<3>(),
-        frame.signed::<0>(),
-        callee,
-        frame.signed::<1>(),
-        frame.unsigned::<2>(),
-    );
-    call_enter!(result, pc)
-}
-
-#[handler(CallNoFeedback, become)]
-fn op_call_no_feedback(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let size = (if STRIDE == 2 { 2 } else { 1 })
-        + STRIDE * const { Opcode::CallNoFeedback.operands().len() };
-    let staged = frame.ctx().stack().window(
-        frame.ctx().frame_base(),
-        frame.signed::<1>(),
-        frame.unsigned::<2>(),
-    );
-    let result = resolve_target(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        size,
-        frame.signed::<0>(),
-        callee.call_target(frame.ctx().heap()),
-        staged,
-    );
-    call_enter!(result, pc)
-}
-
 #[handler(CallRuntime)]
 fn op_call_runtime(frame: Frame) {
     let pc = frame.pc();
@@ -1442,130 +1229,6 @@ fn op_call_runtime(frame: Frame) {
     frame.set_acc(v);
     reenter!(pc)
 }
-
-#[handler(CallMethod0, become)]
-fn op_call_method0(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let recv = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
-    let result = call_scatter_start::<STRIDE, true>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<2>(),
-        frame.signed::<0>(),
-        callee,
-        recv,
-        &[],
-    );
-    call_enter!(result, pc)
-}
-
-#[handler(CallMethod1, become)]
-fn op_call_method1(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let recv = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
-    let arg0 = frame.regs().get(frame.signed::<2>(), frame.ctx().heap());
-    let result = call_scatter_start::<STRIDE, true>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<3>(),
-        frame.signed::<0>(),
-        callee,
-        recv,
-        &[arg0][..1],
-    );
-    call_enter!(result, pc)
-}
-
-#[handler(CallMethod2, become)]
-fn op_call_method2(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let recv = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
-    let arg0 = frame.regs().get(frame.signed::<2>(), frame.ctx().heap());
-    let arg1 = frame.regs().get(frame.signed::<3>(), frame.ctx().heap());
-    let result = call_scatter_start::<STRIDE, true>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<4>(),
-        frame.signed::<0>(),
-        callee,
-        recv,
-        &[arg0, arg1][..2],
-    );
-    call_enter!(result, pc)
-}
-
-#[handler(CallFunction0, become)]
-fn op_call_function0(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let result = call_scatter_start::<STRIDE, false>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<1>(),
-        frame.signed::<0>(),
-        callee,
-        roots
-            .known(frame.ctx().heap())
-            .undefined
-            .as_tagged(frame.ctx().heap())
-            .erase(),
-        &[],
-    );
-    call_enter!(result, pc)
-}
-
-#[handler(CallFunction1, become)]
-fn op_call_function1(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let arg0 = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
-    let result = call_scatter_start::<STRIDE, false>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<2>(),
-        frame.signed::<0>(),
-        callee,
-        roots
-            .known(frame.ctx().heap())
-            .undefined
-            .as_tagged(frame.ctx().heap())
-            .erase(),
-        &[arg0][..1],
-    );
-    call_enter!(result, pc)
-}
-
-#[handler(CallFunction2, become)]
-fn op_call_function2(frame: Frame) {
-    let pc = frame.pc();
-    let callee = frame.regs().get(frame.signed::<0>(), frame.ctx().heap());
-    let arg0 = frame.regs().get(frame.signed::<1>(), frame.ctx().heap());
-    let arg1 = frame.regs().get(frame.signed::<2>(), frame.ctx().heap());
-    let result = call_scatter_start::<STRIDE, false>(
-        frame.ctx_ref(),
-        roots,
-        pc,
-        frame.unsigned::<3>(),
-        frame.signed::<0>(),
-        callee,
-        roots
-            .known(frame.ctx().heap())
-            .undefined
-            .as_tagged(frame.ctx().heap())
-            .erase(),
-        &[arg0, arg1][..2],
-    );
-    call_enter!(result, pc)
-}
-
 // --- literals ---
 
 #[handler(CreateClosure)]
@@ -1575,7 +1238,7 @@ fn op_create_closure(frame: Frame) {
     let info_idx = frame.unsigned::<0>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| {
+    let v = state.handle_scope(|scope| -> Acc {
         let heap = frame.ctx().heap_mut();
         let Some(info) = scope.cast::<CallableInfoObject>(
             heap,
@@ -1585,17 +1248,20 @@ fn op_create_closure(frame: Frame) {
                 .constants(&*heap)
                 .at(&*heap, info_idx),
         ) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
+            return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
         };
         let context = scope
-            .cast::<ContextObject>(heap, state.stack().frame_header(base).context_slot().get(heap))
+            .cast::<ContextObject>(
+                heap,
+                state.stack().frame_header(base).context_slot().get(heap),
+            )
             .expect("frame context slot holds a ContextObject");
         match Object::create_closure(heap, &scope, info, context) {
-            Ok(obj) => obj.erase(),
-            Err(e) => raise_runtime(vm, heap, state, e),
+            Ok(obj) => Acc::set(obj.erase()),
+            Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
         }
     });
-    frame.set_acc(v);
+    frame.set_acc(v.get(frame.ctx().heap()));
     reenter!(pc)
 }
 
@@ -1816,7 +1482,10 @@ fn op_create_function_context(frame: Frame) {
     let v = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
         let outer = scope
-            .cast::<ContextObject>(heap, state.stack().frame_header(base).context_slot().get(heap))
+            .cast::<ContextObject>(
+                heap,
+                state.stack().frame_header(base).context_slot().get(heap),
+            )
             .expect("frame context slot holds a ContextObject");
         let Some(count) = state
             .stack()
@@ -1841,8 +1510,10 @@ fn op_create_function_context(frame: Frame) {
         let slots = if count == 0 {
             roots.known(heap).empty_fixed_array
         } else {
-            let values =
-                scope.stage(&vec![roots.known(heap).the_hole.as_tagged(heap).erase(); count]);
+            let values = scope.stage(&vec![
+                roots.known(heap).the_hole.as_tagged(heap).erase();
+                count
+            ]);
             heap.allocate_handle::<FixedArray>(values, &scope)
         };
         let ctx_obj = heap.allocate::<ContextObject>(ContextInit {
@@ -1863,43 +1534,6 @@ fn op_throw(frame: Frame) {
     frame.ctx().state().set_pending_exception(frame.acc());
     tail!(throw_dispatch)
 }
-
-#[handler(Construct, become)]
-fn op_construct(frame: Frame) {
-    let pc = frame.pc();
-    let size =
-        (if STRIDE == 2 { 2 } else { 1 }) + STRIDE * const { Opcode::Construct.operands().len() };
-    let callee_reg = frame.signed::<0>();
-    let args_base = frame.signed::<1>();
-    let count = frame.unsigned::<2>();
-    match construct_start(frame.ctx(), pc, size, frame.regs(), callee_reg, args_base, count) {
-        Ok(ConstructStart::Frame) => {
-            let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
-            let acc = Acc::set(
-                roots
-                    .known(frame.ctx().heap())
-                    .undefined
-                    .as_tagged(frame.ctx().heap())
-                    .erase(),
-            );
-            let entry = frame.ctx().code_ptr();
-            let h = table.get(unsafe { *entry });
-            become h(entry, regs, acc, frame.ctx(), table, roots, float)
-        }
-        Ok(ConstructStart::Native(rt)) => {
-            let val = construct_native(frame.ctx(), rt, callee_reg, args_base, count);
-            frame.set_acc(val);
-            reenter!(pc)
-        }
-        Ok(ConstructStart::Threw) => tail!(throw_dispatch),
-        Ok(ConstructStart::Slow) => tail!(slow_construct),
-        Err(e) => {
-            let _ = frame.ctx().raise_tag(e);
-            tail!(throw_dispatch)
-        }
-    }
-}
-
 #[handler(ThrowReferenceErrorIfHole)]
 fn op_throw_reference_error_if_hole(frame: Frame) {
     let heap = frame.ctx().heap();
@@ -1908,215 +1542,4 @@ fn op_throw_reference_error_if_hole(frame: Frame) {
         tail!(throw_dispatch)
     }
     next!()
-}
-
-handler_table!(
-    op_wide,
-    op_load,
-    op_move,
-    op_store,
-    op_add,
-    op_call_runtime,
-    op_jump,
-    op_jump_if_truthy,
-    op_jump_if_falsy,
-    op_jump_if_not_undefined,
-    op_jump_loop,
-    op_return,
-    op_call_no_feedback,
-    op_call,
-    op_call_method0,
-    op_call_method1,
-    op_call_method2,
-    op_call_function0,
-    op_call_function1,
-    op_call_function2,
-    op_load_smi,
-    op_load_zero,
-    op_load_constant,
-    op_load_undefined,
-    op_load_null,
-    op_load_true,
-    op_load_false,
-    op_load_global,
-    op_sub,
-    op_mul,
-    op_div,
-    op_mod,
-    op_exp,
-    op_negate,
-    op_add_immediate,
-    op_sub_immediate,
-    op_mul_immediate,
-    op_div_immediate,
-    op_mod_immediate,
-    op_exp_immediate,
-    op_add_loc,
-    op_sub_loc,
-    op_bitwise_or,
-    op_bitwise_xor,
-    op_bitwise_and,
-    op_shift_left,
-    op_shift_right,
-    op_shift_right_logical,
-    op_bitwise_or_immediate,
-    op_bitwise_xor_immediate,
-    op_bitwise_and_immediate,
-    op_shift_left_immediate,
-    op_shift_right_immediate,
-    op_shift_right_logical_immediate,
-    op_equal,
-    op_less_than,
-    op_greater_than,
-    op_less_than_or_equal,
-    op_greater_than_or_equal,
-    op_equal_strict,
-    op_test_reference_equal,
-    op_test_typeof,
-    op_instance_of,
-    op_compare_jump,
-    op_inc_loc,
-    op_dec_loc,
-    op_load_keyed_property,
-    op_load_keyed_property_reg,
-    op_load_element_imm,
-    op_load_named_property,
-    op_store_named_property,
-    op_store_keyed_property,
-    op_store_named_property_no_shadow,
-    op_store_keyed_property_no_shadow,
-    op_store_global,
-    op_delete,
-    op_create_closure,
-    op_throw,
-    op_add_parent,
-    op_load_context_slot,
-    op_store_context_slot,
-    op_push_context,
-    op_pop_context,
-    op_create_function_context,
-    op_create_empty_array_literal,
-    op_create_sized_array_literal,
-    op_construct,
-    op_create_empty_object_literal,
-    op_create_block_context,
-    op_load_hole,
-    op_load_new_target,
-    op_load_context,
-    op_load_current_closure,
-    op_throw_reference_error_if_hole,
-    op_load_global_no_throw,
-);
-
-pub static TABLE: DispatchTable = DispatchTable {
-    narrow: __table_narrow(),
-    wide: __table_wide(),
-};
-
-// --- entry ---
-
-fn enter<'a>(
-    vm: &'a VM,
-    heap: &'a mut Heap,
-    state: &'a ThreadState,
-    callable: Handle<'_, Object>,
-    args: HandleSlice<'_>,
-    new_target: Option<Handle<'a, Value>>,
-) -> Result<Acc, VmError> {
-    match callable.as_tagged(heap).erase().call_target(heap) {
-        None => Err(VmError::Type),
-        // the proxy dispatch above already intercepted these
-        Some(CallTarget::Proxy(_)) => Err(VmError::Type),
-        Some(CallTarget::Native(rt)) => {
-            let f = vm.runtime(rt);
-            let nctx = HostCtx::new(vm, heap, state);
-            Ok(Acc::set(f(nctx, new_target, args.as_args())))
-        }
-        Some(CallTarget::Bytecode {
-            target,
-            info,
-            context,
-            kind,
-            ..
-        }) => {
-            if new_target.is_none() && kind.is_class_constructor() {
-                return Err(VmError::Type);
-            }
-            let stack = state.stack();
-            let new_target_value = match &new_target {
-                Some(nt) => nt.as_tagged(heap).erase(),
-                None => heap.known().undefined.as_tagged(heap).erase(),
-            };
-            let frame = stack.push_frame_values(
-                heap,
-                FrameMeta::ROOT,
-                Callee {
-                    callable: target.erase(),
-                    info,
-                    context: context.erase(),
-                },
-                new_target_value,
-                args.as_tagged(),
-            )?;
-            state.set_frame_base(frame.base);
-            state.set_frame_active(true);
-
-            let mut ctx = Ctx::new(vm, state, heap, frame.base);
-            let ip = ctx.code_ptr();
-            let regs = unsafe { Regs::new(ctx.regs_ptr()) };
-            let table = TableArg::new(&TABLE);
-            let roots = RootsArg::from_heap(ctx.heap());
-
-            let acc = Acc::set(
-                roots
-                    .known(ctx.heap())
-                    .undefined
-                    .as_tagged(ctx.heap())
-                    .erase(),
-            );
-            let acc = table.get(unsafe { *ip })(
-                ip,
-                regs,
-                acc,
-                &mut ctx,
-                table,
-                roots,
-                FloatReg::new(f64::NAN),
-            );
-            Ok(acc)
-        }
-    }
-}
-
-pub fn execute<'a>(
-    vm: &VM,
-    heap: &'a mut Heap,
-    state: &ThreadState,
-    callable: Handle<'_, Object>,
-    args: HandleSlice<'_>,
-    new_target: Option<Handle<'_, Value>>,
-) -> Result<Tagged<'a, Value>, VmError> {
-    let stack = state.stack();
-
-    let saved_top = stack.top();
-    let was_active = state.is_frame_active();
-    let outer = was_active.then(|| state.frame_base());
-
-    state.handle_scope(|scope| {
-        let acc = enter(vm, heap, state, callable, args, new_target)?;
-        let rooted = scope.handle(acc.get(heap));
-        stack.set_top(saved_top);
-        if let Some(outer) = outer {
-            state.set_frame_base(outer);
-        } else {
-            state.set_frame_active(false);
-        }
-        Ok(rooted.as_tagged(heap))
-    })
-}
-
-pub struct BecomeInterpreter;
-
-impl Interpreter for BecomeInterpreter {
-    const EXECUTE: EntryFn = execute;
 }

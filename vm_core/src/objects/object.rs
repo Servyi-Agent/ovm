@@ -596,7 +596,7 @@ impl Object {
     /// Initialize fresh storage directly from anchored words, without
     /// `Handle`s. The bump-allocation fast paths call this after reading
     /// well-known words and guarantee no GC between the reads and here.
-    pub(crate) fn init_raw(
+    pub fn init_raw(
         &mut self,
         heap: &Heap,
         map: Tagged<'_, Map>,

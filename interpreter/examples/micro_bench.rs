@@ -1,13 +1,10 @@
-//! Microbenchmark for individual bytecode ops on the three interpreters:
-//! the old match loop, the new match-loop sketch, and become.
+//! Microbenchmark for individual bytecode ops on the match and become backends.
 
 use std::hint::black_box;
 use std::time::Instant;
 
 use bytecode::{Opcode, emit};
-use interpreter_become::BecomeInterpreter;
-use interpreter_become::match_loop::MatchInterpreter as BecomeMatchInterpreter;
-use interpreter_match_loop::MatchLoopInterpreter;
+use interpreter::DefaultInterpreter;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm_core::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, FixedArray, Handle, HandleScope, Heap,
@@ -117,7 +114,10 @@ fn bench<I: Interpreter>(name: &str, op: &str, program: &[u8], reps: usize) {
         start.elapsed()
     });
 
-    println!("{op:6} {name:12} {:8.3} ms/run", elapsed.as_secs_f64() * 1e3 / reps as f64);
+    println!(
+        "{op:6} {name:12} {:8.3} ms/run",
+        elapsed.as_secs_f64() * 1e3 / reps as f64
+    );
 }
 
 fn main() {
@@ -135,8 +135,6 @@ fn main() {
     let add = add_program(n);
 
     for (op, program) in [("load", &load), ("store", &store), ("add", &add)] {
-        bench::<MatchLoopInterpreter>("old match", op, program, reps);
-        bench::<BecomeMatchInterpreter>("become match", op, program, reps);
-        bench::<BecomeInterpreter>("become", op, program, reps);
+        bench::<DefaultInterpreter>("default", op, program, reps);
     }
 }

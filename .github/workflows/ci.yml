@@ -34,8 +34,8 @@ jobs:
       - name: Format (workspace)
         run: cargo fmt --all --check
 
-      - name: Format (interpreter_become)
-        working-directory: interpreter_become
+      - name: Format (interpreter)
+        working-directory: interpreter
         run: cargo +nightly fmt --check
 
   build:
@@ -78,11 +78,11 @@ jobs:
       - name: Build GC-stress tests (nightly become)
         run: cargo +nightly test --workspace --locked --no-run --features vm/stress-minor-gc,vm/fast
 
-      - name: Build interpreter_become tests
-        working-directory: interpreter_become
+      - name: Build interpreter tests
+        working-directory: interpreter
         run: |
-          cargo +nightly test --release --locked --no-run
-          cargo +nightly test --release --locked --features stress-minor-gc --no-run
+          cargo +nightly test --release --locked --features fast --no-run
+          cargo +nightly test --release --locked --features fast,stress-minor-gc --no-run
 
   test:
     name: test
@@ -106,6 +106,6 @@ jobs:
       - name: Test (nightly become)
         run: cargo +nightly test --workspace --locked --features vm/fast
 
-      - name: Test (interpreter_become)
-        working-directory: interpreter_become
-        run: cargo +nightly test --release --locked
+      - name: Test (interpreter)
+        working-directory: interpreter
+        run: cargo +nightly test --release --locked --features fast

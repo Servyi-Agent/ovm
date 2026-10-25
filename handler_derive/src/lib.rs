@@ -111,18 +111,23 @@ const EXITS: &[&str] = &[
 /// `handler_table!(op_load, op_store, ..)` — dispatch table generation.
 #[proc_macro]
 pub fn handler_table(input: TokenStream) -> TokenStream {
-    let names = parse_macro_input!(input with Punctuated::<Ident, Token![,]>::parse_terminated);
+    let names = parse_macro_input!(input with Punctuated::<syn::Path, Token![,]>::parse_terminated);
     match expand_table(&names) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_table(names: &Punctuated<Ident, Token![,]>) -> syn::Result<TokenStream2> {
+fn expand_table(names: &Punctuated<syn::Path, Token![,]>) -> syn::Result<TokenStream2> {
     let mut narrow = Vec::new();
     let mut wide = Vec::new();
     for name in names {
-        let op = opcode_of(name)?;
+        let ident = name
+            .segments
+            .last()
+            .map(|s| &s.ident)
+            .ok_or_else(|| syn::Error::new(name.span(), "empty handler path"))?;
+        let op = opcode_of(ident)?;
         narrow.push(quote!(t[Opcode::#op as usize] = #name::<1> as Handler;));
         wide.push(quote!(t[Opcode::#op as usize] = #name::<2> as Handler;));
     }
@@ -272,6 +277,48 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         (Some(b), None) => b.into(),
         (None, Some(m)) => m.into(),
         (None, None) => unreachable!(),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn handler_become(attr: TokenStream, item: TokenStream) -> TokenStream {
+    handler_forced(attr, item, Backend::Become)
+}
+
+#[proc_macro_attribute]
+pub fn handler_match(attr: TokenStream, item: TokenStream) -> TokenStream {
+    handler_forced(attr, item, Backend::Match)
+}
+
+fn handler_forced(attr: TokenStream, item: TokenStream, backend: Backend) -> TokenStream {
+    let mut func: syn::ItemFn = parse_macro_input!(item as syn::ItemFn);
+    func.attrs.retain(|a| {
+        !a.path().is_ident("handler")
+            && !a.path().is_ident("handler_become")
+            && !a.path().is_ident("handler_match")
+    });
+    let op = match syn::parse::<Ident>(attr) {
+        Ok(op) => op,
+        Err(_) => {
+            return syn::Error::new(Span::call_site(), "expected an Opcode variant")
+                .to_compile_error()
+                .into();
+        }
+    };
+    let form = HandlerForm::Dispatch(op);
+    match backend {
+        Backend::Become => match expand(form, &func) {
+            Ok(tokens) => tokens.into(),
+            Err(err) => err.to_compile_error().into(),
+        },
+        Backend::Match => {
+            let Some(op) = form.op() else { unreachable!() };
+            match expand_match(op, &func, true) {
+                Ok(tokens) => tokens.into(),
+                Err(err) => err.to_compile_error().into(),
+            }
+        }
+        Backend::Both => unreachable!("handler_forced is only for one backend"),
     }
 }
 
@@ -772,7 +819,7 @@ fn expand_match(op: &Ident, func: &syn::ItemFn, prefixed: bool) -> syn::Result<T
         #[rustfmt::skip]
         #[allow(unused_variables, unused_mut)]
         #attr
-        pub(crate) fn #match_name<'h, const STRIDE: usize>(
+        pub fn #match_name<'h, const STRIDE: usize>(
             ip: *const u8,
             regs: vm_core::Regs,
             acc: &mut vm_core::Acc,

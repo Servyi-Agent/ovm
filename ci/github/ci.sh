@@ -10,7 +10,7 @@ cd "$root"
 
 cargo fmt --all --check
 (
-    cd interpreter_become
+    cd interpreter
     cargo +nightly fmt --check
 )
 
@@ -20,8 +20,8 @@ cargo test --workspace --locked --features vm/stress-minor-gc
 cargo build --release -p vm --locked
 cargo +nightly build --release -p vm --features fast --locked
 (
-    cd interpreter_become
-    cargo +nightly test --release --locked
+    cd interpreter
+    cargo +nightly test --release --locked --features fast
 )
 
 # Clippy is intentionally disabled until the current errors/warnings are

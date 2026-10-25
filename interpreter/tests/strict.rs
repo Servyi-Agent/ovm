@@ -1,5 +1,4 @@
-use interpreter_become::BecomeInterpreter;
-use interpreter_match_loop::MatchLoopInterpreter;
+use interpreter::DefaultInterpreter;
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -14,7 +13,10 @@ fn run<I: Interpreter>(label: &str, src: &str) {
     let mut thread = vm.attach();
     thread.eval::<JavascriptCompiler>(src).expect("runs");
     if let Some(ex) = thread.take_pending_exception() {
-        panic!("{} {label}: pending exception: {ex:?}", std::any::type_name::<I>());
+        panic!(
+            "{} {label}: pending exception: {ex:?}",
+            std::any::type_name::<I>()
+        );
     }
 }
 
@@ -22,8 +24,7 @@ fn run<I: Interpreter>(label: &str, src: &str) {
 /// mode-sensitive handlers branch on the frame's callable-info mode in
 /// the shared cold paths. Same scripts, same expectations.
 fn run_both(label: &str, src: &str) {
-    run::<BecomeInterpreter>(label, src);
-    run::<MatchLoopInterpreter>(label, src);
+    run::<DefaultInterpreter>(label, src);
 }
 
 const CHECK: &str = "function check(c, m) { if (!c) { throw new Error(m); } }\nvar declared = 0;\n";

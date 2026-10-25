@@ -23,22 +23,17 @@ impl Interpreter for MatchInterpreter {
 }
 
 #[inline(always)]
-pub(crate) fn offset(code: *const u8, pc: usize) -> *const u8 {
+pub fn offset(code: *const u8, pc: usize) -> *const u8 {
     unsafe { code.add(pc) }
 }
 
-/// Successor sentinel meaning "this instruction threw". The faulting pc
-/// rides in `Ctx::throw_pc`; the loop only compares the returned pointer.
+/// Successor sentinel meaning "this instruction threw"
 #[inline(always)]
-pub(crate) fn throw_ptr() -> *const u8 {
+pub fn throw_ptr() -> *const u8 {
     usize::MAX as *const u8
 }
 
-/// Decode the current instruction into caller-named locals. `$op` is the
-/// literal the handler matched, so both `operands().len()` and the
-/// successor pointer fold at compile time. Macro hygiene forbids the
-/// macro from binding `$ops`/`$next` itself, so — exactly like become's
-/// exit macros — the caller passes the names in.
+/// Decode the current instruction into caller-named locals
 macro_rules! decode {
     ($op:ident, $ip:expr, $ops:ident, $next:ident) => {
         let $ops = Ops::<STRIDE>::new($ip, Opcode::$op);
@@ -52,8 +47,7 @@ macro_rules! decode {
     };
 }
 
-/// The current and successor byte offsets, for a cold tail that must
-/// re-enter after a possible collection.
+/// The current and successor byte offsets
 macro_rules! offsets {
     ($ip:expr, $next:expr, $ctx:expr) => {{
         let pc = $ip as usize - $ctx.code_ptr() as usize;
@@ -94,19 +88,14 @@ macro_rules! set_acc_smi {
     };
 }
 
-/// Tail into a cold handler. The cold handler takes the same
-/// `(ctx, ip, regs, acc, roots)` shape as a hot handler so the call site
-/// reads like become's `tail!(path)`.
+/// call into a cold handler, here its an actual call, but same name to have one way to write it.
 macro_rules! tail {
     ($slow:ident, $ip:expr, $regs:expr, $acc:expr, $ctx:expr, $roots:expr) => {
         return $slow::<STRIDE>($ip, $regs, $acc, $ctx, $roots)
     };
 }
 
-/// Fold a cold-tail result into the accumulator and re-enter at the
-/// faulting instruction when it is the exception sentinel, or after the
-/// instruction otherwise. The loop detects the sentinel in `acc` and
-/// unwinds; a null successor means "return the accumulator".
+/// reenter as a cold
 macro_rules! reenter {
     ($ctx:expr, $acc:expr, $pc:expr, $next_pc:expr, $v:expr) => {{
         let v = $v;
@@ -538,7 +527,7 @@ macro_rules! call_enter {
             }
             Ok(StagedCall::Proxy { callee_reg, staged }) => {
                 let v = proxy_apply_staged($ctx, $roots, $regs, callee_reg, staged);
-                reenter!($ctx, $acc, $pc, $next_pc, v)
+                reenter!($ctx, $acc, $pc, $next_pc, v.get($ctx.heap()))
             }
         }
     }};

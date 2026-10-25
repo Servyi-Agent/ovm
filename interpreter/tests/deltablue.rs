@@ -1,4 +1,5 @@
-use interpreter_become::BecomeInterpreter;
+#![cfg(feature = "fast")]
+use interpreter::BecomeInterpreter;
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -15,7 +16,10 @@ function alert(m) { throw new Error("ALERT: " + m); }
 #[test]
 fn deltablue() {
     let src = [
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/octane/deltablue/deltablue.js"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../benchmarks/octane/deltablue/deltablue.js"
+        ),
         "benchmarks/octane/deltablue/deltablue.js",
     ]
     .iter()

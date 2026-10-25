@@ -1,10 +1,8 @@
 //! Tiny JS runner for comparing the three interpreter shells.
 //!
-//!     cargo +nightly run --release --example bench_js -- <match|new|become> files...
+//!     cargo run --release --example bench_js -- files...
 
-use interpreter_become::BecomeInterpreter;
-use interpreter_become::match_loop::MatchInterpreter as BecomeMatchInterpreter;
-use interpreter_match_loop::MatchLoopInterpreter;
+use interpreter::DefaultInterpreter;
 use js_compiler::{SourceMode, compile_js};
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -27,16 +25,21 @@ fn run<I: Interpreter>(src: &str) {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let which = args.next().expect("interpreter name");
+    let first = args.next().expect("script path");
+    // Keep the old `match`/`become` spelling accepted so stored benchmark
+    // wrappers still work; the backend is selected at build time.
+    let files: Vec<String> = if matches!(
+        first.as_str(),
+        "match" | "become" | "become_match" | "default"
+    ) {
+        args.collect()
+    } else {
+        std::iter::once(first).chain(args).collect()
+    };
     let mut src = String::new();
-    for path in args {
+    for path in files {
         src.push_str(&std::fs::read_to_string(&path).expect("read script"));
         src.push('\n');
     }
-    match which.as_str() {
-        "match" => run::<MatchLoopInterpreter>(&src),
-        "become" => run::<BecomeInterpreter>(&src),
-        "become_match" => run::<BecomeMatchInterpreter>(&src),
-        other => panic!("unknown interpreter {other}"),
-    }
+    run::<DefaultInterpreter>(&src);
 }

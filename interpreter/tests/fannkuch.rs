@@ -1,4 +1,5 @@
-use interpreter_become::BecomeInterpreter;
+#![cfg(feature = "fast")]
+use interpreter::BecomeInterpreter;
 use js_compiler::JavascriptCompiler;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
@@ -7,7 +8,10 @@ use vm_core::VM;
 #[test]
 fn fannkuch() {
     let src = [
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../benchmarks/fannkuch/fannkuch.js"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../benchmarks/fannkuch/fannkuch.js"
+        ),
         "benchmarks/fannkuch/fannkuch.js",
     ]
     .iter()

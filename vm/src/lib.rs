@@ -1,17 +1,22 @@
 pub use vm_core::*;
 
-pub use interpreter_match_loop::{Interpreter, MatchLoopInterpreter};
+#[cfg(not(feature = "fast"))]
+pub use ::interpreter::match_loop::MatchInterpreter;
+/// Compatibility alias for the old crate's name.
+#[cfg(not(feature = "fast"))]
+pub use ::interpreter::match_loop::MatchInterpreter as MatchLoopInterpreter;
+pub use vm_core::Interpreter;
 
 #[cfg(feature = "fast")]
-pub use interpreter_become::BecomeInterpreter;
+pub use ::interpreter::BecomeInterpreter;
 
 /// The interpreter the `kettevm` binary runs on. Enabling the `fast` feature
 /// (nightly-only) picks the tail-call interpreter; otherwise the portable
 /// match-loop interpreter is used.
 #[cfg(feature = "fast")]
-pub type DefaultInterpreter = interpreter_become::BecomeInterpreter;
+pub type DefaultInterpreter = ::interpreter::BecomeInterpreter;
 #[cfg(not(feature = "fast"))]
-pub type DefaultInterpreter = interpreter_match_loop::MatchLoopInterpreter;
+pub type DefaultInterpreter = ::interpreter::match_loop::MatchInterpreter;
 
 pub use js_runtime::JSRuntime;
 pub use kette_runtime::KetteRuntime;
