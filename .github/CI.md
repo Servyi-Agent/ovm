@@ -33,9 +33,10 @@ persistent Cargo target volume.
 - `gc-stress-become` (workspace become GC stress plus the
   `interpreter` stress suite)
 
-Benchmark-style tests (`bench`, `deltablue`, `fannkuch`, `nbody`) are excluded
-from the `interpreter` GC-stress run; they still run non-stress in
-`test`. The workspace GC-stress runs include the normal `vm` tests.
+Benchmarks are driven by the `interpreter` examples (`bench_js`,
+`micro_bench`, `ab_bench`) rather than by `cargo test`, so they are not part
+of any GC-stress job. The workspace GC-stress runs include the normal `vm`
+tests.
 
 The extended jobs run in this order and share the Cargo target cache. Each
 master job reports one check run; no duplicate commit status is posted.
