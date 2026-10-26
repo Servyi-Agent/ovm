@@ -74,15 +74,6 @@ impl Value {
     pub fn to_i64(self) -> Option<i64> {
         Smi::decode(self).map(|s| s.value())
     }
-
-    /// # Safety
-    /// The word must have been loaded under a borrow of the heap that is
-    /// still alive for `'a` (rooted memory may be re-read at any time —
-    /// the GC updates it in place — but a snapshot taken earlier may be
-    /// stale), and no collection may have run since the load.
-    pub unsafe fn assume_valid<'a>(self, _heap: &'a Heap) -> Tagged<'a, Value> {
-        unsafe { Tagged::from_value_unchecked(self) }
-    }
 }
 
 impl core::fmt::Debug for Value {

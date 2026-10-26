@@ -12,7 +12,7 @@ where
         thread.heap().collect();
     }
 
-    let heap = &*thread.heap();
+    let heap = thread.heap();
     let known = vm.known();
     let values = [
         known.map_map.get(heap).raw(),
@@ -41,7 +41,7 @@ where
     // the interner's strong entries keep well-known strings unique
     thread.handle_scope(|t, scope| {
         let again = t.intern(&scope, "length");
-        let heap = &*t.heap();
+        let heap = t.heap();
         assert_eq!(
             // Interned names compare by word identity.
             again.as_tagged(heap).raw().to_bits(),
@@ -62,7 +62,7 @@ where
         let string = DenseString::from_latin1(t.heap(), &scope, b"survivor");
         {
             let staged = {
-                let heap = &*t.heap();
+                let heap = t.heap();
                 scope.stage(&[Smi::new(42).into_tagged(), string.as_tagged(heap).erase()])
             };
             let array = t.heap().allocate_handle::<FixedArray>(staged, &scope);
@@ -74,14 +74,14 @@ where
             // survival, not addresses: the rooted handles must still resolve
             // to live strong pointers in the heap
             {
-                let heap = &*t.heap();
+                let heap = t.heap();
                 let string = string.as_tagged(heap).raw();
                 let array = array.as_tagged(heap).raw();
                 assert!(string.is_strong_ptr() && vm.heap().contains(string.raw_addr()));
                 assert!(array.is_strong_ptr() && vm.heap().contains(array.raw_addr()));
             }
             {
-                let heap = &*t.heap();
+                let heap = t.heap();
                 let array = array.as_tagged(heap);
                 assert_eq!(Smi::decode(array.at(heap, 0).raw()).unwrap().value(), 42);
                 assert_eq!(array.at(heap, 1).raw(), string.as_tagged(heap).raw());
@@ -110,7 +110,7 @@ where
 
         t.heap().collect();
 
-        let heap = &*t.heap();
+        let heap = t.heap();
         let code = code.as_tagged(heap);
         assert_eq!(code.header.map(heap).kind(), vm::MapKind::CODE);
         assert_eq!(code.header.map(heap).kind().kind(), vm::ObjectKind::Code);

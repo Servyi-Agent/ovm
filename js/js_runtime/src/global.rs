@@ -111,20 +111,21 @@ pub fn print<'a>(
         return vm.known().undefined.get(heap).erase();
     }
     let arg = args.get_handle(heap, 1);
-    let text = match Object::to_string(vm, heap, state, arg) {
-        Ok(Some(s)) => {
-            let word = s.raw();
-            // Safety: fresh string word, no allocation since the read.
-            unsafe { word.assume_valid(heap) }
-                .get_as::<DenseString>(heap)
-                .map(|s| s.to_rust_string(heap))
-                .unwrap_or_default()
-        }
-        Ok(None) => return vm.known().exception.get(heap).erase(),
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    };
-    println!("{text}");
-    vm.known().undefined.get(heap).erase()
+    state.handle_scope(|scope| {
+        let text = match Object::to_string(vm, heap, state, arg) {
+            Ok(Some(s)) => {
+                let s = scope.handle(s);
+                s.as_tagged(heap)
+                    .get_as::<DenseString>(heap)
+                    .map(|s| s.to_rust_string(heap))
+                    .unwrap_or_default()
+            }
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        println!("{text}");
+        vm.known().undefined.get(heap).erase()
+    })
 }
 
 /// The inline half of a `console.log` argument read: Smis, strings, and the
@@ -161,16 +162,18 @@ fn console_arg_cold(
     state: &ThreadState,
     arg: Handle<'_, Value>,
 ) -> Result<Option<String>, VmError> {
-    let Some(s) = Object::to_string(vm, heap, state, arg)? else {
-        return Ok(None);
-    };
-    let word = s.raw();
-    // Safety: fresh string word, no allocation since the read.
-    let text = unsafe { word.assume_valid(heap) }
-        .get_as::<DenseString>(heap)
-        .map(|s| s.to_rust_string(heap))
-        .unwrap_or_default();
-    Ok(Some(text))
+    state.handle_scope(|scope| {
+        let Some(s) = Object::to_string(vm, heap, state, arg)? else {
+            return Ok(None);
+        };
+        let s = scope.handle(s);
+        let text = s
+            .as_tagged(heap)
+            .get_as::<DenseString>(heap)
+            .map(|s| s.to_rust_string(heap))
+            .unwrap_or_default();
+        Ok(Some(text))
+    })
 }
 
 /// `console.log(...args)`: ToString every argument, join with single

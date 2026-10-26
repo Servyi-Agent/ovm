@@ -103,7 +103,7 @@ pub const HANDLE_BLOCK_SIZE: usize = 1024;
 macro_rules! reanchor {
     ($tagged:expr, $heap:expr, $f:expr) => {{
         let word = ($tagged).raw();
-        let heap_ref: &$crate::Heap = &*$heap;
+        let heap_ref: &$crate::Heap = $heap;
         // Safety: forced return
         return $f(heap_ref, unsafe {
             $crate::Tagged::<$crate::Value>::from_value_unchecked(word)

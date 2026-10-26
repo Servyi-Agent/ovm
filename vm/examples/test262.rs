@@ -309,23 +309,21 @@ fn run_test(
 /// uncaught exceptions in the stats.
 fn exception_name(thread: &mut vm::Thread) -> String {
     thread.handle_scope(|thread, scope| {
-        let Some(ex) = thread.take_pending_exception() else {
+        let name_key = thread.intern(&scope, "name");
+        let (_vm, heap, state) = thread.split();
+        let Some(ex) = state.take_pending_exception_tagged(heap) else {
             return "exception".into();
         };
-        let name_key = thread.intern(&scope, "name");
-        {
-            let heap = thread.heap();
-            let Some(o) = unsafe { ex.assume_valid(heap) }.as_heap_object() else {
-                return "exception".into();
-            };
-            match o.lookup(heap, name_key.as_tagged(heap).into()) {
-                vm::Lookup::Data { slot, .. } => slot
-                    .get(heap)
-                    .get_as::<vm::DenseString>(heap)
-                    .map(|s| s.to_rust_string(heap))
-                    .unwrap_or_else(|| "exception".into()),
-                _ => "exception".into(),
-            }
+        let Some(o) = ex.as_heap_object() else {
+            return "exception".into();
+        };
+        match o.lookup(heap, name_key.as_tagged(heap).into()) {
+            vm::Lookup::Data { slot, .. } => slot
+                .get(heap)
+                .get_as::<vm::DenseString>(heap)
+                .map(|s| s.to_rust_string(heap))
+                .unwrap_or_else(|| "exception".into()),
+            _ => "exception".into(),
         }
     })
 }
@@ -440,7 +438,7 @@ fn run_test_inner(
         Ok(v)
             if {
                 {
-                    let heap = &*thread.heap();
+                    let heap = thread.heap();
                     v == heap.known().exception.get(heap).raw()
                 }
             } =>

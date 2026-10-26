@@ -137,7 +137,7 @@ impl Object {
         // (built-in methods/constructor properties are non-enumerable, ES 20+)
         let constructor_str = thread.intern(scope, "constructor");
         // Safety: fresh interned word, rooted below before any allocation.
-        let constructor_name = scope.handle(constructor_str.as_tagged(&*thread.heap()));
+        let constructor_name = scope.handle(constructor_str.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             scope,
@@ -147,7 +147,7 @@ impl Object {
         )?;
         let prototype_str = thread.intern(scope, "prototype");
         // Safety: fresh interned word, rooted below before any allocation.
-        let prototype_name = scope.handle(prototype_str.as_tagged(&*thread.heap()));
+        let prototype_name = scope.handle(prototype_str.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             scope,
@@ -162,7 +162,7 @@ impl Object {
             scope.handle(vm.known().global_object.get(heap))
         };
         // Safety: fresh interned word, rooted below before any allocation.
-        let name = scope.handle(name_str.as_tagged(&*thread.heap()));
+        let name = scope.handle(name_str.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             scope,
@@ -183,7 +183,7 @@ impl Object {
         let method = Self::native_function(thread.heap(), scope, index)?;
         let name_str = thread.intern(scope, name);
         // Safety: fresh interned word, rooted below before any allocation.
-        let method_name = scope.handle(name_str.as_tagged(&*thread.heap()));
+        let method_name = scope.handle(name_str.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             scope,

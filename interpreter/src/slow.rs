@@ -323,7 +323,7 @@ pub fn store_named_tail_body<'a>(
                 state
                     .stack()
                     .frame_header(base)
-                    .feedback(&*heap)
+                    .feedback(heap)
                     .map(|v| scope.handle(v)),
                 fb,
                 recv.erase(),
@@ -848,7 +848,7 @@ pub fn slow_keyed_load(frame: Frame) {
                 state
                     .stack()
                     .frame_header(base)
-                    .feedback(&*heap)
+                    .feedback(heap)
                     .map(|v| scope.handle(v)),
                 fb,
                 Some(recv),
@@ -914,7 +914,7 @@ pub fn slow_keyed_load_reg(frame: Frame) {
                 state
                     .stack()
                     .frame_header(base)
-                    .feedback(&*heap)
+                    .feedback(heap)
                     .map(|v| scope.handle(v)),
                 fb,
                 Some(recv),
@@ -964,7 +964,7 @@ pub fn slow_keyed_load_imm(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .feedback(&*heap)
+                .feedback(heap)
                 .map(|v| scope.handle(v)),
             fb,
             Some(recv),
@@ -1015,8 +1015,8 @@ pub fn slow_named_load(frame: Frame) {
         let name = scope.handle(
             state
                 .stack()
-                .callable(&*heap, base)
-                .constant_slot_name(&*heap, name_idx),
+                .callable(heap, base)
+                .constant_slot_name(heap, name_idx),
         );
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, name.erase()) {
@@ -1037,7 +1037,7 @@ pub fn slow_named_load(frame: Frame) {
                     state
                         .stack()
                         .frame_header(base)
-                        .feedback(&*heap)
+                        .feedback(heap)
                         .map(|v| scope.handle(v)),
                     fb_slot,
                     recv.as_tagged(heap)
@@ -1080,8 +1080,8 @@ pub fn global_load_body<'a>(
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
+                .constants(heap)
+                .at(heap, name_idx)
                 .erase()
                 .as_name(),
         );
@@ -1094,7 +1094,7 @@ pub fn global_load_body<'a>(
                     state
                         .stack()
                         .frame_header(base)
-                        .feedback(&*heap)
+                        .feedback(heap)
                         .map(|v| scope.handle(v)),
                     fb_slot,
                     Some(scope.handle(global)),
@@ -1329,7 +1329,7 @@ pub fn keyed_store_body<'a>(
                         if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
                             return raise_runtime(vm, heap, state, e);
                         }
-                        if let Some(fbv) = state.stack().frame_header(base).feedback(&*heap) {
+                        if let Some(fbv) = state.stack().frame_header(base).feedback(heap) {
                             InlineCache::update_store_element(
                                 heap,
                                 &scope,
@@ -1441,8 +1441,8 @@ pub fn slow_store_named(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
+                .constants(heap)
+                .at(heap, name_idx)
                 .erase()
                 .as_name(),
         );
@@ -1460,7 +1460,7 @@ pub fn slow_store_named(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .feedback(&*heap)
+                .feedback(heap)
                 .map(|v| scope.handle(v)),
             fb_slot,
             recv.erase(),
@@ -1515,8 +1515,8 @@ pub fn slow_store_global(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
+                .constants(heap)
+                .at(heap, name_idx)
                 .erase()
                 .as_name(),
         );
@@ -1563,8 +1563,8 @@ pub fn slow_store_named_no_shadow(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
+                .constants(heap)
+                .at(heap, name_idx)
                 .erase()
                 .as_name(),
         );
@@ -1603,8 +1603,8 @@ pub fn slow_add_parent(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, name_idx)
+                .constants(heap)
+                .at(heap, name_idx)
                 .erase()
                 .as_name(),
         );

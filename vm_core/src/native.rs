@@ -50,14 +50,14 @@ impl<'a> HostCtx<'a> {
         new_target: Option<Handle<'_, Value>>,
     ) -> Result<Tagged<'h, Value>, VmError> {
         let scope = unsafe { HandleScope::from_raw(NonNull::from(&state.handles)) };
-        let Some(callable) = scope.cast::<Object>(heap, callable.as_tagged(&*heap)) else {
+        let Some(callable) = scope.cast::<Object>(heap, callable.as_tagged(heap)) else {
             return Err(VmError::Type);
         };
         let new_target = match new_target {
             None => None,
             Some(nt) => {
                 // new.target may be exotic (a constructor proxy)
-                let nt = nt.as_tagged(&*heap);
+                let nt = nt.as_tagged(heap);
                 if !nt.is_strong_ptr() {
                     return Err(VmError::Type);
                 }

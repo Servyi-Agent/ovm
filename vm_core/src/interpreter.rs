@@ -163,11 +163,7 @@ pub struct Ctx<'s, 'h> {
 impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn new(vm: &'s VM, state: &'s ThreadState, heap: &'h mut Heap, base_anchor: usize) -> Self {
-        let code = state
-            .stack()
-            .frame_header(base_anchor)
-            .code(&*heap)
-            .as_ptr();
+        let code = state.stack().frame_header(base_anchor).code(heap).as_ptr();
         Ctx {
             vm,
             state,
@@ -199,7 +195,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
     /// this exists only for the match-loop shell's shared cold helpers.
     #[inline(always)]
     pub unsafe fn heap_shared(&self) -> &'h Heap {
-        let ptr = &*self.heap as *const Heap;
+        let ptr = self.heap as *const Heap;
         unsafe { &*ptr }
     }
 
@@ -260,8 +256,10 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn reload_code(&self) {
         let state = self.state;
-        let heap = &*self.heap;
-        let code = state.stack().frame_header(state.frame_base()).code(heap);
+        let code = state
+            .stack()
+            .frame_header(state.frame_base())
+            .code(self.heap);
         self.code.set(code.as_ptr());
     }
 
@@ -269,8 +267,7 @@ impl<'s, 'h> Ctx<'s, 'h> {
     #[inline(always)]
     pub fn switch_frame(&self, base: usize) {
         let state = self.state;
-        let heap = &*self.heap;
-        let code = state.stack().frame_header(base).code(heap);
+        let code = state.stack().frame_header(base).code(self.heap);
         self.state.set_frame_base(base);
         self.code.set(code.as_ptr());
     }
@@ -292,11 +289,10 @@ impl<'s, 'h> Ctx<'s, 'h> {
             self.state.is_frame_active(),
             "language mode read without an active frame"
         );
-        let heap: &Heap = self.heap;
         let header = self.state.stack().frame_header(self.state.frame_base());
-        let callable = header.callable(heap);
+        let callable = header.callable(self.heap);
         let info = callable
-            .callable_info(heap)
+            .callable_info(self.heap)
             .expect("a bytecode frame's callable must have callable info");
         info.mode()
     }

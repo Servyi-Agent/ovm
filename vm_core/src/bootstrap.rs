@@ -809,8 +809,8 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
             &scope,
             function_prototype_map,
             scope.stage(&[
-                empty_info.as_tagged(&*heap).erase(),
-                empty_context.as_tagged(&*heap).erase(),
+                empty_info.as_tagged(heap).erase(),
+                empty_context.as_tagged(heap).erase(),
             ]),
         )
         .as_handle(&scope);

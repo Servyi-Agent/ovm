@@ -17,7 +17,7 @@ fn intern_name<'s>(
     s: &str,
 ) -> Handle<'s, SlotName> {
     let interned = thread.intern(scope, s);
-    let heap = &*thread.heap();
+    let heap = thread.heap();
     scope.handle(interned.as_tagged(heap))
 }
 
@@ -26,26 +26,26 @@ fn map_handle<'s>(
     scope: &'s HandleScope<'_>,
     obj: Handle<'_, Object>,
 ) -> Handle<'s, Map> {
-    let heap = &*thread.heap();
+    let heap = thread.heap();
     let map = obj.as_tagged(heap).map(heap);
     scope.handle(map)
 }
 
 fn object_map_word(thread: &mut Thread, obj: Handle<'_, Object>) -> Value {
-    let heap = &*thread.heap();
+    let heap = thread.heap();
     obj.as_tagged(heap).map(heap).raw()
 }
 
 fn pred_word(thread: &mut Thread, map: Value) -> Option<Value> {
-    let heap = &*thread.heap();
-    let map = unsafe { map.assume_valid(heap) }
+    let heap = thread.heap();
+    let map = unsafe { Tagged::<Value>::from_value_unchecked(map) }
         .get_as::<Map>(heap)
         .expect("map");
     map.pred(heap).map(|p| p.raw())
 }
 
 fn root_word(thread: &mut Thread, map: Value) -> Value {
-    let heap = &*thread.heap();
+    let heap = thread.heap();
     let mut current: Tagged<'_, Map> = unsafe { Tagged::from_value_unchecked(map) };
     while let Some(pred) = current.pred(heap) {
         current = pred;
@@ -110,7 +110,7 @@ fn append_records_pred_and_shares_transitions() {
         add_prop(thread, &scope, other, name_a, 3);
         let map_a_again = map_handle(thread, &scope, other);
 
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         (
             root_handle.as_tagged(heap).raw(),
             map_a.as_tagged(heap).raw(),
@@ -158,7 +158,7 @@ fn redefine_records_pred() {
         .unwrap();
         let map_a_readonly = map_handle(thread, &scope, obj);
 
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         (
             map_a.as_tagged(heap).raw(),
             map_a_readonly.as_tagged(heap).raw(),
@@ -187,7 +187,7 @@ fn delete_records_pred() {
         let map_ab = map_handle(thread, &scope, obj);
 
         let key = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             scope.handle(name_a.as_tagged(heap).erase())
         };
         assert!(
@@ -196,7 +196,7 @@ fn delete_records_pred() {
         );
         let map_b = map_handle(thread, &scope, obj);
 
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         (map_ab.as_tagged(heap).raw(), map_b.as_tagged(heap).raw())
     });
 
@@ -223,7 +223,7 @@ fn live_transition_subtree_survives_gc() {
         thread.heap().collect();
 
         let map_ab = object_map_word(thread, obj);
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let root = root_handle.as_tagged(heap);
         assert!(
             transition_target(heap, root, name_a.as_tagged(heap)).is_some(),
@@ -238,7 +238,7 @@ fn live_transition_subtree_survives_gc() {
             root.raw(),
             "the pred chain must still reach the root"
         );
-        let map_ab = unsafe { map_ab.assume_valid(heap) }
+        let map_ab = unsafe { Tagged::<Value>::from_value_unchecked(map_ab) }
             .get_as::<Map>(heap)
             .expect("map");
         let map_a = map_ab.pred(heap).expect("intermediate map alive");
@@ -272,14 +272,14 @@ fn dead_transition_targets_are_cleared_by_gc() {
             add_prop(thread, &inner, dead, name_b, 2);
         });
 
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let root = root_handle.as_tagged(heap);
         assert!(transition_target(heap, root, name_a.as_tagged(heap)).is_some());
         assert!(transition_target(heap, root, name_b.as_tagged(heap)).is_some());
 
         thread.heap().collect();
 
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let root = root_handle.as_tagged(heap);
         assert!(
             transition_target(heap, root, name_a.as_tagged(heap)).is_some(),
@@ -312,7 +312,7 @@ fn unused_whole_subtree_is_collected() {
 
         thread.heap().collect();
 
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let root = root_handle.as_tagged(heap);
         assert!(
             transition_target(heap, root, name_a.as_tagged(heap)).is_none(),

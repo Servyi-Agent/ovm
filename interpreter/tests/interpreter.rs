@@ -101,7 +101,7 @@ fn call_function1_ic_miss_then_hit() {
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 2, 0);
         let outer = callable(thread, &scope, &outer, 4, 2);
-        let inner_word = inner.as_tagged(&*thread.heap()).raw();
+        let inner_word = inner.as_tagged(thread.heap()).raw();
         thread.execute(outer, &[inner_word, smi(41), smi(3), smi(-1)])
     });
     assert_eq!(result, Ok(smi(41)));
@@ -124,7 +124,7 @@ fn call_method0_stages_receiver() {
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 1, 0);
         let outer = callable(thread, &scope, &outer, 2, 0);
-        let inner_word = inner.as_tagged(&*thread.heap()).raw();
+        let inner_word = inner.as_tagged(thread.heap()).raw();
         thread.execute(outer, &[inner_word, smi(7)])
     });
     assert_eq!(result, Ok(smi(7)));
@@ -146,7 +146,7 @@ fn call_passes_window() {
     let result = thread.handle_scope(|thread, scope| {
         let inner = callable(thread, &scope, &inner, 2, 0);
         let outer = callable(thread, &scope, &outer, 3, 2);
-        let inner_word = inner.as_tagged(&*thread.heap()).raw();
+        let inner_word = inner.as_tagged(thread.heap()).raw();
         thread.execute(outer, &[inner_word, smi(5), smi(9)])
     });
     assert_eq!(result, Ok(smi(9)));
@@ -502,7 +502,7 @@ fn construct_handler() {
         let result = thread.handle_scope(|thread, scope| {
             let inner = callable(thread, &scope, body, 1, 0);
             let outer = callable(thread, &scope, &outer, 2, 0);
-            let inner_word = inner.as_tagged(&*thread.heap()).raw();
+            let inner_word = inner.as_tagged(thread.heap()).raw();
             thread.execute(outer, &[inner_word, smi(0)])
         });
         assert!(!thread.has_pending_exception(), "construct threw");

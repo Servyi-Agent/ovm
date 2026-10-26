@@ -30,7 +30,7 @@ impl Runtime for KetteRuntime {
             let console = scope.handle(thread.heap().new_object(&scope, map, HandleSlice::EMPTY));
             Object::install_method(thread, &scope, console, "print", print)?;
             let console_name = thread.intern(&scope, "Console");
-            let console_name = scope.handle(console_name.as_tagged(&*thread.heap()));
+            let console_name = scope.handle(console_name.as_tagged(thread.heap()));
             let global = {
                 let heap = thread.heap();
                 scope.handle(known.global_object.get(heap))
@@ -62,18 +62,19 @@ fn console_print<'a>(
         return vm.known().undefined.get(heap).erase();
     }
     let v = args.get_handle(heap, 1);
-    let text = match Object::to_string(vm, heap, state, v) {
-        Ok(Some(t)) => {
-            let word = t.raw();
-            // Safety: fresh string word, no allocation since the read.
-            unsafe { word.assume_valid(heap) }
-                .get_as::<DenseString>(heap)
-                .map(|s| s.to_rust_string(heap))
-                .unwrap_or_default()
-        }
-        Ok(None) => return vm.known().exception.get(heap).erase(),
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    };
-    println!("{text}");
-    vm.known().undefined.get(heap).erase()
+    state.handle_scope(|scope| {
+        let text = match Object::to_string(vm, heap, state, v) {
+            Ok(Some(t)) => {
+                let t = scope.handle(t);
+                t.as_tagged(heap)
+                    .get_as::<DenseString>(heap)
+                    .map(|s| s.to_rust_string(heap))
+                    .unwrap_or_default()
+            }
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        println!("{text}");
+        vm.known().undefined.get(heap).erase()
+    })
 }

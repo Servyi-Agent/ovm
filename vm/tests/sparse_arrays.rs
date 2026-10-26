@@ -14,7 +14,7 @@ fn eval_ok(src: &str) {
     let result = thread.eval::<JavascriptCompiler>(src);
     match result {
         Ok(v) => {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             assert_ne!(v, heap.known().exception.get(heap).raw(), "script threw");
         }
         Err(e) => panic!("script failed: {e}"),

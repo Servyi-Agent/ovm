@@ -14,7 +14,7 @@ fn interning_deduplicates_and_preserves_content() {
 
         // same string, same slot content
         let (ab_eq, ac_ne) = {
-            let heap = &*ctx.heap();
+            let heap = ctx.heap();
             (
                 a.as_tagged(heap).raw().to_bits() == b.as_tagged(heap).raw().to_bits(),
                 a.as_tagged(heap).raw().to_bits() != c.as_tagged(heap).raw().to_bits(),
@@ -25,7 +25,7 @@ fn interning_deduplicates_and_preserves_content() {
 
         // content round trip (compressed encoding: Latin1)
         let (text, hash_a, hash_b) = {
-            let heap = &*ctx.heap();
+            let heap = ctx.heap();
             (
                 a.as_tagged(heap).to_rust_string(heap),
                 a.as_tagged(heap).hash(heap),
@@ -38,7 +38,7 @@ fn interning_deduplicates_and_preserves_content() {
         // re-interning an interned string forwards to the same entry
         let d = ctx.intern(&scope, &text);
         let bits_eq = {
-            let heap = &*ctx.heap();
+            let heap = ctx.heap();
             a.as_tagged(heap).raw().to_bits() == d.as_tagged(heap).raw().to_bits()
         };
         assert!(bits_eq);
@@ -60,14 +60,14 @@ fn interning_compresses_utf16_to_latin1() {
         let again = DenseString::from_utf8(ctx.heap(), &scope, "héllo");
         let canonical = vm.interner().intern_value(ctx.heap(), &scope, &again);
         let bits_eq = {
-            let heap = &*ctx.heap();
+            let heap = ctx.heap();
             latin1_content.as_tagged(heap).raw().to_bits()
                 == canonical.as_tagged(heap).raw().to_bits()
         };
         assert!(bits_eq);
 
         {
-            let heap = &*ctx.heap();
+            let heap = ctx.heap();
             use vm::{Encoding, MapKind};
             let l = latin1_content.as_tagged(heap);
             let u = utf16_content.as_tagged(heap);
@@ -91,7 +91,7 @@ fn interning_is_thread_safe() {
 
     let expected = ctx.handle_scope(|ctx, scope| {
         let shared = ctx.intern(&scope, "shared");
-        let heap = &*ctx.heap();
+        let heap = ctx.heap();
         shared.as_tagged(heap).raw().to_bits()
     });
 
@@ -102,7 +102,7 @@ fn interning_is_thread_safe() {
             let mut ctx = vm.attach();
             ctx.handle_scope(|ctx, scope| {
                 let shared = ctx.intern(&scope, "shared");
-                let heap = &*ctx.heap();
+                let heap = ctx.heap();
                 shared.as_tagged(heap).raw().to_bits()
             })
         }));

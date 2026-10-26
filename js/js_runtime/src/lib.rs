@@ -251,7 +251,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
     let wks = &known.strings;
     let roots = vm.roots();
     thread.handle_scope(|thread, scope| {
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let wks_empty: Handle<'_, Value> = scope.handle(wks.empty.get(heap).erase());
         let wks_length: Handle<'_, SlotName> = scope.handle(wks.length.get(heap));
         let wks_name: Handle<'_, SlotName> = scope.handle(wks.name.get(heap));
@@ -260,7 +260,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let wks_prototype: Handle<'_, SlotName> = scope.handle(wks.prototype.get(heap));
 
         // ---- Number ----------------------------------------------------------
-        let object_prototype = scope.handle(known.object_prototype.get(&*thread.heap()));
+        let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
         let (number_fn, number_proto) =
             Object::install_constructor(thread, &scope, idx.number, "Number", object_prototype)?;
         Object::install_method(thread, &scope, number_proto, "valueOf", idx.number_value_of)?;
@@ -300,7 +300,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         ] {
             let n = thread.intern(&scope, name);
             // Safety: fresh interned word, rooted below before the define.
-            let n = scope.handle(n.as_tagged(&*thread.heap()));
+            let n = scope.handle(n.as_tagged(thread.heap()));
             Object::define_own_property(
                 thread.heap(),
                 &scope,
@@ -481,7 +481,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         }
 
         // ---- Function (constructor: dynamic bodies via eval, ES 20.2.1) --------
-        let function_prototype = scope.handle(known.function_prototype.get(&*thread.heap()));
+        let function_prototype = scope.handle(known.function_prototype.get(thread.heap()));
         let function_fn =
             Object::native_constructor(thread.heap(), &scope, idx.function_constructor)?;
         Object::define_own_property(
@@ -500,8 +500,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
         let function_name = thread.intern(&scope, "Function");
         // Safety: fresh interned word, rooted below before the define.
-        let function_name = scope.handle(function_name.as_tagged(&*thread.heap()));
-        let global_object = scope.handle(known.global_object.get(&*thread.heap()));
+        let function_name = scope.handle(function_name.as_tagged(thread.heap()));
+        let global_object = scope.handle(known.global_object.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -560,10 +560,10 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- eval -------------------------------------------------------------
         let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval)?;
-        let global = scope.handle(known.global_object.get(&*thread.heap()));
+        let global = scope.handle(known.global_object.get(thread.heap()));
         let eval_name = thread.intern(&scope, "eval");
         // Safety: fresh interned word, rooted below before the define.
-        let eval_name = scope.handle(eval_name.as_tagged(&*thread.heap()));
+        let eval_name = scope.handle(eval_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -573,7 +573,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         // ---- Object.prototype.toString/hasOwnProperty/propertyIsEnumerable ------
-        let object_prototype = scope.handle(known.object_prototype.get(&*thread.heap()));
+        let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
         Object::install_method(
             thread,
             &scope,
@@ -599,7 +599,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // ---- Object / isNaN -----------------------------------------------------
         // %Object.prototype% already exists from bootstrap; link the
         // constructor to it (like Array below)
-        let object_prototype = scope.handle(known.object_prototype.get(&*thread.heap()));
+        let object_prototype = scope.handle(known.object_prototype.get(thread.heap()));
         let object_fn = Object::native_constructor(thread.heap(), &scope, idx.object)?;
         Object::define_own_property(
             thread.heap(),
@@ -617,7 +617,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
         let object_name = thread.intern(&scope, "Object");
         // Safety: fresh interned word, rooted below before the define.
-        let object_name = scope.handle(object_name.as_tagged(&*thread.heap()));
+        let object_name = scope.handle(object_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -666,7 +666,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         // %Array.prototype% already exists from bootstrap (an array object
         // whose prototype is %Object.prototype%); just link the constructor
         let array_fn = Object::native_constructor(thread.heap(), &scope, idx.array)?;
-        let array_prototype = scope.handle(known.array_prototype.get(&*thread.heap()));
+        let array_prototype = scope.handle(known.array_prototype.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -683,7 +683,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
         let array_name = thread.intern(&scope, "Array");
         // Safety: fresh interned word, rooted below before the define.
-        let array_name = scope.handle(array_name.as_tagged(&*thread.heap()));
+        let array_name = scope.handle(array_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -708,8 +708,8 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         {
             let get_fn = Object::native_function(thread.heap(), &scope, idx.array_length_get)?;
             let set_fn = Object::native_function(thread.heap(), &scope, idx.array_length_set)?;
-            let get_fn = scope.handle(get_fn.as_tagged(&*thread.heap()).erase());
-            let set_fn = scope.handle(set_fn.as_tagged(&*thread.heap()).erase());
+            let get_fn = scope.handle(get_fn.as_tagged(thread.heap()).erase());
+            let set_fn = scope.handle(set_fn.as_tagged(thread.heap()).erase());
             let pair = thread
                 .heap()
                 .allocate_handle::<AccessorPair>((get_fn, set_fn), &scope);
@@ -751,7 +751,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         let date_fn = Object::native_constructor(thread.heap(), &scope, idx.date)?;
-        let date_prototype = scope.handle(known.date_prototype.get(&*thread.heap()));
+        let date_prototype = scope.handle(known.date_prototype.get(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -798,7 +798,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let date_parse_fn = Object::native_function(thread.heap(), &scope, idx.date_parse)?;
         let date_parse_name = thread.intern(&scope, "parse");
         // Safety: fresh interned word, rooted below before the define.
-        let date_parse_name = scope.handle(date_parse_name.as_tagged(&*thread.heap()));
+        let date_parse_name = scope.handle(date_parse_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -809,7 +809,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let date_now_fn = Object::native_function(thread.heap(), &scope, idx.date_now)?;
         let date_now_name = thread.intern(&scope, "now");
         // Safety: fresh interned word, rooted below before the define.
-        let date_now_name = scope.handle(date_now_name.as_tagged(&*thread.heap()));
+        let date_now_name = scope.handle(date_now_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -819,7 +819,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
         let date_name = thread.intern(&scope, "Date");
         // Safety: fresh interned word, rooted below before the define.
-        let date_name = scope.handle(date_name.as_tagged(&*thread.heap()));
+        let date_name = scope.handle(date_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -832,7 +832,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let is_array_fn = Object::native_function(thread.heap(), &scope, idx.array_is_array)?;
         let is_array_name = thread.intern(&scope, "isArray");
         // Safety: fresh interned word, rooted below before the define.
-        let is_array_name = scope.handle(is_array_name.as_tagged(&*thread.heap()));
+        let is_array_name = scope.handle(is_array_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -864,7 +864,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let sym_iterator_iter =
             Object::native_function(thread.heap(), &scope, idx.array_iterator_symbol_iterator)?;
         let iterator_name: Handle<'_, SlotName> = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             scope.handle(known.iterator_symbol.get(heap))
         };
         Object::define_own_property(
@@ -880,7 +880,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let values_fn = Object::native_function(thread.heap(), &scope, idx.array_values)?;
         let values_name = thread.intern(&scope, "values");
         // Safety: fresh interned word, rooted below before the defines.
-        let values_name = scope.handle(values_name.as_tagged(&*thread.heap()));
+        let values_name = scope.handle(values_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1001,7 +1001,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             let v = thread.heap().allocate_handle::<Float>(value, &scope);
             let n = thread.intern(&scope, name);
             // Safety: fresh interned word, rooted below before the define.
-            let n = scope.handle(n.as_tagged(&*thread.heap()));
+            let n = scope.handle(n.as_tagged(thread.heap()));
             Object::define_own_property(
                 thread.heap(),
                 &scope,
@@ -1012,7 +1012,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         }
         let math_name = thread.intern(&scope, "Math");
         // Safety: fresh interned word, rooted below before the define.
-        let math_name = scope.handle(math_name.as_tagged(&*thread.heap()));
+        let math_name = scope.handle(math_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1036,7 +1036,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         Object::install_method(thread, &scope, console_object, "log", idx.console_log)?;
         let console_name = thread.intern(&scope, "console");
         // Safety: fresh interned word, rooted below before the define.
-        let console_name = scope.handle(console_name.as_tagged(&*thread.heap()));
+        let console_name = scope.handle(console_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1048,7 +1048,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let is_nan_fn = Object::native_function(thread.heap(), &scope, idx.is_nan)?;
         let is_nan_name = thread.intern(&scope, "isNaN");
         // Safety: fresh interned word, rooted below before the define.
-        let is_nan_name = scope.handle(is_nan_name.as_tagged(&*thread.heap()));
+        let is_nan_name = scope.handle(is_nan_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1061,7 +1061,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let print_fn = Object::native_function(thread.heap(), &scope, idx.print)?;
         let print_name = thread.intern(&scope, "print");
         // Safety: fresh interned word, rooted below before the define.
-        let print_name = scope.handle(print_name.as_tagged(&*thread.heap()));
+        let print_name = scope.handle(print_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1090,7 +1090,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
         let performance_name = thread.intern(&scope, "performance");
         // Safety: fresh interned word, rooted below before the define.
-        let performance_name = scope.handle(performance_name.as_tagged(&*thread.heap()));
+        let performance_name = scope.handle(performance_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1105,7 +1105,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let symbol_fn = Object::native_function(thread.heap(), &scope, idx.symbol)?;
         let symbol_name = thread.intern(&scope, "Symbol");
         // Safety: fresh interned word, rooted below before the define.
-        let symbol_name = scope.handle(symbol_name.as_tagged(&*thread.heap()));
+        let symbol_name = scope.handle(symbol_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1114,10 +1114,10 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::data(symbol_fn.erase()),
         )?;
         let iterator_symbol: Handle<'_, vm_core::Symbol> =
-            scope.handle(known.iterator_symbol.get(&*thread.heap()));
+            scope.handle(known.iterator_symbol.get(thread.heap()));
         let iter_name = thread.intern(&scope, "iterator");
         // Safety: fresh interned word, rooted below before the define.
-        let iter_name = scope.handle(iter_name.as_tagged(&*thread.heap()));
+        let iter_name = scope.handle(iter_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1148,7 +1148,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::non_enumerable(proxy_name.erase()),
         )?;
         // Safety: fresh interned word, rooted below before the define.
-        let proxy_name = scope.handle(proxy_name.as_tagged(&*thread.heap()));
+        let proxy_name = scope.handle(proxy_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1176,7 +1176,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::non_enumerable(revocable_name.erase()),
         )?;
         // Safety: fresh interned word, rooted below before the define.
-        let revocable_name = scope.handle(revocable_name.as_tagged(&*thread.heap()));
+        let revocable_name = scope.handle(revocable_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1188,7 +1188,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         let revoke_fn = Object::native_function(thread.heap(), &scope, idx.proxy_revoke)?;
         let revoke_name = thread.intern(&scope, "__revokeProxy");
         // Safety: fresh interned word, rooted below before the define.
-        let revoke_name = scope.handle(revoke_name.as_tagged(&*thread.heap()));
+        let revoke_name = scope.handle(revoke_name.as_tagged(thread.heap()));
         Object::define_own_property(
             thread.heap(),
             &scope,
@@ -1220,7 +1220,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             .heap()
             .allocate_handle::<Float>(f64::INFINITY, &scope);
         let nan = thread.heap().allocate_handle::<Float>(f64::NAN, &scope);
-        let undefined = scope.handle(known.undefined.get(&*thread.heap()));
+        let undefined = scope.handle(known.undefined.get(thread.heap()));
         for name in ["Infinity", "NaN", "undefined"] {
             let n = thread.intern(&scope, name);
             // spec attributes are {writable: false, enumerable: false,
@@ -1237,7 +1237,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             // allocation.
             let receiver =
                 scope.handle(unsafe { Tagged::<Object>::from_value_unchecked(global.raw()) });
-            let key = scope.handle(n.as_tagged(&*thread.heap()));
+            let key = scope.handle(n.as_tagged(thread.heap()));
             Object::define_own_property(
                 thread.heap(),
                 &scope,

@@ -379,9 +379,8 @@ fn join_impl<'a>(
             Some(h) if h.as_tagged(heap) != vm.known().undefined.get(heap) => {
                 match Object::to_string(vm, heap, state, h) {
                     Ok(Some(s)) => {
-                        let word = s.raw();
-                        // Safety: fresh string word, no allocation since the read.
-                        unsafe { word.assume_valid(heap) }
+                        let s = scope.handle(s);
+                        s.as_tagged(heap)
                             .get_as::<DenseString>(heap)
                             .map(|d| d.to_rust_string(heap))
                             .unwrap_or_default()
@@ -416,10 +415,8 @@ fn join_impl<'a>(
             let h = scope.handle(v);
             match Object::to_string(vm, heap, state, h) {
                 Ok(Some(s)) => {
-                    let word = s.raw();
-                    // Safety: fresh string word, no allocation since the read.
-                    if let Some(d) = unsafe { word.assume_valid(heap) }.get_as::<DenseString>(heap)
-                    {
+                    let s = scope.handle(s);
+                    if let Some(d) = s.as_tagged(heap).get_as::<DenseString>(heap) {
                         out.push_str(&d.to_rust_string(heap));
                     }
                 }

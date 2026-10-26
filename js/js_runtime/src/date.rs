@@ -311,22 +311,23 @@ pub fn date_parse<'a>(
         vm, heap, state, ..
     } = nctx;
     let arg = args.get_handle(heap, 1);
-    let text = match Object::to_string(vm, heap, state, arg) {
-        Ok(Some(s)) => {
-            let word = s.raw();
-            // Safety: fresh string word, no allocation since the read.
-            unsafe { word.assume_valid(heap) }
-                .get_as::<DenseString>(heap)
-                .map(|d| d.to_rust_string(heap))
-                .unwrap_or_default()
-        }
-        Ok(None) => return vm.known().exception.get(heap).erase(),
-        Err(err) => return raise_runtime(vm, heap, state, err),
-    };
-    let ms = parse_iso(&text)
-        .or_else(|| parse_loose(&text))
-        .unwrap_or(f64::NAN);
-    heap.new_number(ms)
+    state.handle_scope(|scope| {
+        let text = match Object::to_string(vm, heap, state, arg) {
+            Ok(Some(s)) => {
+                let s = scope.handle(s);
+                s.as_tagged(heap)
+                    .get_as::<DenseString>(heap)
+                    .map(|d| d.to_rust_string(heap))
+                    .unwrap_or_default()
+            }
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let ms = parse_iso(&text)
+            .or_else(|| parse_loose(&text))
+            .unwrap_or(f64::NAN);
+        heap.new_number(ms)
+    })
 }
 
 /// `Date(...)` / `new Date(...)`: no arguments → now; one numeric

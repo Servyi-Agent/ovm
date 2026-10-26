@@ -24,9 +24,8 @@ pub fn symbol_constructor<'a>(
             let h = args.get_handle(heap, 1);
             match Object::to_string(vm, heap, state, h) {
                 Ok(Some(s)) => {
-                    let word = s.raw();
-                    // Safety: fresh string word, no allocation since the read.
-                    unsafe { word.assume_valid(heap) }
+                    let s = scope.handle(s);
+                    s.as_tagged(heap)
                         .get_as::<DenseString>(heap)
                         .map(|d| d.to_rust_string(heap))
                         .unwrap_or_default()

@@ -1221,8 +1221,8 @@ fn op_create_closure(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, info_idx),
+                .constants(heap)
+                .at(heap, info_idx),
         ) else {
             return Acc::set(raise_runtime(vm, heap, state, VmError::Type));
         };
@@ -1466,8 +1466,8 @@ fn op_create_function_context(frame: Frame) {
         let Some(count) = state
             .stack()
             .frame_header(base)
-            .constants(&*heap)
-            .at(&*heap, scope_idx)
+            .constants(heap)
+            .at(heap, scope_idx)
             .get_as::<ScopeInfo>(heap)
             .map(|r| r.as_ref().names.get(heap).len())
         else {
@@ -1478,8 +1478,8 @@ fn op_create_function_context(frame: Frame) {
             state
                 .stack()
                 .frame_header(base)
-                .constants(&*heap)
-                .at(&*heap, scope_idx),
+                .constants(heap)
+                .at(heap, scope_idx),
         ) else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };

@@ -2,7 +2,16 @@ use interpreter::BecomeInterpreter;
 use js_runtime::JSRuntime;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use std::time::Instant;
-use vm_core::{Smi, VM};
+use vm_core::{Smi, Thread, VM};
+
+fn pending_exception_message(thread: &mut Thread) -> Option<String> {
+    let (_vm, heap, state) = thread.split();
+    state.take_pending_exception_tagged(heap).map(|ex| {
+        ex.get_as::<vm_core::DenseString>(heap)
+            .map(|s| s.to_rust_string(heap))
+            .unwrap_or_else(|| format!("{ex:?}"))
+    })
+}
 
 fn bench(name: &str, src: &str, iters: usize) {
     let mut times = Vec::new();
@@ -21,13 +30,7 @@ fn bench(name: &str, src: &str, iters: usize) {
             )
             .expect("runs");
         let dt = t.elapsed();
-        if let Some(ex) = thread.take_pending_exception() {
-            let heap = thread.heap();
-            let tagged = unsafe { ex.assume_valid(heap) };
-            let msg = tagged
-                .get_as::<vm_core::DenseString>(heap)
-                .map(|s| s.to_rust_string(heap))
-                .unwrap_or_else(|| format!("{:?}", tagged));
+        if let Some(msg) = pending_exception_message(&mut thread) {
             panic!("{name} threw: {msg}");
         }
         times.push(dt.as_secs_f64() * 1e3);
@@ -79,13 +82,7 @@ fn score_bench(name: &str, src: &str, iters: usize) {
                 js_compiler::SourceMode::Script,
             )
             .expect("runs");
-        if let Some(ex) = thread.take_pending_exception() {
-            let heap = thread.heap();
-            let tagged = unsafe { ex.assume_valid(heap) };
-            let msg = tagged
-                .get_as::<vm_core::DenseString>(heap)
-                .map(|s| s.to_rust_string(heap))
-                .unwrap_or_else(|| format!("{:?}", tagged));
+        if let Some(msg) = pending_exception_message(&mut thread) {
             panic!("{name} threw: {msg}");
         }
         let score = Smi::decode(result).expect("octane score is an integer");

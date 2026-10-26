@@ -44,7 +44,7 @@ fn callable(
     );
     let map = thread.heap().known().function_map.as_handle();
     let values = {
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         scope.stage(&[
             info.as_tagged(heap).erase(),
             empty_context.as_tagged(heap).erase(),
@@ -90,7 +90,7 @@ fn roundtrip_entries() {
             ],
         );
         let out = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             let table = t.as_tagged(heap);
             (table.len(), table.entry(0), table.entry(1))
         };
@@ -108,7 +108,7 @@ fn lookup_finds_handler_inside_range() {
     thread.handle_scope(|thread, scope| {
         let t = table(thread, &scope, &[HandlerEntryInit::new(5, 15, 100)]);
         {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             let table = t.as_tagged(heap);
             // try_start is inside (inclusive) ...
             assert_eq!(table.lookup(5), Some(100));
@@ -126,7 +126,7 @@ fn lookup_returns_none_outside_range() {
     thread.handle_scope(|thread, scope| {
         let t = table(thread, &scope, &[HandlerEntryInit::new(5, 15, 100)]);
         {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             let table = t.as_tagged(heap);
             // before the region ...
             assert_eq!(table.lookup(4), None);
@@ -155,7 +155,7 @@ fn lookup_returns_innermost_of_nested_ranges() {
             ],
         );
         {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             let table = t.as_tagged(heap);
             // inside both ranges: the innermost (largest try_start) wins
             assert_eq!(table.lookup(5), Some(300));
@@ -174,7 +174,7 @@ fn lookup_on_empty_table_returns_none() {
     thread.handle_scope(|thread, scope| {
         let t = table(thread, &scope, &[]);
         {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             let table = t.as_tagged(heap);
             assert_eq!(table.len(), 0);
             assert_eq!(table.lookup(0), None);
@@ -196,7 +196,7 @@ fn callable_info_carries_handler_table() {
             0,
             Some(&[HandlerEntryInit::new(2, 8, 33)]),
         );
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let o = unsafe { Tagged::<vm::Object>::from_value_unchecked(f) };
         let info = o.callable_info(heap).unwrap();
         let table = info.handlers.get(heap).expect("handler table attached");
@@ -212,7 +212,7 @@ fn callable_info_without_handler_table() {
 
     thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &[], &[], 0, None);
-        let heap = &*thread.heap();
+        let heap = thread.heap();
         let o = unsafe { Tagged::<vm::Object>::from_value_unchecked(f) };
         let info = o.callable_info(heap).unwrap();
         assert!(
@@ -246,7 +246,7 @@ fn throw_is_caught_in_same_function() {
             Some(&[HandlerEntryInit::new(0, 3, 4)]),
         );
         let callable = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             scope
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
@@ -272,7 +272,7 @@ fn throw_any_value_escapes_as_sentinel() {
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &program, &[], 0, None);
         let callable = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             scope
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
@@ -316,7 +316,7 @@ fn innermost_handler_wins() {
     let result = thread.handle_scope(|thread, scope| {
         let f = callable(thread, &scope, &program, &[], 0, Some(&entries));
         let callable = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             scope
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()
@@ -364,7 +364,7 @@ fn exception_unwinds_to_caller() {
         );
         let result = {
             let callable = {
-                let heap = &*thread.heap();
+                let heap = thread.heap();
                 scope
                     .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(caller) })
                     .unwrap()
@@ -400,7 +400,7 @@ fn throw_from_finally_escapes_past_its_own_handler() {
             Some(&[HandlerEntryInit::new(0, 4, 4)]),
         );
         let callable = {
-            let heap = &*thread.heap();
+            let heap = thread.heap();
             scope
                 .cast::<vm::Object>(heap, unsafe { Tagged::from_value_unchecked(f) })
                 .unwrap()

@@ -170,39 +170,41 @@ fn show_value(thread: &mut Thread, v: Value) -> String {
         return smi.value().to_string();
     }
     {
-        let heap = &*thread.heap();
+        let heap = thread.heap();
+        // Safety: `v` comes from this execution and no collection has run
+        // since it was produced.
+        let tagged = unsafe { Tagged::<Value>::from_value_unchecked(v) };
         let known = heap.known();
-        if v == known.undefined.get(heap).raw() {
+        if tagged == known.undefined.get(heap) {
             return "undefined".into();
         }
-        if v == known.null.get(heap).raw() {
+        if tagged == known.null.get(heap) {
             return "null".into();
         }
-        if v == known.true_object.get(heap).raw() {
+        if tagged == known.true_object.get(heap) {
             return "true".into();
         }
-        if v == known.false_object.get(heap).raw() {
+        if tagged == known.false_object.get(heap) {
             return "false".into();
         }
-        if let Some(f) = unsafe { v.assume_valid(heap) }.get_as::<Float>(heap) {
+        if let Some(f) = tagged.get_as::<Float>(heap) {
             return f.value.get().to_string();
         }
-        if let Some(s) = unsafe { v.assume_valid(heap) }.get_as::<DenseString>(heap) {
+        if let Some(s) = tagged.get_as::<DenseString>(heap) {
             return s.to_rust_string(heap);
         }
-        if let Some(text) = error_text(heap, v) {
+        if let Some(text) = error_text(heap, tagged) {
             return text;
         }
-        format!("{v:?}")
+        format!("{tagged:?}")
     }
 }
 
-fn error_text(heap: &Heap, v: Value) -> Option<String> {
-    let tagged = unsafe { v.assume_valid(heap) };
-    tagged.as_heap_object()?;
+fn error_text(heap: &Heap, v: Tagged<'_, Value>) -> Option<String> {
+    v.as_heap_object()?;
     let known = heap.known();
-    let name = error_property(heap, tagged, known.strings.name.get(heap));
-    let message = error_property(heap, tagged, known.strings.message.get(heap));
+    let name = error_property(heap, v, known.strings.name.get(heap));
+    let message = error_property(heap, v, known.strings.message.get(heap));
     match (name, message) {
         (Some(n), Some(m)) if !m.is_empty() => Some(format!("{n}: {m}")),
         (Some(n), _) => Some(n),

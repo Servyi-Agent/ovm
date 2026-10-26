@@ -63,7 +63,7 @@ impl<'heap> AllocToken<'heap> {
     }
 
     pub fn heap(&self) -> &Heap {
-        &*self.heap
+        self.heap
     }
 
     fn bump(&self, layout: Layout) -> NonNull<u8> {
