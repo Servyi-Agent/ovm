@@ -29,13 +29,13 @@ pub fn string_constructor<'a>(
         }
         let s = match Object::to_string(vm, heap, state, arg) {
             Ok(Some(s)) => scope.handle(s),
-            Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+            Ok(None) => return heap.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         if !is_construct {
             return s.as_tagged(heap).erase();
         }
-        let map = heap.known().string_wrapper_map;
+        let map = scope.handle(heap.known().string_wrapper_map.get(heap));
         heap.new_object(&scope, map, scope.stage(&[s.as_tagged(heap).erase()]))
             .erase()
     })

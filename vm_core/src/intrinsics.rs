@@ -84,8 +84,8 @@ fn require_object_coercible<'a>(
         vm, heap, state, ..
     } = nctx;
     let arg = args.get(heap, 0);
-    let null = heap.known().null.as_tagged(heap).raw();
-    let undefined = heap.known().undefined.as_tagged(heap).raw();
+    let null = heap.known().null.get(heap).raw();
+    let undefined = heap.known().undefined.get(heap).raw();
     let raw = arg.raw();
     if raw == null || raw == undefined {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -120,7 +120,7 @@ pub fn delete_property_operator<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -134,7 +134,7 @@ pub fn delete_property_operator<'a>(
                 Proxy::delete(vm, heap, state, target, key.erase())
             ) {
                 Coercion::Threw => {
-                    return heap.known().exception.as_tagged(heap).erase();
+                    return heap.known().exception.get(heap).erase();
                 }
                 Coercion::Value(v) => {
                     let v = scope.handle(v);
@@ -165,10 +165,10 @@ fn delete_property_core(
     // ToObject (ES 7.2.3): a null/undefined base throws
     let nullish = target
         .as_tagged(heap)
-        .ptr_eq(heap.known().null.as_tagged(heap).erase())
+        .ptr_eq(heap.known().null.get(heap).erase())
         || target
             .as_tagged(heap)
-            .ptr_eq(heap.known().undefined.as_tagged(heap).erase());
+            .ptr_eq(heap.known().undefined.get(heap).erase());
     if nullish {
         return Err(VmError::Type);
     }
@@ -206,7 +206,7 @@ fn delete_identifier_sloppy<'a>(
         heap,
         state,
         state.handle_scope(|scope| {
-            let global = scope.handle(heap.known().global_object.as_tagged(heap).erase());
+            let global = scope.handle(heap.known().global_object.get(heap).erase());
             let name = scope.handle(args.get(heap, 0));
             delete_property_core(heap, &scope, global, name)
         })
@@ -273,17 +273,15 @@ fn for_in_enumerate<'a>(
     let subject = args.get_handle(heap, 0);
     state.handle_scope(|scope| {
         let subject = subject;
-        if subject
-            .as_tagged(heap)
-            .ptr_eq(heap.known().null.as_tagged(heap))
+        if subject.as_tagged(heap).ptr_eq(heap.known().null.get(heap))
             || subject
                 .as_tagged(heap)
-                .ptr_eq(heap.known().undefined.as_tagged(heap))
+                .ptr_eq(heap.known().undefined.get(heap))
         {
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         let Some(level) = for_in_initial_level(heap, subject.as_tagged(heap)) else {
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         };
         // the level must survive the key collection and FixedArray
         // allocation below (both allocate)
@@ -291,13 +289,13 @@ fn for_in_enumerate<'a>(
         let keys = rt_try!(vm, heap, state, for_in_level_keys(vm, heap, &scope, level));
         let staged = stage_handles(heap, &scope, &keys);
         let keys = heap.allocate_handle::<FixedArray>(staged, &scope);
-        let empty = heap.known().empty_fixed_array;
-        let map = heap.known().for_in_enumerator_map;
+        let empty = heap.known().empty_fixed_array.get(heap);
+        let map = scope.handle(heap.known().for_in_enumerator_map.get(heap));
         let words = [
             level.as_tagged(heap).erase(),
             keys.as_tagged(heap).erase(),
             Smi::new(0).into_tagged(),
-            empty.as_tagged(heap).erase(),
+            empty.erase(),
         ];
         let staged = scope.stage(&words);
         let enumerator = heap.new_object(&scope, map, staged);
@@ -325,8 +323,8 @@ fn for_in_initial_level<'a>(
         "Number"
     } else if subject.get_as::<Float>(heap).is_some() {
         "Number"
-    } else if subject == heap.known().true_object.as_tagged(heap)
-        || subject == heap.known().false_object.as_tagged(heap)
+    } else if subject == heap.known().true_object.get(heap)
+        || subject == heap.known().false_object.get(heap)
     {
         "Boolean"
     } else if subject.get_as::<Symbol>(heap).is_some() {
@@ -334,23 +332,19 @@ fn for_in_initial_level<'a>(
     } else {
         return None;
     };
-    let global = heap.known().global_object.as_tagged(heap);
-    let strings = heap.known().strings;
+    let global = heap.known().global_object.get(heap);
+    let strings = &heap.known().strings;
     let ctor_handle = match ctor_name {
-        "Number" => strings.number_ctor,
-        "Boolean" => strings.boolean_ctor,
-        _ => strings.symbol_ctor,
+        "Number" => strings.number_ctor.get(heap),
+        "Boolean" => strings.boolean_ctor.get(heap),
+        _ => strings.symbol_ctor.get(heap),
     };
-    let ctor = match global
-        .erase()
-        .load_outcome(heap, ctor_handle.as_tagged(heap))
-        .ok()?
-    {
+    let ctor = match global.erase().load_outcome(heap, ctor_handle).ok()? {
         LoadOutcome::Value(v) if v.is_strong_ptr() => v,
         _ => return None,
     };
     match ctor
-        .load_outcome(heap, heap.known().strings.prototype.as_tagged(heap))
+        .load_outcome(heap, heap.known().strings.prototype.get(heap))
         .ok()?
     {
         LoadOutcome::Value(p) if p.is_strong_ptr() => Some(p),
@@ -467,10 +461,10 @@ fn for_in_next<'a>(
     state.handle_scope(|scope| {
         if enumerator
             .as_tagged(heap)
-            .ptr_eq(heap.known().undefined.as_tagged(heap))
+            .ptr_eq(heap.known().undefined.get(heap))
         {
             // nullish subject: the head produced no enumerator
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         loop {
             // one candidate per turn: the cursor advances before the
@@ -510,7 +504,7 @@ fn for_in_next<'a>(
                 let level = scope.handle(obj.slots(heap).at(heap, FOR_IN_LEVEL));
                 let Some(proto) = rt_try!(vm, heap, state, for_in_next_level(heap, &scope, level))
                 else {
-                    return heap.known().undefined.as_tagged(heap).erase();
+                    return heap.known().undefined.get(heap).erase();
                 };
                 let keys = rt_try!(vm, heap, state, for_in_level_keys(vm, heap, &scope, proto));
                 let staged = stage_handles(heap, &scope, &keys);
@@ -604,10 +598,10 @@ fn for_in_next_level<'s>(
     if level.get_as::<DenseString>(heap).is_some() {
         // String.prototype via the global object (both plain data
         // lookups; no user code can run)
-        let global = heap.known().global_object.as_tagged(heap);
+        let global = heap.known().global_object.get(heap);
         let Some(string_ctor) = global
             .erase()
-            .load_outcome(heap, heap.known().strings.string.as_tagged(heap))
+            .load_outcome(heap, heap.known().strings.string.get(heap))
             .ok()
             .and_then(|o| match o {
                 LoadOutcome::Value(v) => Some(v),
@@ -617,7 +611,7 @@ fn for_in_next_level<'s>(
             return Ok(None);
         };
         let proto = string_ctor
-            .load_outcome(heap, heap.known().strings.prototype.as_tagged(heap))
+            .load_outcome(heap, heap.known().strings.prototype.get(heap))
             .ok()
             .and_then(|o| match o {
                 LoadOutcome::Value(v) => Some(v),
@@ -629,8 +623,8 @@ fn for_in_next_level<'s>(
         return Ok(None);
     };
     let proto = obj.prototype(heap);
-    let hole = heap.known().the_hole.as_tagged(heap);
-    if proto.ptr_eq(hole) || proto.ptr_eq(heap.known().null.as_tagged(heap)) {
+    let hole = heap.known().the_hole.get(heap);
+    if proto.ptr_eq(hole) || proto.ptr_eq(heap.known().null.get(heap)) {
         return Ok(None);
     }
     // a FixedArray prototype is the Self-style multi-parent form;
@@ -697,7 +691,7 @@ fn get_iterator<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let obj = scope.handle(args.get(heap, 0));
-        let symbol = scope.handle(heap.known().iterator_symbol.as_tagged(heap).erase());
+        let symbol = scope.handle(heap.known().iterator_symbol.get(heap).erase());
         let method = rt_try!(
             vm,
             heap,
@@ -706,13 +700,13 @@ fn get_iterator<'a>(
         );
         let method = match method {
             Coercion::Threw => {
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
             Coercion::Value(v) => scope.handle(v),
         };
         let method_tagged = method.as_tagged(heap);
-        if method_tagged.ptr_eq(heap.known().undefined.as_tagged(heap))
-            || method_tagged.ptr_eq(heap.known().null.as_tagged(heap))
+        if method_tagged.ptr_eq(heap.known().undefined.get(heap))
+            || method_tagged.ptr_eq(heap.known().null.get(heap))
             || !method_tagged.is_callable(heap)
         {
             return raise_runtime(vm, heap, state, VmError::Type); // "obj is not iterable"
@@ -736,7 +730,7 @@ fn iterator_next<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let iter = scope.handle(args.get(heap, 0));
-        let next_name = scope.handle(heap.known().strings.next.as_tagged(heap).erase());
+        let next_name = scope.handle(heap.known().strings.next.get(heap).erase());
         let next = rt_try!(
             vm,
             heap,
@@ -745,7 +739,7 @@ fn iterator_next<'a>(
         );
         let next = match next {
             Coercion::Threw => {
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
             Coercion::Value(v) => scope.handle(v),
         };
@@ -758,7 +752,7 @@ fn iterator_next<'a>(
         );
         if result
             .as_tagged(heap)
-            .ptr_eq(heap.known().exception.as_tagged(heap))
+            .ptr_eq(heap.known().exception.get(heap))
         {
             return result.as_tagged(heap);
         }
@@ -780,14 +774,14 @@ fn iterator_done<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
-        let done_name = scope.handle(heap.known().strings.done.as_tagged(heap).erase());
+        let done_name = scope.handle(heap.known().strings.done.get(heap).erase());
         let v = match rt_try!(
             vm,
             heap,
             state,
             Lookup::get_property_on(vm, heap, state, result, result, done_name)
         ) {
-            Coercion::Threw => return heap.known().exception.as_tagged(heap).erase(),
+            Coercion::Threw => return heap.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
         };
         let truthy = v.as_tagged(heap).is_truthy(heap);
@@ -806,14 +800,14 @@ fn iterator_value<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let result = scope.handle(args.get(heap, 0));
-        let value_name = scope.handle(heap.known().strings.value.as_tagged(heap).erase());
+        let value_name = scope.handle(heap.known().strings.value.get(heap).erase());
         let v = match rt_try!(
             vm,
             heap,
             state,
             Lookup::get_property_on(vm, heap, state, result, result, value_name)
         ) {
-            Coercion::Threw => return heap.known().exception.as_tagged(heap).erase(),
+            Coercion::Threw => return heap.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
         };
         v.as_tagged(heap)
@@ -841,7 +835,7 @@ fn has_property<'a>(
             state,
             Object::to_property_key(vm, heap, state, key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -852,7 +846,7 @@ fn has_property<'a>(
                 state,
                 Proxy::has(vm, heap, state, obj, key.erase())
             ) {
-                Coercion::Threw => return heap.known().exception.as_tagged(heap).erase(),
+                Coercion::Threw => return heap.known().exception.get(heap).erase(),
                 Coercion::Value(v) => scope.handle(v),
             };
             return has.as_tagged(heap);
@@ -888,8 +882,8 @@ fn copy_data_properties<'a>(
         // ToObject wrapper has no own enumerable properties. Strings are
         // the exception: their indices are own enumerable properties, so
         // they fall through to the string branch below.
-        if source_tagged.ptr_eq(heap.known().null.as_tagged(heap))
-            || source_tagged.ptr_eq(heap.known().undefined.as_tagged(heap))
+        if source_tagged.ptr_eq(heap.known().null.get(heap))
+            || source_tagged.ptr_eq(heap.known().undefined.get(heap))
             || (source_tagged.is_primitive(heap)
                 && DenseString::from_receiver(heap, source_tagged).is_none())
         {
@@ -904,7 +898,7 @@ fn copy_data_properties<'a>(
             for k in excluded {
                 match rt_try!(vm, heap, state, Object::to_property_key(vm, heap, state, k)) {
                     Some(k) => out.push(scope.handle(k)),
-                    None => return heap.known().exception.as_tagged(heap).erase(),
+                    None => return heap.known().exception.get(heap).erase(),
                 }
             }
             out
@@ -967,7 +961,7 @@ fn copy_data_properties<'a>(
                     state,
                     Lookup::get_property_on(vm, heap, state, source, source, key)
                 ) {
-                    Coercion::Threw => return heap.known().exception.as_tagged(heap).erase(),
+                    Coercion::Threw => return heap.known().exception.get(heap).erase(),
                     Coercion::Value(v) => scope.handle(v),
                 }
             };
@@ -1139,7 +1133,7 @@ fn init_instance_fields<'a>(
             return raise_runtime(vm, heap, state, VmError::Type);
         }
         let fields = slots.at(heap, 2);
-        if fields.ptr_eq(heap.known().undefined.as_tagged(heap)) {
+        if fields.ptr_eq(heap.known().undefined.get(heap)) {
             return instance.as_tagged(heap);
         }
         // root the field list across the initializer calls below
@@ -1155,7 +1149,7 @@ fn init_instance_fields<'a>(
                 .as_tagged(heap)
                 .as_heap_object()
                 .and_then(|o| o.element_value(heap, i))
-                .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase());
+                .unwrap_or_else(|| heap.known().undefined.get(heap).erase());
             // computed keys need ToPropertyKey canonicalization
             let Some(key) = rt_try!(
                 vm,
@@ -1163,7 +1157,7 @@ fn init_instance_fields<'a>(
                 state,
                 Object::to_property_key(vm, heap, state, scope.handle(raw_key))
             ) else {
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             };
             let key = scope.handle(key);
             // recompute the initializer after the coercion (it allocated)
@@ -1171,7 +1165,7 @@ fn init_instance_fields<'a>(
                 .as_tagged(heap)
                 .as_heap_object()
                 .and_then(|o| o.element_value(heap, i + 1))
-                .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase());
+                .unwrap_or_else(|| heap.known().undefined.get(heap).erase());
             let inst = instance.as_tagged(heap);
             let call_args = scope.stage(&[inst]);
             let value = scope.handle(rt_try!(
@@ -1182,9 +1176,9 @@ fn init_instance_fields<'a>(
             ));
             if value
                 .as_tagged(heap)
-                .ptr_eq(heap.known().exception.as_tagged(heap))
+                .ptr_eq(heap.known().exception.get(heap))
             {
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
             let instance_obj = scope
                 .cast::<Object>(heap, instance.as_tagged(heap))
@@ -1336,7 +1330,7 @@ fn apply_store_outcome(
             let call_args = scope.stage(&[recv, val]);
             let result = HostCtx::enter(vm, heap, state, setter, call_args, None)?;
             let word = result.raw();
-            Ok(word == heap.known().exception.as_tagged(heap).erase().raw())
+            Ok(word == heap.known().exception.get(heap).erase().raw())
         }),
         StoreOutcome::Done => Ok(false),
     }
@@ -1369,10 +1363,10 @@ fn get_property_lenient<'a>(
         }
         let getter = getter.expect("one of the two arms is set");
         let getter_tagged = getter.as_tagged(heap);
-        let skip = getter_tagged.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+        let skip = getter_tagged.ptr_eq(heap.known().undefined.get(heap).erase())
             || !getter_tagged.is_callable(heap);
         if skip {
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         let recv = receiver.as_tagged(heap);
         let call_args = scope.stage(&[recv]);
@@ -1411,7 +1405,7 @@ fn set_function_name<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key).erase();
@@ -1438,7 +1432,7 @@ fn set_function_name<'a>(
         let Some(fn_obj) = scope.cast::<Object>(heap, fn_value.as_tagged(heap)) else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
-        let name_key = heap.known().strings.name;
+        let name_key = scope.handle(heap.known().strings.name.get(heap));
         // the closure's own placeholder is never writable nor an accessor,
         // so only explicit member defines match here
         let explicit = match fn_obj
@@ -1502,7 +1496,7 @@ fn install_accessor<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -1522,7 +1516,7 @@ fn install_accessor<'a>(
             Key::Name(name) => name,
         };
         // existing own accessor half, if any (own descriptors only)
-        let mut get = heap.known().undefined.as_tagged(heap).erase();
+        let mut get = heap.known().undefined.get(heap).erase();
         let mut set = get;
         if let Some(obj) = target.as_tagged(heap).as_heap_object() {
             for d in obj.map(heap).descriptors() {
@@ -1593,7 +1587,7 @@ fn define_own_property<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -1637,7 +1631,7 @@ fn define_own_property<'a>(
                 state,
                 Proxy::define_internal(vm, heap, state, &scope, receiver, key.erase(), partial,)
             ) {
-                Flow::Threw => heap.known().exception.as_tagged(heap).erase(),
+                Flow::Threw => heap.known().exception.get(heap).erase(),
                 Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
                 Flow::Value(true) => receiver.as_tagged(heap),
             };
@@ -1736,7 +1730,7 @@ fn throw_if_not_constructor_or_null<'a>(
     } = nctx;
     let v = args.get(heap, 0);
     let v_raw = v.raw();
-    let null = heap.known().null.as_tagged(heap).raw();
+    let null = heap.known().null.get(heap).raw();
     // Safety: rooted-slot word re-anchored fresh; no allocation between
     // the reads below and the return.
     let ok = v_raw == null
@@ -1761,7 +1755,7 @@ fn throw_if_not_object_or_null<'a>(
     } = nctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
-    let null = heap.known().null.as_tagged(heap).raw();
+    let null = heap.known().null.get(heap).raw();
     // Safety: rooted-slot word, fresh at both uses below.
     let ok =
         raw == null || !unsafe { Tagged::<Value>::from_value_unchecked(raw) }.is_primitive(heap);
@@ -1783,7 +1777,7 @@ fn throw_super_not_called_if_hole<'a>(
     } = nctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
-    if raw == heap.known().the_hole.as_tagged(heap).raw() {
+    if raw == heap.known().the_hole.get(heap).raw() {
         // "Must call super constructor before accessing 'this'"
         return raise_runtime(vm, heap, state, VmError::Reference);
     }
@@ -1803,7 +1797,7 @@ fn throw_super_already_called_if_not_hole<'a>(
     } = nctx;
     let v = args.get(heap, 0);
     let raw = v.raw();
-    if raw != heap.known().the_hole.as_tagged(heap).raw() {
+    if raw != heap.known().the_hole.get(heap).raw() {
         // "Super constructor may only be called once"
         return raise_runtime(vm, heap, state, VmError::Reference);
     }
@@ -1827,8 +1821,8 @@ fn construct_super_construct<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let new_target_tagged = new_target.as_tagged(heap);
-        if new_target_tagged.ptr_eq(heap.known().undefined.as_tagged(heap))
-            || new_target_tagged.ptr_eq(heap.known().the_hole.as_tagged(heap))
+        if new_target_tagged.ptr_eq(heap.known().undefined.get(heap))
+            || new_target_tagged.ptr_eq(heap.known().the_hole.get(heap))
         {
             // not inside a [[Construct]]: reachable via an arrow that escaped
             // the constructor
@@ -1846,17 +1840,14 @@ fn construct_super_construct<'a>(
             return raise_runtime(vm, heap, state, VmError::Type);
         };
         let (receiver, allocated) = if derived {
-            (
-                scope.handle(heap.known().the_hole.as_tagged(heap).erase()),
-                false,
-            )
+            (scope.handle(heap.known().the_hole.get(heap).erase()), false)
         } else {
             match Object::create_construct_receiver_value(vm, heap, state, new_target.erase()) {
                 // the receiver must stay rooted across the callee call:
                 // a primitive return falls back to it after the call
                 // allocated (and possibly moved it)
                 Ok(Some(r)) => (scope.handle(r), true),
-                Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+                Ok(None) => return heap.known().exception.get(heap).erase(),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             }
         };
@@ -1879,7 +1870,7 @@ fn construct_super_construct<'a>(
         ));
         if result
             .as_tagged(heap)
-            .ptr_eq(heap.known().exception.as_tagged(heap))
+            .ptr_eq(heap.known().exception.get(heap))
         {
             return result.as_tagged(heap);
         }
@@ -2020,7 +2011,7 @@ fn load_dynamic_name<'a>(
             Some(_) => raise_runtime(vm, heap, state, VmError::Reference),
             None => {
                 // unresolved: fall back to a global object property
-                let global = heap.known().global_object.erase();
+                let global = scope.handle(heap.known().global_object.get(heap).erase());
                 get_property_lenient(HostCtx::new(vm, heap, state), global, name)
             }
         }
@@ -2076,7 +2067,7 @@ fn store_dynamic_name<'a>(
                     .callable_info(heap)
                     .expect("a bytecode frame's callable must have callable info");
                 let mode = info.mode();
-                let global = heap.known().global_object.erase();
+                let global = scope.handle(heap.known().global_object.get(heap).erase());
                 let threw = state.handle_scope(|scope| -> Result<bool, VmError> {
                     let outcome = global.store_lookup(
                         heap,
@@ -2090,7 +2081,7 @@ fn store_dynamic_name<'a>(
                 });
                 let threw = rt_try!(vm, heap, state, threw);
                 if threw {
-                    return heap.known().exception.as_tagged(heap).erase();
+                    return heap.known().exception.get(heap).erase();
                 }
             }
         }
@@ -2100,7 +2091,7 @@ fn store_dynamic_name<'a>(
 
 /// Fresh singleton-word compare against the hole sentinel.
 fn is_the_hole(heap: &Heap, v: Tagged<'_, Value>) -> bool {
-    v.ptr_eq(heap.known().the_hole.as_tagged(heap))
+    v.ptr_eq(heap.known().the_hole.get(heap))
 }
 
 // ---- rest parameters ---------------------------------------------------------
@@ -2128,7 +2119,7 @@ fn create_rest_parameter<'a>(
             .collect();
         let elements =
             heap.allocate_handle::<FixedArray>(stage_handles(heap, &scope, &values), &scope);
-        let map = heap.known().js_array_map;
+        let map = scope.handle(heap.known().js_array_map.get(heap));
         heap.allocate_object(
             &scope,
             ObjectSlotsInit {
@@ -2161,7 +2152,7 @@ fn super_get_property<'a>(
     let raw_key = args.get_handle(heap, 2);
     if recv
         .as_tagged(heap)
-        .ptr_eq(heap.known().the_hole.as_tagged(heap).erase())
+        .ptr_eq(heap.known().the_hole.get(heap).erase())
     {
         // super.x before super() in a derived constructor
         return raise_runtime(vm, heap, state, VmError::Reference);
@@ -2175,7 +2166,7 @@ fn super_get_property<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -2203,10 +2194,10 @@ fn super_get_property<'a>(
         }
         let getter = outcome.1.expect("one of the two arms is set");
         let getter_tagged = getter.as_tagged(heap);
-        let skip = getter_tagged.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+        let skip = getter_tagged.ptr_eq(heap.known().undefined.get(heap).erase())
             || !getter_tagged.is_callable(heap);
         if skip {
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         let r = recv.as_tagged(heap);
         let call_args = scope.stage(&[r]);
@@ -2236,7 +2227,7 @@ fn super_set_property<'a>(
     let semantics_flag = args.get(heap, 4).to_i64().map(|v| v as u32).unwrap_or(0);
     if recv
         .as_tagged(heap)
-        .ptr_eq(heap.known().the_hole.as_tagged(heap).erase())
+        .ptr_eq(heap.known().the_hole.get(heap).erase())
     {
         return raise_runtime(vm, heap, state, VmError::Reference);
     }
@@ -2249,7 +2240,7 @@ fn super_set_property<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -2298,7 +2289,7 @@ fn super_set_property<'a>(
                 LanguageMode::Strict,
             )
         ) {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         }
         value.as_tagged(heap)
     })

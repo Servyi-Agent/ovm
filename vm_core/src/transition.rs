@@ -65,9 +65,9 @@ impl<'s> SiblingChange<'s> {
 
     fn sentinel<'a>(&self, heap: &'a Heap) -> Tagged<'a, Symbol> {
         match self {
-            Self::Prototype(_) => heap.known().prototype_transition_symbol.as_tagged(heap),
-            Self::Holey => heap.known().holey_transition_symbol.as_tagged(heap),
-            Self::Dictionary => heap.known().dictionary_transition_symbol.as_tagged(heap),
+            Self::Prototype(_) => heap.known().prototype_transition_symbol.get(heap),
+            Self::Holey => heap.known().holey_transition_symbol.get(heap),
+            Self::Dictionary => heap.known().dictionary_transition_symbol.get(heap),
         }
     }
 }
@@ -84,8 +84,8 @@ impl<'a> Tagged<'a, Value> {
     ) -> Result<StoreOutcome<'s>, VmError> {
         let strict = mode.is_strict();
         // null/undefined have no [[Prototype]]: property access throws
-        if self.ptr_eq(heap.known().null.as_tagged(heap).erase())
-            || self.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+        if self.ptr_eq(heap.known().null.get(heap).erase())
+            || self.ptr_eq(heap.known().undefined.get(heap).erase())
         {
             return Err(VmError::Type);
         }
@@ -135,7 +135,7 @@ impl<'a> Tagged<'a, Value> {
                 // no setter (undefined sentinel): sloppy-mode writes to a
                 // setter-less accessor are silently ignored, strict ones
                 // throw (ES 10.4.5.5 PutValue step 5)
-                if setter.ptr_eq(heap.known().undefined.as_tagged(heap).erase()) {
+                if setter.ptr_eq(heap.known().undefined.get(heap).erase()) {
                     return if strict {
                         Err(VmError::Type)
                     } else {
@@ -176,8 +176,8 @@ impl<'a> Tagged<'a, Value> {
         mode: LanguageMode,
     ) -> Result<bool, VmError> {
         let strict = mode.is_strict();
-        if self.ptr_eq(heap.known().null.as_tagged(heap).erase())
-            || self.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+        if self.ptr_eq(heap.known().null.get(heap).erase())
+            || self.ptr_eq(heap.known().undefined.get(heap).erase())
         {
             return Err(VmError::Type);
         }
@@ -793,8 +793,8 @@ impl Transition {
         value: Tagged<'a, Value>,
         semantics: StoreSemantics,
     ) -> Result<StoreOutcome<'s>, VmError> {
-        if recv.ptr_eq(heap.known().null.as_tagged(heap).erase())
-            || recv.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
+        if recv.ptr_eq(heap.known().null.get(heap).erase())
+            || recv.ptr_eq(heap.known().undefined.get(heap).erase())
         {
             return Err(VmError::Type);
         }
@@ -829,7 +829,7 @@ impl Transition {
             Lookup::NotFound => super_store_on_receiver(heap, scope, recv, name, value),
             Lookup::Accessor { pair, .. } => {
                 let setter = pair.set.get(heap);
-                if setter.ptr_eq(heap.known().undefined.as_tagged(heap).erase()) {
+                if setter.ptr_eq(heap.known().undefined.get(heap).erase()) {
                     return Ok(StoreOutcome::Done);
                 }
                 Ok(StoreOutcome::CallSetter {
@@ -865,7 +865,7 @@ impl Transition {
         if !desc.is_generic_descriptor() && desc.is_data_descriptor() != cur_is_data {
             return false;
         }
-        let undefined = heap.known().undefined.as_tagged(heap).erase();
+        let undefined = heap.known().undefined.get(heap).erase();
         if cur_is_data && desc.is_data_descriptor() {
             if current.writable != Some(true) {
                 if desc.writable == Some(true) {
@@ -1112,7 +1112,7 @@ impl Object {
                             && let Some(elements) = obj.elements_array(heap)
                             && i < elements.len()
                         {
-                            elements.set(heap, i, heap.known().the_hole.as_tagged(heap).erase());
+                            elements.set(heap, i, heap.known().the_hole.get(heap).erase());
                             Object::promote_holey(heap, scope, &receiver);
                             Prototype::element_mutated(heap, receiver.as_tagged(heap));
                         }
@@ -1185,7 +1185,7 @@ impl Object {
     ) -> Result<(), VmError> {
         let is_null = proto
             .as_tagged(heap)
-            .ptr_eq(heap.known().null.as_tagged(heap).erase());
+            .ptr_eq(heap.known().null.get(heap).erase());
         if !is_null && !{ proto.as_tagged(heap).is_strong_ptr() } {
             // silently ignore non-object prototypes (sloppy-mode semantics)
             return Ok(());
@@ -1210,7 +1210,7 @@ impl Object {
         }
 
         {
-            let null = heap.known().null.as_tagged(heap).erase();
+            let null = heap.known().null.get(heap).erase();
             let this = receiver.as_tagged(heap).erase();
             let start = proto.as_tagged(heap);
             fn walk<'b>(

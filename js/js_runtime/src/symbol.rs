@@ -20,8 +20,7 @@ pub fn symbol_constructor<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         // absent/undefined description is the empty string
-        let desc = if args.len() > 1 && args.get(heap, 1) != heap.known().undefined.as_tagged(heap)
-        {
+        let desc = if args.len() > 1 && args.get(heap, 1) != heap.known().undefined.get(heap) {
             let h = args.get_handle(heap, 1);
             match Object::to_string(vm, heap, state, h) {
                 Ok(Some(s)) => {
@@ -32,7 +31,7 @@ pub fn symbol_constructor<'a>(
                         .map(|d| d.to_rust_string(heap))
                         .unwrap_or_default()
                 }
-                Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+                Ok(None) => return heap.known().exception.get(heap).erase(),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             }
         } else {

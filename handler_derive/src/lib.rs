@@ -759,18 +759,10 @@ impl MatchRewriter {
                         let __next_pc = #pc
                             + vm_core::interpreter::base::<STRIDE>()
                             + STRIDE * const { bytecode::Opcode::#op.operands().len() };
-                        let __raw = acc.get(ctx.heap()).raw().to_bits();
-                        let __sentinel = {
-                            let __heap = ctx.heap();
-                            __heap
-                                .known()
-                                .exception
-                                .as_tagged(__heap)
-                                .raw()
-                                .to_bits()
-                        };
+                        let __threw =
+                            acc.get(ctx.heap()) == roots.exception.get(ctx.heap()).erase();
                         ctx.reload_code();
-                        if __raw == __sentinel {
+                        if __threw {
                             ctx.set_throw_pc(#pc);
                             crate::match_loop::throw_ptr()
                         } else {

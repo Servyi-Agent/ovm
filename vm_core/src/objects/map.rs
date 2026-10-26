@@ -238,19 +238,19 @@ impl Map {
         heap: &'a Heap,
         proto: Tagged<'a, Value>,
     ) -> Option<Tagged<'a, Map>> {
-        let sentinel = heap.known().prototype_transition_symbol.as_tagged(heap);
+        let sentinel = heap.known().prototype_transition_symbol.get(heap);
         self.find_special_transition(heap, sentinel, |target| {
             target.prototype.get(heap).ptr_eq(proto)
         })
     }
 
     pub fn find_holey_transition<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Map>> {
-        let sentinel = heap.known().holey_transition_symbol.as_tagged(heap);
+        let sentinel = heap.known().holey_transition_symbol.get(heap);
         self.find_special_transition(heap, sentinel, |_| true)
     }
 
     pub fn find_dictionary_transition<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, Map>> {
-        let sentinel = heap.known().dictionary_transition_symbol.as_tagged(heap);
+        let sentinel = heap.known().dictionary_transition_symbol.get(heap);
         self.find_special_transition(heap, sentinel, |_| true)
     }
 }
@@ -273,7 +273,7 @@ impl HeapObject for Map {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
-        self.header.map.init(heap.known().map_map.as_tagged(heap));
+        self.header.map.init(heap.known().map_map.get(heap));
         self.value_slot_count
             .set(heap, host, Smi::new(config.value_slot_count as i64));
         self.descriptor_count
@@ -288,7 +288,7 @@ impl HeapObject for Map {
             self.prototype_validity_cell.set_strong(
                 heap,
                 host,
-                heap.known().invalid_prototype_validity_cell.as_tagged(heap),
+                heap.known().invalid_prototype_validity_cell.get(heap),
             );
         } else {
             // Safety: sentinel word; writes are never weak pointers.
@@ -685,7 +685,7 @@ impl HeapObject for AccessorPair {
         let host = self.tagged(heap);
         self.header
             .map
-            .init(heap.known().accessor_pair_map.as_tagged(heap));
+            .init(heap.known().accessor_pair_map.get(heap));
         // the config's handles are roots; no allocation runs inside init
         self.get.set(heap, host, config.0.as_tagged(heap));
         self.set.set(heap, host, config.1.as_tagged(heap));

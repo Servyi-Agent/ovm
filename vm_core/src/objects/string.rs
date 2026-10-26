@@ -180,10 +180,7 @@ impl DenseString {
     /// common check a single pointer compare.
     #[inline]
     pub fn own_key<'a>(&self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Option<StringOwn> {
-        if name
-            .erase()
-            .ptr_eq(heap.known().strings.length.as_tagged(heap))
-        {
+        if name.erase().ptr_eq(heap.known().strings.length.get(heap)) {
             return Some(StringOwn::Length(self.len()));
         }
         match name.erase().classify_key(heap) {
@@ -409,10 +406,10 @@ impl HeapObject for DenseString {
         );
         let host = self.tagged(heap);
         let map = match config.0.encoding() {
-            Encoding::Latin1 => heap.known().dense_latin1_string_map,
-            Encoding::Utf16 => heap.known().dense_utf16_string_map,
+            Encoding::Latin1 => heap.known().dense_latin1_string_map.get(heap),
+            Encoding::Utf16 => heap.known().dense_utf16_string_map.get(heap),
         };
-        self.header.map.set(heap, host, map.as_tagged(heap));
+        self.header.map.set(heap, host, map);
         self.hash.set(heap, host, Smi::new(config.1));
         self.length.set(heap, host, Smi::new(config.0.len() as i64));
         let ptr = self.data_ptr();

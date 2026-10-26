@@ -65,7 +65,7 @@ impl<'a> Tagged<'a, Value> {
         name: Tagged<'a, SlotName>,
     ) -> Result<LoadOutcome<'a>, VmError> {
         let known = heap.known();
-        if self == known.null.as_tagged(heap) || self == known.undefined.as_tagged(heap) {
+        if self == known.null.get(heap) || self == known.undefined.get(heap) {
             return Err(VmError::Type);
         }
         if let Some(obj) = self.as_heap_object()
@@ -79,13 +79,11 @@ impl<'a> Tagged<'a, Value> {
             return Ok(LoadOutcome::Value(Smi::new(len as i64).into_tagged()));
         }
         let holder = if self.to_i64().is_some() || self.get_as::<Float>(heap).is_some() {
-            known.number_prototype.as_tagged(heap).erase()
+            known.number_prototype.get(heap).erase()
         } else if self.get_as::<DenseString>(heap).is_some() {
-            known.string_prototype.as_tagged(heap).erase()
-        } else if self == known.true_object.as_tagged(heap)
-            || self == known.false_object.as_tagged(heap)
-        {
-            known.boolean_prototype.as_tagged(heap).erase()
+            known.string_prototype.get(heap).erase()
+        } else if self == known.true_object.get(heap) || self == known.false_object.get(heap) {
+            known.boolean_prototype.get(heap).erase()
         } else {
             self
         };
@@ -93,13 +91,13 @@ impl<'a> Tagged<'a, Value> {
             Lookup::Data { slot, .. } => Ok(LoadOutcome::Value(slot.get(heap))),
             Lookup::Accessor { pair, .. } => {
                 let getter = pair.get.get(heap);
-                if getter == known.undefined.as_tagged(heap) {
-                    Ok(LoadOutcome::Value(known.undefined.as_tagged(heap).erase()))
+                if getter == known.undefined.get(heap) {
+                    Ok(LoadOutcome::Value(known.undefined.get(heap).erase()))
                 } else {
                     Ok(LoadOutcome::Getter(getter))
                 }
             }
-            Lookup::NotFound => Ok(LoadOutcome::Value(known.undefined.as_tagged(heap).erase())),
+            Lookup::NotFound => Ok(LoadOutcome::Value(known.undefined.get(heap).erase())),
         }
     }
 
@@ -136,9 +134,9 @@ impl<'a> Tagged<'a, Value> {
             }
             let known = heap.known();
             if !proto.is_strong_ptr()
-                || proto == known.null.as_tagged(heap).erase()
-                || proto == known.the_hole.as_tagged(heap).erase()
-                || proto == known.undefined.as_tagged(heap).erase()
+                || proto == known.null.get(heap).erase()
+                || proto == known.the_hole.get(heap).erase()
+                || proto == known.undefined.get(heap).erase()
             {
                 return false;
             }
@@ -218,9 +216,9 @@ impl<'a> Tagged<'a, Value> {
                     }
                     let known = heap.known();
                     if !proto.is_strong_ptr()
-                        || proto == known.null.as_tagged(heap).erase()
-                        || proto == known.the_hole.as_tagged(heap).erase()
-                        || proto == known.undefined.as_tagged(heap).erase()
+                        || proto == known.null.get(heap).erase()
+                        || proto == known.the_hole.get(heap).erase()
+                        || proto == known.undefined.get(heap).erase()
                     {
                         break;
                     }
@@ -361,7 +359,7 @@ impl<'a> Tagged<'a, Value> {
     }
 
     pub fn lookup_in_parents(self, heap: &'a Heap, name: Tagged<'a, SlotName>) -> Lookup<'a> {
-        if self == heap.known().null.as_tagged(heap) {
+        if self == heap.known().null.get(heap) {
             return Lookup::NotFound;
         }
         if let Some(pairs) = self.get_as::<FixedArray>(heap) {
@@ -431,13 +429,9 @@ impl Lookup<'_> {
                         }
                     }
                 }
-                Ok(LoadOutcome::Value(
-                    heap.known().undefined.as_tagged(heap).erase(),
-                ))
+                Ok(LoadOutcome::Value(heap.known().undefined.get(heap).erase()))
             }
-            SuperStart::End => Ok(LoadOutcome::Value(
-                heap.known().undefined.as_tagged(heap).erase(),
-            )),
+            SuperStart::End => Ok(LoadOutcome::Value(heap.known().undefined.get(heap).erase())),
         }
     }
 }
@@ -496,7 +490,7 @@ impl Lookup<'_> {
                         result,
                         heap,
                         |heap_ref: &Heap, tagged: Tagged<'a, Value>| {
-                            if tagged == heap_ref.known().exception.as_tagged(heap_ref) {
+                            if tagged == heap_ref.known().exception.get(heap_ref) {
                                 Ok(Coercion::Threw)
                             } else {
                                 Ok(Coercion::Value(tagged))
@@ -521,16 +515,15 @@ impl Lookup<'_> {
         }
         let attrs = scope.handle(attrs.as_tagged(heap));
         let names: [Handle<'_, Value>; 6] = {
-            let s = heap.known().strings;
+            let s = &heap.known().strings;
             [
-                s.value,
-                s.get,
-                s.set,
-                s.writable,
-                s.enumerable,
-                s.configurable,
+                scope.handle(s.value.get(heap).erase()),
+                scope.handle(s.get.get(heap).erase()),
+                scope.handle(s.set.get(heap).erase()),
+                scope.handle(s.writable.get(heap).erase()),
+                scope.handle(s.enumerable.get(heap).erase()),
+                scope.handle(s.configurable.get(heap).erase()),
             ]
-            .map(|n| scope.handle(n.as_tagged(heap).erase()))
         };
         let mut reads: Vec<Handle<'_, Value>> = Vec::new();
         for name in names {
@@ -541,7 +534,7 @@ impl Lookup<'_> {
             }
         }
         let (present, truthy) = {
-            let undef = heap.known().undefined.as_tagged(heap).erase();
+            let undef = heap.known().undefined.get(heap).erase();
             let present = [
                 !reads[0].as_tagged(heap).ptr_eq(undef),
                 !reads[1].as_tagged(heap).ptr_eq(undef),
@@ -591,7 +584,7 @@ fn super_start_from_proto<'a>(heap: &'a Heap, proto: Option<Tagged<'a, Value>>) 
     let Some(proto) = proto else {
         return SuperStart::End;
     };
-    if proto == heap.known().null.as_tagged(heap) || !proto.is_strong_ptr() {
+    if proto == heap.known().null.get(heap) || !proto.is_strong_ptr() {
         return SuperStart::End;
     }
     if let Some(parents) = proto.get_as::<FixedArray>(heap) {
@@ -620,10 +613,8 @@ fn dictionary_accessor_outcome<'a>(
         .get_as::<AccessorPair>(heap)?
         .get
         .get(heap);
-    if getter == heap.known().undefined.as_tagged(heap) {
-        return Some(LoadOutcome::Value(
-            heap.known().undefined.as_tagged(heap).erase(),
-        ));
+    if getter == heap.known().undefined.get(heap) {
+        return Some(LoadOutcome::Value(heap.known().undefined.get(heap).erase()));
     }
     Some(LoadOutcome::Getter(getter))
 }

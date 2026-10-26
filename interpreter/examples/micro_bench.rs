@@ -45,15 +45,15 @@ fn callable<'s>(
         let heap: &Heap = thread.heap();
         info.as_tagged(heap).set_feedback(heap, vector);
     }
-    let map = thread.heap().known().function_map;
+    let map = thread.heap().known().function_map.as_handle();
     let values = {
         let heap: &Heap = thread.heap();
         scope.stage(&[
             info.as_tagged(heap).erase(),
-            heap.known().empty_context.as_tagged(heap).erase(),
+            heap.known().empty_context.get(heap).erase(),
         ])
     };
-    let empty_fixed_array = thread.heap().known().empty_fixed_array;
+    let empty_fixed_array = thread.heap().known().empty_fixed_array.as_handle();
     let obj = thread.heap().allocate_object(
         scope,
         ObjectSlotsInit {

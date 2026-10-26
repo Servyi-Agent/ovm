@@ -97,7 +97,7 @@ impl Object {
             return None;
         }
         name.erase()
-            .ptr_eq(heap.known().strings.length.as_tagged(heap))
+            .ptr_eq(heap.known().strings.length.get(heap))
             .then(|| self.length.get(heap).erase())
     }
 
@@ -200,7 +200,7 @@ impl Object {
                 return None;
             }
             let v = elements.at(heap, i);
-            if v == heap.known().the_hole.as_tagged(heap) {
+            if v == heap.known().the_hole.get(heap) {
                 return None;
             }
             Some(v)
@@ -284,7 +284,7 @@ impl<'a> Tagged<'a, Value> {
         if i >= elements.len() {
             return Err(VmError::OutOfBounds);
         }
-        if kind.is_holey() && elements.at(heap, i) == heap.known().the_hole.as_tagged(heap) {
+        if kind.is_holey() && elements.at(heap, i) == heap.known().the_hole.get(heap) {
             return Err(VmError::OutOfBounds);
         }
         elements.set(heap, i, value);
@@ -382,7 +382,7 @@ impl Object {
                 } else if new_capacity > 1000 {
                     let mut used = 0usize;
                     for k in 0..elements.len() {
-                        if elements.at(heap, k) != heap.known().the_hole.as_tagged(heap) {
+                        if elements.at(heap, k) != heap.known().the_hole.get(heap) {
                             used += 1;
                         }
                     }
@@ -502,7 +502,7 @@ impl Object {
         if let Some(elements) = obj.elements_array(heap) {
             for k in 0..elements.len() {
                 let v = elements.at(heap, k);
-                if v != heap.known().the_hole.as_tagged(heap) {
+                if v != heap.known().the_hole.get(heap) {
                     entries.push((k, scope.handle(v)));
                 }
             }
@@ -670,22 +670,22 @@ impl Object {
         let formal_length = info_ref.formal_length();
         let function_name = match info_ref.name(heap) {
             Some(name) => scope.handle(name),
-            None => scope.handle(heap.known().strings.empty.as_tagged(heap).erase()),
+            None => scope.handle(heap.known().strings.empty.get(heap).erase()),
         };
-        let map = if kind.is_class_constructor() {
-            heap.known().class_constructor_map
+        let map = scope.handle(if kind.is_class_constructor() {
+            heap.known().class_constructor_map.get(heap)
         } else if kind.is_constructible() {
-            heap.known().function_map
+            heap.known().function_map.get(heap)
         } else {
-            heap.known().non_constructor_function_map
-        };
+            heap.known().non_constructor_function_map.get(heap)
+        });
         // class constructors carry a third hidden slot: the instance-field
         // array ([key0, init0, ...]); undefined until SetClassFields
         let args = if kind.is_class_constructor() {
             scope.stage(&[
                 info.as_tagged(heap).erase(),
                 context.as_tagged(heap).erase(),
-                heap.known().undefined.as_tagged(heap).erase(),
+                heap.known().undefined.get(heap).erase(),
             ])
         } else {
             scope.stage(&[
@@ -695,8 +695,8 @@ impl Object {
         };
         let function = heap.new_object(scope, map, args).as_handle(scope);
 
-        let length_key = heap.known().strings.length;
-        let name_key = heap.known().strings.name;
+        let length_key = scope.handle(heap.known().strings.length.get(heap));
+        let name_key = scope.handle(heap.known().strings.name.get(heap));
         if !Object::define_own_property(
             heap,
             scope,
@@ -727,11 +727,12 @@ impl Object {
         }
 
         if kind.needs_prototype() {
+            let proto_map = scope.handle(heap.known().object_initial_map.get(heap));
             let proto = heap
-                .new_object(scope, heap.known().object_initial_map, HandleSlice::EMPTY)
+                .new_object(scope, proto_map, HandleSlice::EMPTY)
                 .as_handle(scope);
-            let constructor = heap.known().strings.constructor;
-            let prototype = heap.known().strings.prototype;
+            let constructor = scope.handle(heap.known().strings.constructor.get(heap));
+            let prototype = scope.handle(heap.known().strings.prototype.get(heap));
             if !Object::define_own_property(
                 heap,
                 scope,
@@ -783,28 +784,28 @@ impl Object {
                 state,
                 value,
                 value,
-                heap.known().to_primitive_symbol.erase(),
+                scope.handle(heap.known().to_primitive_symbol.get(heap).erase()),
             )? {
                 Coercion::Threw => return Ok(Coercion::Threw),
                 Coercion::Value(v) => scope.handle(v),
             };
-            if exotic.as_tagged(heap) != heap.known().undefined.as_tagged(heap)
-                && exotic.as_tagged(heap) != heap.known().null.as_tagged(heap)
+            if exotic.as_tagged(heap) != heap.known().undefined.get(heap)
+                && exotic.as_tagged(heap) != heap.known().null.get(heap)
             {
                 if !exotic.as_tagged(heap).is_callable(heap) {
                     // GetMethod: a non-callable, non-nullish method is a TypeError
                     return Err(VmError::Type);
                 }
-                let s = heap.known().strings;
-                let hint_string = match hint {
-                    Hint::Default => s.default.as_tagged(heap).erase(),
-                    Hint::Number => s.number.as_tagged(heap).erase(),
-                    Hint::String => s.string.as_tagged(heap).erase(),
-                };
-                let args = scope.stage(&[hint_string]);
+                let s = &heap.known().strings;
+                let hint_string = scope.handle(match hint {
+                    Hint::Default => s.default.get(heap).erase(),
+                    Hint::Number => s.number.get(heap).erase(),
+                    Hint::String => s.string.get(heap).erase(),
+                });
+                let args = scope.stage(&[hint_string.as_tagged(heap)]);
                 let result =
                     scope.handle(HostCtx::enter(vm, &mut *heap, state, exotic, args, None)?);
-                if result.as_tagged(heap) == heap.known().exception.as_tagged(heap) {
+                if result.as_tagged(heap) == heap.known().exception.get(heap) {
                     return Ok(Coercion::Threw);
                 }
                 return if result.as_tagged(heap).is_primitive(heap) {
@@ -816,11 +817,17 @@ impl Object {
 
             // 2. OrdinaryToPrimitive: hint string → toString first, else valueOf first
             let method_names: [Handle<'_, Value>; 2] = {
-                let s = heap.known().strings;
+                let s = &heap.known().strings;
                 if hint == Hint::String {
-                    [s.to_string.erase(), s.value_of.erase()]
+                    [
+                        scope.handle(s.to_string.get(heap).erase()),
+                        scope.handle(s.value_of.get(heap).erase()),
+                    ]
                 } else {
-                    [s.value_of.erase(), s.to_string.erase()]
+                    [
+                        scope.handle(s.value_of.get(heap).erase()),
+                        scope.handle(s.to_string.get(heap).erase()),
+                    ]
                 }
             };
             for name in method_names {
@@ -834,7 +841,7 @@ impl Object {
                 let args = scope.stage(&[value.as_tagged(heap)]);
                 let result =
                     scope.handle(HostCtx::enter(vm, &mut *heap, state, method, args, None)?);
-                if result.as_tagged(heap) == heap.known().exception.as_tagged(heap) {
+                if result.as_tagged(heap) == heap.known().exception.get(heap) {
                     return Ok(Coercion::Threw);
                 }
                 if result.as_tagged(heap).is_primitive(heap) {
@@ -955,26 +962,25 @@ impl Object {
 
     pub fn type_of<'a>(heap: &'a Heap, v: Tagged<'a, Value>) -> Tagged<'a, Value> {
         let known = heap.known();
-        let s = known.strings;
+        let s = &known.strings;
         // `null` needs no arm of its own: it is a non-callable object, and
         // so is anything that is not one of the primitive kinds above
         let type_name = if v.is_smi() || v.get_as::<Float>(heap).is_some() {
-            s.number
-        } else if v == known.undefined.as_tagged(heap) || v == known.the_hole.as_tagged(heap) {
-            s.undefined
-        } else if v == known.true_object.as_tagged(heap) || v == known.false_object.as_tagged(heap)
-        {
-            s.boolean
+            s.number.get(heap)
+        } else if v == known.undefined.get(heap) || v == known.the_hole.get(heap) {
+            s.undefined.get(heap)
+        } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
+            s.boolean.get(heap)
         } else if v.get_as::<DenseString>(heap).is_some() {
-            s.string
+            s.string.get(heap)
         } else if v.get_as::<Symbol>(heap).is_some() {
-            s.symbol
+            s.symbol.get(heap)
         } else if v.is_callable(heap) {
-            s.function
+            s.function.get(heap)
         } else {
-            s.object
+            s.object.get(heap)
         };
-        type_name.as_tagged(heap).erase()
+        type_name.erase()
     }
 
     pub fn instance_of(
@@ -996,7 +1002,7 @@ impl Object {
                 state,
                 callable,
                 callable,
-                heap.known().strings.prototype.erase(),
+                scope.handle(heap.known().strings.prototype.get(heap).erase()),
             )? {
                 Coercion::Threw => return Ok(None),
                 Coercion::Value(v) => scope.handle(v),
@@ -1025,7 +1031,7 @@ impl Object {
         if proto.ptr_eq(target) {
             return true;
         }
-        if proto == heap.known().null.as_tagged(heap) {
+        if proto == heap.known().null.get(heap) {
             return false;
         }
         if let Some(parents) = proto.get_as::<FixedArray>(heap) {
@@ -1046,7 +1052,7 @@ impl Object {
         new_target: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, Value>>, VmError> {
         state.handle_scope(|scope| {
-            let proto_name = scope.handle(heap.known().strings.prototype.as_tagged(heap).erase());
+            let proto_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
             let proto =
                 Lookup::get_property_on(vm, heap, state, new_target, new_target, proto_name)?;
             let proto = match proto {
@@ -1056,8 +1062,9 @@ impl Object {
             // non-object prototypes fall back to the ordinary prototype
             let proto = scope.cast::<Object>(heap, proto.as_tagged(heap));
             let known = heap.known();
+            let map = scope.handle(known.object_initial_map.get(heap));
             let obj = heap
-                .new_object(&scope, known.object_initial_map, HandleSlice::EMPTY)
+                .new_object(&scope, map, HandleSlice::EMPTY)
                 .as_handle(&scope);
             if let Some(proto) = proto {
                 Object::set_prototype(heap, &scope, obj, proto.erase())?;

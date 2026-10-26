@@ -441,7 +441,7 @@ fn run_test_inner(
             if {
                 {
                     let heap = &*thread.heap();
-                    v == heap.known().exception.as_tagged(heap).raw()
+                    v == heap.known().exception.get(heap).raw()
                 }
             } =>
         {

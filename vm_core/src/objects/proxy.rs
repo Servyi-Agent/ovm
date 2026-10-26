@@ -32,7 +32,7 @@ impl ProxyObject {
 
     /// Whether the proxy has been revoked (handler nulled).
     pub fn is_revoked(&self, heap: &Heap) -> bool {
-        self.handler.raw() == heap.known().null.as_tagged(heap)
+        self.handler.raw() == heap.known().null.get(heap)
     }
 
     /// (target, handler) anchored to `heap`; caller checks revocation.
@@ -102,21 +102,21 @@ pub enum Trap {
 
 impl Trap {
     fn name<'a>(self, heap: &'a Heap) -> Tagged<'a, SlotName> {
-        let s = heap.known().strings;
+        let s = &heap.known().strings;
         match self {
-            Self::Get => s.get.as_tagged(heap),
-            Self::Set => s.set.as_tagged(heap),
-            Self::Has => s.has.as_tagged(heap),
-            Self::DeleteProperty => s.delete_property.as_tagged(heap),
-            Self::GetOwnPropertyDescriptor => s.get_own_property_descriptor.as_tagged(heap),
-            Self::DefineProperty => s.define_property.as_tagged(heap),
-            Self::GetPrototypeOf => s.get_prototype_of.as_tagged(heap),
-            Self::SetPrototypeOf => s.set_prototype_of.as_tagged(heap),
-            Self::IsExtensible => s.is_extensible.as_tagged(heap),
-            Self::PreventExtensions => s.prevent_extensions.as_tagged(heap),
-            Self::OwnKeys => s.own_keys.as_tagged(heap),
-            Self::Apply => s.apply.as_tagged(heap),
-            Self::Construct => s.construct.as_tagged(heap),
+            Self::Get => s.get.get(heap),
+            Self::Set => s.set.get(heap),
+            Self::Has => s.has.get(heap),
+            Self::DeleteProperty => s.delete_property.get(heap),
+            Self::GetOwnPropertyDescriptor => s.get_own_property_descriptor.get(heap),
+            Self::DefineProperty => s.define_property.get(heap),
+            Self::GetPrototypeOf => s.get_prototype_of.get(heap),
+            Self::SetPrototypeOf => s.set_prototype_of.get(heap),
+            Self::IsExtensible => s.is_extensible.get(heap),
+            Self::PreventExtensions => s.prevent_extensions.get(heap),
+            Self::OwnKeys => s.own_keys.get(heap),
+            Self::Apply => s.apply.get(heap),
+            Self::Construct => s.construct.get(heap),
         }
     }
 }
@@ -152,8 +152,8 @@ fn get_trap<'s>(
         Coercion::Threw => Ok(TrapLookup::Threw),
         Coercion::Value(v) => {
             let v = scope.handle(v);
-            let nullish = v.as_tagged(heap) == heap.known().undefined.as_tagged(heap)
-                || v.as_tagged(heap) == heap.known().null.as_tagged(heap);
+            let nullish = v.as_tagged(heap) == heap.known().undefined.get(heap)
+                || v.as_tagged(heap) == heap.known().null.get(heap);
             if nullish {
                 Ok(TrapLookup::None)
             } else {
@@ -177,7 +177,7 @@ fn call_trap<'a>(
     let words: Vec<Tagged<'_, Value>> = args.iter().map(|h| h.as_tagged(heap)).collect();
     let staged = scope.stage(&words);
     let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, *trap, staged, None)?);
-    let exception = heap.known().exception.as_tagged(heap);
+    let exception = heap.known().exception.get(heap);
     if result.as_tagged(heap) == exception {
         Ok(Coercion::Threw)
     } else {
@@ -194,7 +194,7 @@ fn enter_trap<'s>(
     trap: Trap,
 ) -> Result<(Handle<'s, Value>, Handle<'s, Value>), VmError> {
     let (target, handler) = parts(heap, proxy.as_tagged(heap)).expect("caller verified a proxy");
-    let revoked = handler == heap.known().null.as_tagged(heap);
+    let revoked = handler == heap.known().null.get(heap);
     if revoked {
         return Err(revoked_error(trap));
     }
@@ -235,7 +235,7 @@ fn own_descriptor_h<'s>(
         return Ok(Flow::Value(desc.as_ref().map(PartialDescriptor::from)));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
-    let revoked = handler.ptr_eq(heap.known().null.as_tagged(heap).erase());
+    let revoked = handler.ptr_eq(heap.known().null.get(heap).erase());
     if revoked {
         return Err(revoked_error(Trap::GetOwnPropertyDescriptor));
     }
@@ -259,7 +259,7 @@ fn own_descriptor_h<'s>(
             };
             let is_undefined = result
                 .as_tagged(heap)
-                .ptr_eq(heap.known().undefined.as_tagged(heap).erase());
+                .ptr_eq(heap.known().undefined.get(heap).erase());
             if is_undefined {
                 return Ok(Flow::Value(None));
             }
@@ -287,7 +287,7 @@ fn is_extensible_h(
         }));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
-    let revoked = handler == heap.known().null.as_tagged(heap);
+    let revoked = handler == heap.known().null.get(heap);
     if revoked {
         return Err(revoked_error(Trap::IsExtensible));
     }
@@ -335,31 +335,38 @@ fn descriptor_object<'s>(
     partial: &PartialDescriptor<'_>,
 ) -> Result<Handle<'s, Value>, VmError> {
     {
+        let map = scope.handle(heap.known().object_initial_map.get(heap));
         let obj = heap
-            .new_object(scope, heap.known().object_initial_map, HandleSlice::EMPTY)
+            .new_object(scope, map, HandleSlice::EMPTY)
             .as_handle(scope);
         // the well-known field names are persistent roots: they cross the
         // define allocations without further rooting
-        let s = heap.known().strings;
+        let s = &heap.known().strings;
+        let value_name = scope.handle(s.value.get(heap));
+        let writable_name = scope.handle(s.writable.get(heap));
+        let get_name = scope.handle(s.get.get(heap));
+        let set_name = scope.handle(s.set.get(heap));
+        let enumerable_name = scope.handle(s.enumerable.get(heap));
+        let configurable_name = scope.handle(s.configurable.get(heap));
         // spec field order: value, writable, get, set, enumerable, configurable
         let mut fields: Vec<(Handle<'_, SlotName>, Handle<'_, Value>)> = Vec::new();
         if let Some(v) = partial.value {
-            fields.push((s.value, v));
+            fields.push((value_name, v));
         }
         if let Some(b) = partial.writable {
-            fields.push((s.writable, scope.handle(Convert::boolean(heap, b))));
+            fields.push((writable_name, scope.handle(Convert::boolean(heap, b))));
         }
         if let Some(v) = partial.get {
-            fields.push((s.get, v));
+            fields.push((get_name, v));
         }
         if let Some(v) = partial.set {
-            fields.push((s.set, v));
+            fields.push((set_name, v));
         }
         if let Some(b) = partial.enumerable {
-            fields.push((s.enumerable, scope.handle(Convert::boolean(heap, b))));
+            fields.push((enumerable_name, scope.handle(Convert::boolean(heap, b))));
         }
         if let Some(b) = partial.configurable {
-            fields.push((s.configurable, scope.handle(Convert::boolean(heap, b))));
+            fields.push((configurable_name, scope.handle(Convert::boolean(heap, b))));
         }
         for (name, value) in fields {
             Object::define_own_property(heap, scope, obj, name, PropertyDescriptor::data(value))?;
@@ -386,7 +393,7 @@ fn define_internal_h<'s>(
     if obj.as_tagged(heap).is_primitive(heap) {
         return Err(VmError::Type);
     }
-    let undefined = scope.handle(heap.known().undefined.as_tagged(heap).erase());
+    let undefined = scope.handle(heap.known().undefined.get(heap).erase());
     // dense array elements: element defines land in the backing
     // store, not as descriptors
     let element = 'element: {
@@ -553,7 +560,7 @@ fn ordinary_set_forward<'a>(
             define_flow_to_coercion(heap, flow)
         }
         SetLookup::Setter(setter) => {
-            if setter.as_tagged(heap) == heap.known().undefined.as_tagged(heap) {
+            if setter.as_tagged(heap) == heap.known().undefined.get(heap) {
                 return Ok(Coercion::Value(Convert::boolean(heap, false)));
             }
             let words = [
@@ -562,7 +569,7 @@ fn ordinary_set_forward<'a>(
             ];
             let staged = scope.stage(&words);
             let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, setter, staged, None)?);
-            let exception = heap.known().exception.as_tagged(heap);
+            let exception = heap.known().exception.get(heap);
             if result.as_tagged(heap) == exception {
                 Ok(Coercion::Threw)
             } else {
@@ -627,7 +634,7 @@ fn get_h<'a>(
             };
             if let Some(d) = desc.as_ref().filter(|d| d.configurable == Some(false)) {
                 {
-                    let undefined = heap.known().undefined.as_tagged(heap).erase();
+                    let undefined = heap.known().undefined.get(heap).erase();
                     if d.is_data_descriptor()
                         && d.writable == Some(false)
                         && !Compare::same_value(
@@ -698,7 +705,7 @@ fn set_h<'a, 's>(
             };
             if let Some(d) = desc.as_ref().filter(|d| d.configurable == Some(false)) {
                 {
-                    let undefined = heap.known().undefined.as_tagged(heap).erase();
+                    let undefined = heap.known().undefined.get(heap).erase();
                     if d.is_data_descriptor()
                         && d.writable == Some(false)
                         && !Compare::same_value(
@@ -924,7 +931,7 @@ fn apply_h<'a>(
     let (target, handler) = enter_trap(scope, heap, proxy, Trap::Apply)?;
     let this_arg = match args.first() {
         Some(h) => *h,
-        None => scope.handle(heap.known().undefined.as_tagged(heap).erase()),
+        None => scope.handle(heap.known().undefined.get(heap).erase()),
     };
     match get_trap(vm, heap, state, scope, &handler, Trap::Apply)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
@@ -936,7 +943,7 @@ fn apply_h<'a>(
             }
             let staged = scope.stage(&all);
             let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, target, staged, None)?);
-            let exception = heap.known().exception.as_tagged(heap);
+            let exception = heap.known().exception.get(heap);
             if result.as_tagged(heap) == exception {
                 Ok(Coercion::Threw)
             } else {
@@ -994,7 +1001,7 @@ fn construct_h<'a>(
                 .flatten()
                 .is_some_and(|info| info.function_kind().is_derived_class_constructor());
             let receiver = if derived {
-                scope.handle(heap.known().the_hole.as_tagged(heap).erase())
+                scope.handle(heap.known().the_hole.get(heap).erase())
             } else {
                 let Some(receiver) =
                     Object::create_construct_receiver_value(vm, heap, state, *new_target)?
@@ -1017,7 +1024,7 @@ fn construct_h<'a>(
                 staged,
                 Some(*new_target),
             )?);
-            let exception = heap.known().exception.as_tagged(heap);
+            let exception = heap.known().exception.get(heap);
             if result.as_tagged(heap) == exception {
                 return Ok(Coercion::Threw);
             }
@@ -1117,7 +1124,7 @@ fn prevent_extensions_h<'a>(
         return Ok(Coercion::Value(Convert::boolean(heap, true)));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
-    let revoked = handler == heap.known().null.as_tagged(heap);
+    let revoked = handler == heap.known().null.get(heap);
     if revoked {
         return Err(revoked_error(Trap::PreventExtensions));
     }
@@ -1165,7 +1172,7 @@ fn is_extensible_entry_h<'a>(
         return Ok(Coercion::Value(Convert::boolean(heap, extensible)));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
-    let revoked = handler == heap.known().null.as_tagged(heap);
+    let revoked = handler == heap.known().null.get(heap);
     if revoked {
         return Err(revoked_error(Trap::IsExtensible));
     }
@@ -1221,7 +1228,7 @@ impl Proxy {
         let target = scope.handle(target);
         let handler = scope.handle(handler);
         let known = heap.known();
-        let map: Handle<'_, Map> = {
+        let map = {
             let kind = target
                 .as_tagged(heap)
                 .as_heap_object()
@@ -1231,13 +1238,14 @@ impl Proxy {
                 .get(heap)
                 .kind();
             if kind.is_constructor() {
-                known.proxy_constructor_map
+                known.proxy_constructor_map.get(heap)
             } else if kind.is_callable() {
-                known.proxy_callable_map
+                known.proxy_callable_map.get(heap)
             } else {
-                known.proxy_map
+                known.proxy_map.get(heap)
             }
         };
+        let map = scope.handle(map);
         heap.allocate::<ProxyObject>(ProxyInit {
             map,
             target,
@@ -1254,7 +1262,7 @@ impl Proxy {
             return;
         }
         let host = proxy.erase();
-        let null = heap.known().null.as_tagged(heap).erase();
+        let null = heap.known().null.get(heap).erase();
         p.target.set(heap, host, null);
         p.handler.set(heap, host, null);
     }

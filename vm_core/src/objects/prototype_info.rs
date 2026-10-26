@@ -52,7 +52,7 @@ impl HeapObject for PrototypeInfo {
         let host = self.tagged(heap);
         self.header
             .map
-            .init(heap.known().prototype_info_map.as_tagged(heap));
+            .init(heap.known().prototype_info_map.get(heap));
         self.prototype_users.clear(heap);
         self.registry_slot
             .set(heap, host, Smi::new(config.registry_slot));

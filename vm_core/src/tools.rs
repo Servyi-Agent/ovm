@@ -18,7 +18,7 @@ impl KetteTools {
     ) -> Tagged<'a, Value> {
         let HostCtx { heap, .. } = ctx;
         heap.collect_minor();
-        heap.known().undefined.as_tagged(heap).erase()
+        heap.known().undefined.get(heap).erase()
     }
 
     pub fn force_major_gc<'a>(
@@ -28,7 +28,7 @@ impl KetteTools {
     ) -> Tagged<'a, Value> {
         let HostCtx { heap, .. } = ctx;
         heap.collect();
-        heap.known().undefined.as_tagged(heap).erase()
+        heap.known().undefined.get(heap).erase()
     }
 
     pub fn shutdown<'a>(
@@ -42,8 +42,8 @@ impl KetteTools {
         heap.cancel_executions(&|| {});
         vm.note_shutdown();
         state.set_termination(Termination::Shutdown);
-        state.set_pending_exception(heap.known().undefined.as_tagged(heap));
-        heap.known().exception.as_tagged(heap).erase()
+        state.set_pending_exception(heap.known().undefined.get(heap));
+        heap.known().exception.get(heap).erase()
     }
 
     pub fn install(
@@ -51,13 +51,13 @@ impl KetteTools {
         interner: &StringInterner,
         scope: &HandleScope<'_>,
     ) -> Result<(), VmError> {
-        let global = heap.known().global_object;
+        let global = heap.known().global_object.as_handle();
         let map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
                 descriptors: &[],
-                prototype: heap.known().object_prototype.erase(),
+                prototype: heap.known().object_prototype.as_handle().erase(),
             },
             scope,
         );

@@ -66,13 +66,13 @@ impl HeapObject for DataHandler {
         let host = self.tagged(heap);
         let known = heap.known();
         let map = match config.data.len() {
-            0 => known.handler_map_0,
-            1 => known.handler_map_1,
-            2 => known.handler_map_2,
-            3 => known.handler_map_3,
+            0 => known.handler_map_0.get(heap),
+            1 => known.handler_map_1.get(heap),
+            2 => known.handler_map_2.get(heap),
+            3 => known.handler_map_3.get(heap),
             n => panic!("unsupported DataHandler data count {n}"),
         };
-        self.header.map.init(map.as_tagged(heap));
+        self.header.map.init(map);
         self.smi_handler.set(heap, host, config.smi_handler);
         self.validity_cell.set(heap, host, config.validity_cell);
         for (i, value) in config.data.iter().enumerate() {

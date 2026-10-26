@@ -68,46 +68,31 @@ impl FloatReg {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
 #[derive(Clone, Copy)]
-pub struct RootsArg<'a>(PhantomData<&'a ()>);
+pub struct RootsArg<'s>(&'s WellKnown);
 
-#[cfg(not(target_arch = "aarch64"))]
-impl<'a> RootsArg<'a> {
+impl<'s> RootsArg<'s> {
     #[inline(always)]
-    pub fn new() -> RootsArg<'a> {
-        RootsArg(PhantomData)
+    pub fn new(known: &'s WellKnown) -> RootsArg<'s> {
+        RootsArg(known)
     }
 
     #[inline(always)]
-    pub fn from_heap(_heap: &Heap) -> RootsArg<'a> {
-        RootsArg(PhantomData)
+    pub fn from_heap(heap: &'s Heap) -> RootsArg<'s> {
+        RootsArg(heap.known())
     }
 
     #[inline(always)]
-    pub fn known<'h>(&self, heap: &'h Heap) -> &'static WellKnown {
-        heap.known()
+    pub fn known(&self, _heap: &Heap) -> &'s WellKnown {
+        self.0
     }
 }
 
-#[cfg(target_arch = "aarch64")]
-#[derive(Clone, Copy)]
-pub struct RootsArg<'a>(&'static WellKnown, PhantomData<&'a ()>);
-
-#[cfg(target_arch = "aarch64")]
-impl<'a> RootsArg<'a> {
-    #[inline(always)]
-    pub fn new(known: &'static WellKnown) -> RootsArg<'a> {
-        RootsArg(known, PhantomData)
-    }
+impl core::ops::Deref for RootsArg<'_> {
+    type Target = WellKnown;
 
     #[inline(always)]
-    pub fn from_heap(heap: &Heap) -> RootsArg<'a> {
-        RootsArg(heap.known(), PhantomData)
-    }
-
-    #[inline(always)]
-    pub fn known<'h>(&self, _heap: &'h Heap) -> &'static WellKnown {
+    fn deref(&self) -> &WellKnown {
         self.0
     }
 }
@@ -199,7 +184,7 @@ fn op_load_zero(frame: Frame) {
 #[handler(LoadNull)]
 fn op_load_null(frame: Frame) {
     let heap = frame.ctx().heap();
-    let val = roots.known(heap).null.as_tagged(heap).erase();
+    let val = roots.null.get(heap).erase();
     frame.set_acc(val);
     next!()
 }
@@ -216,7 +201,7 @@ fn op_load_constant(frame: Frame) {
 #[handler(LoadUndefined)]
 fn op_load_undefined(frame: Frame) {
     let heap = frame.ctx().heap();
-    let v = roots.known(heap).undefined.as_tagged(heap).erase();
+    let v = roots.undefined.get(heap).erase();
     frame.set_acc(v);
     next!()
 }
@@ -224,7 +209,7 @@ fn op_load_undefined(frame: Frame) {
 #[handler(LoadTrue)]
 fn op_load_true(frame: Frame) {
     let heap = frame.ctx().heap();
-    let v = roots.known(heap).true_object.as_tagged(heap).erase();
+    let v = roots.true_object.get(heap).erase();
     frame.set_acc(v);
     next!()
 }
@@ -232,7 +217,7 @@ fn op_load_true(frame: Frame) {
 #[handler(LoadFalse)]
 fn op_load_false(frame: Frame) {
     let heap = frame.ctx().heap();
-    let v = roots.known(heap).false_object.as_tagged(heap).erase();
+    let v = roots.false_object.get(heap).erase();
     frame.set_acc(v);
     next!()
 }
@@ -240,7 +225,7 @@ fn op_load_false(frame: Frame) {
 #[handler(LoadHole)]
 fn op_load_hole(frame: Frame) {
     let heap = frame.ctx().heap();
-    let v = roots.known(heap).the_hole.as_tagged(heap).erase();
+    let v = roots.the_hole.get(heap).erase();
     frame.set_acc(v);
     next!()
 }
@@ -285,7 +270,7 @@ fn op_load_current_closure(frame: Frame) {
 fn op_load_global(frame: Frame) {
     let heap = frame.ctx().heap();
     let fb = frame.unsigned::<1>();
-    let global = roots.known(heap).global_object.as_tagged(heap).erase();
+    let global = roots.global_object.get(heap).erase();
     if let Some(Hit::Value(v)) =
         InlineCache::try_load(heap, frame.ctx().feedback_ref(heap), fb, global)
     {
@@ -1204,11 +1189,7 @@ fn op_jump_if_falsy(frame: Frame) {
 #[handler(JumpIfNotUndefined)]
 fn op_jump_if_not_undefined(frame: Frame) {
     let off = frame.signed::<0>();
-    let undefined = roots
-        .known(frame.ctx().heap())
-        .undefined
-        .as_tagged(frame.ctx().heap())
-        .erase();
+    let undefined = roots.undefined.get(frame.ctx().heap()).erase();
     if frame.acc() != undefined {
         dispatch!(frame.ip().wrapping_offset(off as isize))
     }
@@ -1275,7 +1256,7 @@ fn op_create_empty_array_literal(frame: Frame) {
     let state = frame.ctx().state();
     let v = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
-        let map = roots.known(heap).js_array_map;
+        let map = scope.handle(roots.js_array_map.get(heap));
         heap.new_object(&scope, map, HandleSlice::EMPTY).erase()
     });
     frame.set_acc(v);
@@ -1312,7 +1293,7 @@ fn op_create_empty_object_literal(frame: Frame) {
     let state = frame.ctx().state();
     let val = state.handle_scope(|scope| {
         let heap = frame.ctx().heap_mut();
-        let map = roots.known(heap).object_initial_map;
+        let map = scope.handle(roots.object_initial_map.get(heap));
         heap.new_object(&scope, map, HandleSlice::EMPTY).erase()
     });
     frame.set_acc(val);
@@ -1508,12 +1489,9 @@ fn op_create_function_context(frame: Frame) {
             return raise_runtime(vm, heap, state, VmError::Type);
         };
         let slots = if count == 0 {
-            roots.known(heap).empty_fixed_array
+            scope.handle(roots.empty_fixed_array.get(heap))
         } else {
-            let values = scope.stage(&vec![
-                roots.known(heap).the_hole.as_tagged(heap).erase();
-                count
-            ]);
+            let values = scope.stage(&vec![roots.the_hole.get(heap).erase(); count]);
             heap.allocate_handle::<FixedArray>(values, &scope)
         };
         let ctx_obj = heap.allocate::<ContextObject>(ContextInit {
@@ -1537,7 +1515,7 @@ fn op_throw(frame: Frame) {
 #[handler(ThrowReferenceErrorIfHole)]
 fn op_throw_reference_error_if_hole(frame: Frame) {
     let heap = frame.ctx().heap();
-    if frame.acc() == roots.known(heap).the_hole.as_tagged(heap).erase() {
+    if frame.acc() == roots.the_hole.get(heap).erase() {
         let _ = frame.ctx().raise_tag(VmError::Reference);
         tail!(throw_dispatch)
     }

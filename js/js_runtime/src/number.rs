@@ -28,14 +28,14 @@ pub fn number_constructor<'a>(
         })
     );
     let Some(n) = n else {
-        return heap.known().exception.as_tagged(heap).erase();
+        return heap.known().exception.get(heap).erase();
     };
 
     if !is_construct {
         return heap.new_number(n);
     }
     state.handle_scope(|scope| {
-        let map = heap.known().number_wrapper_map;
+        let map = scope.handle(heap.known().number_wrapper_map.get(heap));
         let value = scope.handle(heap.new_number(n));
         heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap)]))
             .erase()
@@ -94,7 +94,7 @@ pub fn number_to_fixed<'a>(
     nctx.handle_scope(|vm, heap, state, scope| {
         let x = rt_try!(vm, heap, state, number_receiver(heap, args));
         let digits = match (args.len() > 1).then(|| args.get(heap, 1)) {
-            Some(d) if d != heap.known().undefined.as_tagged(heap) => {
+            Some(d) if d != heap.known().undefined.get(heap) => {
                 scope.handle(d);
                 rt_try!(vm, heap, state, d.to_number(heap)) as i64
             }
@@ -127,7 +127,7 @@ pub fn number_to_precision<'a>(
     nctx.handle_scope(|vm, heap, state, scope| {
         let x = rt_try!(vm, heap, state, number_receiver(heap, args));
         let arg = args.get(heap, 1);
-        if arg == heap.known().undefined.as_tagged(heap) {
+        if arg == heap.known().undefined.get(heap) {
             let v = scope.handle(heap.new_number(x));
             let s = match Convert::to_string(heap, &scope, v) {
                 Ok(v) => scope.handle(v),

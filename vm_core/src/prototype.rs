@@ -248,9 +248,9 @@ fn trackable_prototype<'a>(heap: &'a Heap, value: Tagged<'a, Value>) -> Option<T
     if !value.is_strong_ptr() {
         return None;
     }
-    if value.ptr_eq(heap.known().null.as_tagged(heap).erase())
-        || value.ptr_eq(heap.known().undefined.as_tagged(heap).erase())
-        || value.ptr_eq(heap.known().the_hole.as_tagged(heap).erase())
+    if value.ptr_eq(heap.known().null.get(heap).erase())
+        || value.ptr_eq(heap.known().undefined.get(heap).erase())
+        || value.ptr_eq(heap.known().the_hole.get(heap).erase())
     {
         return None;
     }
@@ -286,9 +286,9 @@ fn collect_parent_maps<'s>(
         return true;
     }
     let known = heap.known();
-    if proto.ptr_eq(known.null.as_tagged(heap).erase())
-        || proto.ptr_eq(known.undefined.as_tagged(heap).erase())
-        || proto.ptr_eq(known.the_hole.as_tagged(heap).erase())
+    if proto.ptr_eq(known.null.get(heap).erase())
+        || proto.ptr_eq(known.undefined.get(heap).erase())
+        || proto.ptr_eq(known.the_hole.get(heap).erase())
     {
         return true;
     }
@@ -305,9 +305,9 @@ fn push_parent_map<'s>(
         return false;
     }
     let known = heap.known();
-    if word.ptr_eq(known.null.as_tagged(heap).erase())
-        || word.ptr_eq(known.undefined.as_tagged(heap).erase())
-        || word.ptr_eq(known.the_hole.as_tagged(heap).erase())
+    if word.ptr_eq(known.null.get(heap).erase())
+        || word.ptr_eq(known.undefined.get(heap).erase())
+        || word.ptr_eq(known.the_hole.get(heap).erase())
     {
         return false;
     }

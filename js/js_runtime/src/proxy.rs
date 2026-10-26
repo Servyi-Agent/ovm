@@ -88,7 +88,7 @@ pub fn proxy_revocable<'a>(
             .interner()
             .intern_str(heap, &scope, "__makeRevoke")
             .erase();
-        let proto = heap.known().function_prototype.erase();
+        let proto = heap.known().function_prototype.as_handle().erase();
         let make_revoke = match rt_try!(
             vm,
             heap,
@@ -96,14 +96,14 @@ pub fn proxy_revocable<'a>(
             Lookup::get_property_on(vm, heap, state, proto, proto, name)
         ) {
             Coercion::Threw => {
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
             Coercion::Value(v) => scope.handle(v),
         };
         // Safety: fresh rooted-slot words staged for the call.
-        let exception = heap.known().exception.as_tagged(heap).raw();
+        let exception = heap.known().exception.get(heap).raw();
         let staged = scope.stage(&[
-            heap.known().undefined.as_tagged(heap).erase(),
+            heap.known().undefined.get(heap).erase(),
             proxy.as_tagged(heap).erase(),
         ]);
         let r = rt_try!(
@@ -113,11 +113,11 @@ pub fn proxy_revocable<'a>(
             HostCtx::enter(vm, &mut *heap, state, make_revoke, staged, None)
         );
         if r.raw() == exception {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         }
         // Safety: fresh call result, rooted below.
         let revoke = scope.handle(r);
-        let map = heap.known().object_initial_map;
+        let map = scope.handle(heap.known().object_initial_map.get(heap));
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
@@ -164,7 +164,7 @@ pub fn proxy_revoke<'a>(
         // Safety: fresh argument word, consumed with no allocation delay.
         unsafe { Tagged::<Value>::from_value_unchecked(proxy) },
     );
-    heap.known().undefined.as_tagged(heap).erase()
+    heap.known().undefined.get(heap).erase()
 }
 
 /// The revoke-closure template: `done` plays [[RevocableProxy]]'s

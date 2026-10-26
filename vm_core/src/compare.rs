@@ -51,14 +51,13 @@ impl Compare {
         if Self::strict_equal(heap, x, y) {
             return Ok(true);
         }
-        let nullish = |v: Tagged<'_, Value>| {
-            v == known.null.as_tagged(heap) || v == known.undefined.as_tagged(heap)
-        };
+        let nullish =
+            |v: Tagged<'_, Value>| v == known.null.get(heap) || v == known.undefined.get(heap);
         if nullish(x) && nullish(y) {
             return Ok(true);
         }
         let is_bool = |v: Tagged<'_, Value>| {
-            v == known.true_object.as_tagged(heap) || v == known.false_object.as_tagged(heap)
+            v == known.true_object.get(heap) || v == known.false_object.get(heap)
         };
         let is_string = |v: Tagged<'_, Value>| v.get_as::<DenseString>(heap).is_some();
         let is_number = |v: Tagged<'_, Value>| v.is_smi() || v.get_as::<Float>(heap).is_some();
@@ -71,7 +70,7 @@ impl Compare {
         }
         // booleans become numbers (exactly representable as smis, no allocation)
         if is_bool(x) {
-            let n = Smi::new(if x == known.true_object.as_tagged(heap) {
+            let n = Smi::new(if x == known.true_object.get(heap) {
                 1
             } else {
                 0
@@ -80,7 +79,7 @@ impl Compare {
             return Self::equal(heap, n, y);
         }
         if is_bool(y) {
-            let n = Smi::new(if y == known.true_object.as_tagged(heap) {
+            let n = Smi::new(if y == known.true_object.get(heap) {
                 1
             } else {
                 0

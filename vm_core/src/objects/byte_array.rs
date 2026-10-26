@@ -61,9 +61,7 @@ impl HeapObject for FixedByteArray {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
-        self.header
-            .map
-            .init(heap.known().byte_array_map.as_tagged(heap));
+        self.header.map.init(heap.known().byte_array_map.get(heap));
         self.size.set(heap, host, Smi::new(config.len() as i64));
         for (i, b) in config.iter().enumerate() {
             self.set(i, *b);

@@ -45,7 +45,7 @@ impl HeapObject for Cell {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
-        self.header.map.init(heap.known().cell_map.as_tagged(heap));
+        self.header.map.init(heap.known().cell_map.get(heap));
         let word = unsafe { Tagged::from_maybe_weak_unchecked(config.value) };
         self.maybe_value.set(heap, host, word);
     }

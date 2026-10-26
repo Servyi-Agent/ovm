@@ -68,9 +68,9 @@ impl HeapObject for FeedbackVector {
         let host = self.tagged(heap);
         self.header
             .map
-            .init(heap.known().feedback_vector_map.as_tagged(heap));
+            .init(heap.known().feedback_vector_map.get(heap));
         self.length.set(heap, host, Smi::new(config.length as i64));
-        let fill = heap.known().the_hole.as_tagged(heap).erase();
+        let fill = heap.known().the_hole.get(heap).erase();
         for i in 0..config.length {
             self.slot(i).set_strong(heap, host, fill);
         }
@@ -143,7 +143,7 @@ impl FeedbackVector {
         self.slot(slot).set_strong(
             heap,
             host,
-            heap.known().megamorphic_symbol.as_tagged(heap).erase(),
+            heap.known().megamorphic_symbol.get(heap).erase(),
         );
     }
 }

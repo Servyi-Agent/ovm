@@ -34,8 +34,7 @@ pub use objects::string;
 
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime};
 pub use bootstrap::{
-    KnownCell, WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known,
-    intern_well_known_strings,
+    WellKnown, WellKnownStrings, bootstrap_basics, bootstrap_well_known, intern_well_known_strings,
 };
 pub use compare::Compare;
 pub use convert::{Coercion, Convert, Hint};
@@ -131,7 +130,7 @@ const _: () = {
 pub struct SharedVM {
     heap: GlobalHeap,
     roots: RootHandles,
-    known: KnownCell,
+    known: WellKnown,
     // TODO: investiage if Mutex is fine, maybe a lock-free mechanism exists
     threads: Mutex<Vec<Weak<ThreadState>>>,
     interner: StringInterner,
@@ -220,7 +219,7 @@ impl ThreadState {
         closure: Tagged<'_, Object>,
     ) -> Option<Tagged<'a, Map>> {
         let word = self.construct_cache.get(heap);
-        if word.raw() == heap.known().the_hole.as_tagged(heap).raw() {
+        if word.raw() == heap.known().the_hole.get(heap).raw() {
             return None;
         }
         // Safety: the slot only ever holds this module's table.
@@ -252,7 +251,7 @@ impl ThreadState {
                     return Some(initial);
                 }
                 // dead entry: keep probing
-            } else if entry.raw() == heap.known().the_hole.as_tagged(heap).raw() {
+            } else if entry.raw() == heap.known().the_hole.get(heap).raw() {
                 return None; // reached an empty slot: absent
             } else {
                 return None; // strong non-hole: not our layout — bail
@@ -267,7 +266,7 @@ impl ThreadState {
     /// first: this is the only allocation a cache fill may trigger, and a
     /// collection here would leave captured words stale.
     pub fn construct_cache_ensure_table(&self, heap: &mut Heap) {
-        let the_hole = heap.known().the_hole.as_tagged(heap).raw();
+        let the_hole = heap.known().the_hole.get(heap).raw();
         if self.construct_cache.get(heap).raw() != the_hole {
             return;
         }
@@ -292,7 +291,7 @@ impl ThreadState {
             let closure = scope.handle(closure);
             let proto = scope.handle(proto);
             let initial_map = scope.handle(initial_map);
-            let the_hole = heap.known().the_hole.as_tagged(heap).raw();
+            let the_hole = heap.known().the_hole.get(heap).raw();
             let word = self.construct_cache.get(heap);
             debug_assert_ne!(word.raw(), the_hole, "cache table must be ensured");
             let _ = (word, the_hole);
@@ -399,6 +398,7 @@ unsafe impl Sync for ThreadState {}
 impl SharedVM {
     fn visit_roots(&self, visitor: &mut dyn Visitor) {
         self.interner.visit_edges(visitor);
+        self.known.visit_edges(visitor);
         self.roots.visit_edges(visitor);
         self.heap.iterate_roots(visitor);
         for slot in self.weak_slots.lock().unwrap().iter() {
@@ -426,7 +426,7 @@ impl SharedVM {
     /// stack handle scope; the installed object stays reachable through
     /// the global object after it dies.
     fn install_tools(&self, local: &mut Heap) {
-        let data = HandleData::new(local.known().the_hole.as_tagged(local).erase());
+        let data = HandleData::new(local.known().the_hole.get(local).erase());
         // Safety: `data` outlives every use of the scope below.
         let scope = unsafe { HandleScope::from_raw(NonNull::from(&data)) };
         KetteTools::install(local, &self.interner, &scope)
@@ -532,7 +532,7 @@ impl Thread {
         if self.state.termination().is_some() {
             let _ = self.state.take_pending_exception();
             let heap = &self.heap;
-            return Ok(heap.known().undefined.as_tagged(heap).raw());
+            return Ok(heap.known().undefined.get(heap).raw());
         }
         result
     }
@@ -542,7 +542,7 @@ impl Thread {
     }
 
     pub fn run_runtime(&mut self, f: NativeFn, args: &[Value]) -> Result<Value, VmError> {
-        let exception = self.heap.known().exception.as_tagged(&self.heap).raw();
+        let exception = self.heap.known().exception.get(&self.heap).raw();
         let nctx = HostCtx::new(&self.vm, &mut self.heap, &self.state);
         // stage a rooted copy: the runtime may keep reading it across its
         // own allocations
@@ -638,7 +638,7 @@ impl VM {
         let interner = StringInterner::new();
         let shared = Arc::new(SharedVM {
             heap,
-            known: KnownCell::new(WellKnown::uninit(&roots)),
+            known: WellKnown::uninit(),
             roots,
             threads: Mutex::new(Vec::new()),
             interner,
@@ -653,9 +653,9 @@ impl VM {
         let mut local = shared
             .heap
             .new_local(&shared.known, &shared.prototype_registry);
-        bootstrap_basics(&mut local, &shared.roots);
-        intern_well_known_strings(&mut local, &shared.interner, &shared.roots);
-        bootstrap_well_known(&mut local, &shared.roots);
+        bootstrap_basics(&mut local);
+        intern_well_known_strings(&mut local, &shared.interner);
+        bootstrap_well_known(&mut local);
         shared.install_tools(&mut local);
         Ok(Self { shared })
     }
@@ -675,7 +675,7 @@ impl VM {
     }
 
     pub fn known(&self) -> &WellKnown {
-        self.shared.known.get()
+        &self.shared.known
     }
 
     pub fn interner(&self) -> &StringInterner {
@@ -727,8 +727,8 @@ impl VM {
             .heap
             .new_local(&self.shared.known, &self.shared.prototype_registry);
         // Safety: root-slot reads stored straight into rooted fill cells.
-        let the_hole = heap.known().the_hole.as_tagged(&heap).erase();
-        let undefined = heap.known().undefined.as_tagged(&heap).erase();
+        let the_hole = heap.known().the_hole.get(&heap).erase();
+        let undefined = heap.known().undefined.get(&heap).erase();
         let state = Arc::new(ThreadState {
             handles: HandleData::new(the_hole),
             stack: Stack::new(STACK_SLOTS, the_hole, undefined),

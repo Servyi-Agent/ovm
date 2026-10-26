@@ -344,7 +344,7 @@ fn walk<'s>(
         });
     }
     let proto = map.prototype.get(heap);
-    if proto == heap.known().null.as_tagged(heap) {
+    if proto == heap.known().null.get(heap) {
         return None;
     }
     if let Some(pairs) = proto.get_as::<FixedArray>(heap) {
@@ -432,9 +432,9 @@ fn has_parents(heap: &Heap, map: Tagged<'_, Map>) -> bool {
         return false;
     }
     let known = heap.known();
-    !(proto.ptr_eq(known.null.as_tagged(heap).erase())
-        || proto.ptr_eq(known.undefined.as_tagged(heap).erase())
-        || proto.ptr_eq(known.the_hole.as_tagged(heap).erase()))
+    !(proto.ptr_eq(known.null.get(heap).erase())
+        || proto.ptr_eq(known.undefined.get(heap).erase())
+        || proto.ptr_eq(known.the_hole.get(heap).erase()))
 }
 
 /// Whether a prototype-chain object contributes no index-keyed lookups:
@@ -460,7 +460,7 @@ fn chain_object_elements_clean(heap: &Heap, word: Tagged<'_, Value>) -> bool {
         }
         let elements = obj.elements(heap);
         if elements.is_strong_ptr() {
-            let hole = heap.known().the_hole.as_tagged(heap);
+            let hole = heap.known().the_hole.get(heap);
             let elements = elements;
             for i in 0..elements.len() {
                 if elements.at(heap, i) != hole {
@@ -608,8 +608,8 @@ fn check_prototype_validity_cell(heap: &Heap, handler: Tagged<'_, DataHandler>) 
 
 fn getter_hit<'a>(heap: &'a Heap, pair: Tagged<'a, AccessorPair>) -> Hit<'a> {
     let getter = pair.get.get(heap);
-    if getter == heap.known().undefined.as_tagged(heap) {
-        Hit::Value(heap.known().undefined.as_tagged(heap).erase())
+    if getter == heap.known().undefined.get(heap) {
+        Hit::Value(heap.known().undefined.get(heap).erase())
     } else {
         Hit::Getter(getter)
     }
@@ -728,7 +728,7 @@ fn apply_element_load<'a>(
     let allow_oob = payload & ELEMENT_ALLOW_OOB != 0;
     let oob = |heap: &'a Heap| {
         (allow_oob && map_chain_cell_valid(heap, map))
-            .then(|| ElementHit::Value(heap.known().undefined.as_tagged(heap).erase()))
+            .then(|| ElementHit::Value(heap.known().undefined.get(heap).erase()))
     };
     let len = obj.length();
     if index >= len {
@@ -741,7 +741,7 @@ fn apply_element_load<'a>(
             return oob(heap);
         }
         let v = elements.at(heap, index);
-        if v == heap.known().the_hole.as_tagged(heap) {
+        if v == heap.known().the_hole.get(heap) {
             return oob(heap);
         }
         Some(ElementHit::Value(v))
@@ -765,9 +765,7 @@ fn apply_indexed_string<'a>(
                 .as_heap_object()
                 .is_some_and(|h| map_chain_cell_valid(heap, h.map(heap)))
         {
-            return Some(ElementHit::Value(
-                heap.known().undefined.as_tagged(heap).erase(),
-            ));
+            return Some(ElementHit::Value(heap.known().undefined.get(heap).erase()));
         }
         return None;
     }
@@ -843,7 +841,7 @@ fn setter_action<'s>(
     mode: LanguageMode,
 ) -> Option<StoreAction<'s>> {
     let setter = pair.set.get(heap);
-    if setter == heap.known().undefined.as_tagged(heap) {
+    if setter == heap.known().undefined.get(heap) {
         if mode.is_strict() {
             None
         } else {
@@ -1018,7 +1016,7 @@ impl InlineCache {
                 return None;
             }
             if !clean {
-                if elements.at(heap, index) == heap.known().the_hole.as_tagged(heap) {
+                if elements.at(heap, index) == heap.known().the_hole.get(heap) {
                     return None;
                 }
             } else if !map_chain_cell_valid(heap, map) {
@@ -1070,7 +1068,7 @@ impl InlineCache {
             if index < s.len() && s.code_unit(heap, index) > 0xFF {
                 return;
             }
-            let string_prototype = heap.known().string_prototype.as_tagged(heap);
+            let string_prototype = heap.known().string_prototype.get(heap);
             let proto_map = scope.handle(string_prototype.map(heap));
             let clean = chain_elements_clean(heap, proto_map.as_tagged(heap));
             if index >= s.len() && !clean {
@@ -1105,7 +1103,7 @@ impl InlineCache {
             let hole_miss = payload & ELEMENT_HOLEY != 0 && {
                 let elements = obj.elements(heap);
                 index < elements.len()
-                    && elements.at(heap, index) == heap.known().the_hole.as_tagged(heap)
+                    && elements.at(heap, index) == heap.known().the_hole.get(heap)
             };
             if (index >= len || hole_miss)
                 && chain_elements_clean(heap, map.as_tagged(heap))
@@ -1423,7 +1421,7 @@ fn update_site(
             return;
         }
     } else if let Some(strong) = state.as_strong() {
-        if strong.ptr_eq(heap.known().megamorphic_symbol.as_tagged(heap).erase()) {
+        if strong.ptr_eq(heap.known().megamorphic_symbol.get(heap).erase()) {
             return;
         }
         if let Some(pairs) = strong.get_as::<WeakFixedArray>(heap) {
@@ -1582,8 +1580,7 @@ impl InlineCache {
         };
         let state = vector.slot(fb).get(heap);
         if !state.is_weak_ptr() {
-            if state.is_strong_ptr() && !state.ptr_eq(heap.known().the_hole.as_tagged(heap).erase())
-            {
+            if state.is_strong_ptr() && !state.ptr_eq(heap.known().the_hole.get(heap).erase()) {
                 // megamorphic site: decode the callee on every execution
                 return call_probe_strong(heap, callee);
             }
@@ -1648,7 +1645,7 @@ impl InlineCache {
         } else {
             let state = state_slot.get(heap);
             if state.is_strong_ptr() {
-                let hole = heap.known().the_hole.as_tagged(heap).erase();
+                let hole = heap.known().the_hole.get(heap).erase();
                 if !state.ptr_eq(hole) {
                     // megamorphic: leave it alone
                     return;

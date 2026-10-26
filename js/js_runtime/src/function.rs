@@ -114,7 +114,7 @@ pub fn function_bind<'a>(
             .interner()
             .intern_str(heap, &scope, "__makeBound")
             .erase();
-        let proto = heap.known().function_prototype.erase();
+        let proto = heap.known().function_prototype.as_handle().erase();
         let make_bound = match rt_try!(
             vm,
             heap,
@@ -122,7 +122,7 @@ pub fn function_bind<'a>(
             Lookup::get_property_on(vm, heap, state, proto, proto, name)
         ) {
             Coercion::Threw => {
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
             // Safety: fresh word from the lookup, rooted immediately.
             Coercion::Value(v) => scope.handle(v),
@@ -137,7 +137,7 @@ pub fn function_bind<'a>(
         // args[0] is the receiver (undefined for the plain call)
         // Safety: fresh rooted-slot words staged for the call.
         let staged = scope.stage(&[
-            heap.known().undefined.as_tagged(heap).erase(),
+            heap.known().undefined.get(heap).erase(),
             f.as_tagged(heap).erase(),
             this_arg.as_tagged(heap).erase(),
             array.as_tagged(heap).erase(),
@@ -182,7 +182,7 @@ pub fn function_constructor<'a>(
         let context = scope.handle(
             state
                 .current_context(heap)
-                .unwrap_or_else(|| heap.known().empty_context.as_tagged(heap).erase()),
+                .unwrap_or_else(|| heap.known().empty_context.get(heap).erase()),
         );
         // ToString all arguments (user toString may run)
         let mut parts: Vec<String> = Vec::with_capacity(argv.len());
@@ -213,7 +213,7 @@ pub fn function_constructor<'a>(
                     Errors::from_vm_error(vm, heap, state, VmError::Type)
                 );
                 state.set_pending_exception(ex);
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
         };
         let Some(context) = scope.cast::<ContextObject>(heap, context.as_tagged(heap)) else {
@@ -246,15 +246,15 @@ fn spread_apply_args<'a>(
     let Some(array) = array else {
         return out;
     };
-    let undefined = heap.known().undefined.as_tagged(heap).erase();
-    if array == undefined || array == heap.known().null.as_tagged(heap) {
+    let undefined = heap.known().undefined.get(heap).erase();
+    if array == undefined || array == heap.known().null.get(heap) {
         return out;
     }
     let len = array
         .as_heap_object()
         .map(|o| {
             o.as_ref()
-                .array_length(heap, heap.known().strings.length.as_tagged(heap))
+                .array_length(heap, heap.known().strings.length.get(heap))
                 .and_then(|v| Smi::decode(v.raw()).map(|s| s.value() as usize))
                 .unwrap_or(0)
         })

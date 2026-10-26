@@ -36,7 +36,7 @@ pub fn push_callee_frame<'a>(
 ) -> Result<StagedCall<'a>, VmError> {
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
-    let undefined = roots.known(heap).undefined.as_tagged(heap).erase();
+    let undefined = roots.undefined.get(heap).erase();
     // the pushed frame's code, straight from the callee's info:
     // `push_frame` does not allocate, so it cannot go stale
     let code = callee.info.as_ref().code.get(heap).as_ptr();
@@ -58,7 +58,7 @@ pub fn push_callee_frame_values<'a>(
 ) -> Result<StagedCall<'a>, VmError> {
     let meta = x.caller_meta(pc + size, pc);
     let heap = x.heap();
-    let undefined = roots.known(heap).undefined.as_tagged(heap).erase();
+    let undefined = roots.undefined.get(heap).erase();
     let code = callee.info.as_ref().code.get(heap).as_ptr();
     let frame = x
         .stack()
@@ -271,9 +271,7 @@ pub fn proxy_apply_staged<'a>(
     let v = state.handle_scope(|scope| {
         let callee = scope.handle(regs.get(callee_reg, x.heap()));
         match Proxy::apply(vm, x.heap_mut(), state, callee, staged) {
-            Ok(Coercion::Threw) => {
-                Acc::set(roots.known(x.heap()).exception.as_tagged(x.heap()).erase())
-            }
+            Ok(Coercion::Threw) => Acc::set(roots.exception.get(x.heap()).erase()),
             Ok(Coercion::Value(v)) => Acc::set(v),
             Err(err) => Acc::set(raise_runtime(vm, x.heap_mut(), state, err)),
         }
@@ -300,7 +298,7 @@ fn construct_cache_record(
     let map: Tagged<Map> =
         unsafe { Tagged::from_value_unchecked(obj.as_tagged(heap).map(heap).raw()) };
     // find the closure's `.prototype` data-property slot
-    let proto_name = heap.known().strings.prototype.as_tagged(heap);
+    let proto_name = heap.known().strings.prototype.get(heap);
     let closure_map = callee.as_tagged(heap).map(heap);
     let mut found = None;
     for d in closure_map.as_ref().descriptors() {
@@ -362,7 +360,7 @@ fn construct_receiver_args<'a>(
     state.handle_scope(|scope| {
         let heap = x.heap_mut();
         let receiver: Handle<'_, Value> = if derived {
-            scope.handle(heap.known().the_hole.as_tagged(heap).erase())
+            scope.handle(heap.known().the_hole.get(heap).erase())
         } else {
             let callee_word = regs.get(callee_reg, heap);
             let Some(callee) = scope.cast::<Object>(heap, callee_word) else {
@@ -494,7 +492,7 @@ pub fn construct_native<'a>(
         Ok(a) => a,
         Err(err) => {
             let _ = x.raise_tag(err);
-            return x.heap().known().exception.as_tagged(x.heap()).erase();
+            return x.heap().known().exception.get(x.heap()).erase();
         }
     };
     let saved = stack.top();

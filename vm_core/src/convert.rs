@@ -41,14 +41,14 @@ impl<'a> Tagged<'a, Value> {
         if let Some(i) = self.to_i64() {
             return i != 0;
         }
-        if self == known.false_object.as_tagged(heap)
-            || self == known.undefined.as_tagged(heap)
-            || self == known.null.as_tagged(heap)
-            || self == known.the_hole.as_tagged(heap)
+        if self == known.false_object.get(heap)
+            || self == known.undefined.get(heap)
+            || self == known.null.get(heap)
+            || self == known.the_hole.get(heap)
         {
             return false;
         }
-        if self == known.true_object.as_tagged(heap) {
+        if self == known.true_object.get(heap) {
             return true;
         }
         if let Some(f) = self.get_as::<Float>(heap) {
@@ -67,16 +67,16 @@ impl<'a> Tagged<'a, Value> {
         if let Some(i) = self.to_i64() {
             return Ok(i as f64);
         }
-        if self == known.undefined.as_tagged(heap) || self == known.the_hole.as_tagged(heap) {
+        if self == known.undefined.get(heap) || self == known.the_hole.get(heap) {
             return Ok(f64::NAN);
         }
-        if self == known.null.as_tagged(heap) {
+        if self == known.null.get(heap) {
             return Ok(0.0);
         }
-        if self == known.false_object.as_tagged(heap) {
+        if self == known.false_object.get(heap) {
             return Ok(0.0);
         }
-        if self == known.true_object.as_tagged(heap) {
+        if self == known.true_object.get(heap) {
             return Ok(1.0);
         }
         if let Some(f) = self.get_as::<Float>(heap) {
@@ -96,10 +96,10 @@ impl<'a> Tagged<'a, Value> {
         if self.is_smi() {
             return true;
         }
-        self == known.undefined.as_tagged(heap)
-            || self == known.null.as_tagged(heap)
-            || self == known.true_object.as_tagged(heap)
-            || self == known.false_object.as_tagged(heap)
+        self == known.undefined.get(heap)
+            || self == known.null.get(heap)
+            || self == known.true_object.get(heap)
+            || self == known.false_object.get(heap)
             || self.get_as::<Float>(heap).is_some()
             || self.get_as::<DenseString>(heap).is_some()
             || self.get_as::<Symbol>(heap).is_some()
@@ -113,13 +113,11 @@ impl<'a> Tagged<'a, Value> {
     pub fn primitive_prototype(self, heap: &'a Heap) -> Option<Tagged<'a, Value>> {
         let known = heap.known();
         if self.is_smi() || self.get_as::<Float>(heap).is_some() {
-            Some(known.number_prototype.as_tagged(heap).erase())
+            Some(known.number_prototype.get(heap).erase())
         } else if self.get_as::<DenseString>(heap).is_some() {
-            Some(known.string_prototype.as_tagged(heap).erase())
-        } else if self == known.true_object.as_tagged(heap)
-            || self == known.false_object.as_tagged(heap)
-        {
-            Some(known.boolean_prototype.as_tagged(heap).erase())
+            Some(known.string_prototype.get(heap).erase())
+        } else if self == known.true_object.get(heap) || self == known.false_object.get(heap) {
+            Some(known.boolean_prototype.get(heap).erase())
         } else {
             None
         }
@@ -212,9 +210,9 @@ impl Convert {
     pub fn boolean<'a>(heap: &'a Heap, b: bool) -> Tagged<'a, Value> {
         let known = heap.known();
         if b {
-            known.true_object.as_tagged(heap).erase()
+            known.true_object.get(heap).erase()
         } else {
-            known.false_object.as_tagged(heap).erase()
+            known.false_object.get(heap).erase()
         }
     }
 
@@ -226,10 +224,10 @@ impl Convert {
         if v.is_smi() {
             return true;
         }
-        v == known.undefined.as_tagged(heap)
-            || v == known.null.as_tagged(heap)
-            || v == known.true_object.as_tagged(heap)
-            || v == known.false_object.as_tagged(heap)
+        v == known.undefined.get(heap)
+            || v == known.null.get(heap)
+            || v == known.true_object.get(heap)
+            || v == known.false_object.get(heap)
             || v.get_as::<Float>(heap).is_some()
             || v.get_as::<DenseString>(heap).is_some()
             || v.get_as::<Symbol>(heap).is_some()
@@ -246,12 +244,11 @@ impl Convert {
     ) -> Option<Tagged<'a, Value>> {
         let known = heap.known();
         if v.is_smi() || v.get_as::<Float>(heap).is_some() {
-            Some(known.number_prototype.as_tagged(heap).erase())
+            Some(known.number_prototype.get(heap).erase())
         } else if v.get_as::<DenseString>(heap).is_some() {
-            Some(known.string_prototype.as_tagged(heap).erase())
-        } else if v == known.true_object.as_tagged(heap) || v == known.false_object.as_tagged(heap)
-        {
-            Some(known.boolean_prototype.as_tagged(heap).erase())
+            Some(known.string_prototype.get(heap).erase())
+        } else if v == known.true_object.get(heap) || v == known.false_object.get(heap) {
+            Some(known.boolean_prototype.get(heap).erase())
         } else {
             None
         }
@@ -275,19 +272,17 @@ impl Convert {
 
         let known = heap.known();
         let val = v.as_tagged(heap);
-        let identity = if val == known.undefined.as_tagged(heap) {
-            Some(known.strings.undefined)
-        } else if val == known.null.as_tagged(heap) {
-            Some(known.strings.null)
-        } else if val == known.true_object.as_tagged(heap) {
-            Some(known.strings.true_)
-        } else if val == known.false_object.as_tagged(heap) {
-            Some(known.strings.false_)
-        } else {
-            None
-        };
-        if let Some(name) = identity {
-            return Ok(name.as_tagged(heap).erase());
+        if val == known.undefined.get(heap) {
+            return Ok(known.strings.undefined.get(heap).erase());
+        }
+        if val == known.null.get(heap) {
+            return Ok(known.strings.null.get(heap).erase());
+        }
+        if val == known.true_object.get(heap) {
+            return Ok(known.strings.true_.get(heap).erase());
+        }
+        if val == known.false_object.get(heap) {
+            return Ok(known.strings.false_.get(heap).erase());
         }
         // Strings are their own stringification.
         if v.as_tagged(heap).get_as::<DenseString>(heap).is_some() {

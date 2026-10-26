@@ -15,23 +15,23 @@ where
     let heap = &*thread.heap();
     let known = vm.known();
     let values = [
-        known.map_map.as_tagged(heap).raw(),
-        known.the_hole.as_tagged(heap).raw(),
-        known.undefined.as_tagged(heap).raw(),
-        known.null.as_tagged(heap).raw(),
-        known.smi_map.as_tagged(heap).raw(),
-        known.float_map.as_tagged(heap).raw(),
-        known.array_map.as_tagged(heap).raw(),
-        known.byte_array_map.as_tagged(heap).raw(),
-        known.code_map.as_tagged(heap).raw(),
-        known.dense_latin1_string_map.as_tagged(heap).raw(),
-        known.dense_utf16_string_map.as_tagged(heap).raw(),
-        known.object_prototype.as_tagged(heap).raw(),
-        known.object_initial_map.as_tagged(heap).raw(),
-        known.empty_fixed_array.as_tagged(heap).raw(),
-        known.empty_context.as_tagged(heap).raw(),
-        known.strings.length.as_tagged(heap).raw(),
-        known.strings.prototype.as_tagged(heap).raw(),
+        known.map_map.get(heap).raw(),
+        known.the_hole.get(heap).raw(),
+        known.undefined.get(heap).raw(),
+        known.null.get(heap).raw(),
+        known.smi_map.get(heap).raw(),
+        known.float_map.get(heap).raw(),
+        known.array_map.get(heap).raw(),
+        known.byte_array_map.get(heap).raw(),
+        known.code_map.get(heap).raw(),
+        known.dense_latin1_string_map.get(heap).raw(),
+        known.dense_utf16_string_map.get(heap).raw(),
+        known.object_prototype.get(heap).raw(),
+        known.object_initial_map.get(heap).raw(),
+        known.empty_fixed_array.get(heap).raw(),
+        known.empty_context.get(heap).raw(),
+        known.strings.length.get(heap).raw(),
+        known.strings.prototype.get(heap).raw(),
     ];
     for value in values {
         assert!(value.is_strong_ptr());
@@ -45,7 +45,7 @@ where
         assert_eq!(
             // Interned names compare by word identity.
             again.as_tagged(heap).raw().to_bits(),
-            known.strings.length.as_tagged(heap).raw().to_bits()
+            known.strings.length.get(heap).raw().to_bits()
         );
         let _ = scope;
     });

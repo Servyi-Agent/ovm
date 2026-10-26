@@ -47,8 +47,12 @@ pub fn object_constructor<'a>(
         }
         // `new Object()` / primitive: allocate a fresh object
         return state.handle_scope(|scope| {
-            heap.new_object(&scope, heap.known().object_initial_map, HandleSlice::EMPTY)
-                .erase()
+            heap.new_object(
+                &scope,
+                scope.handle(heap.known().object_initial_map.get(heap)),
+                HandleSlice::EMPTY,
+            )
+            .erase()
         });
     }
     if arg.as_tagged(heap).is_primitive(heap) {
@@ -101,7 +105,7 @@ pub fn object_create<'a>(
         let proto_arg = args.get(heap, 1);
         let proto = scope.handle(proto_arg);
         // If Type(O) is neither Object nor Null, throw a TypeError
-        let null = heap.known().null.as_tagged(heap).raw();
+        let null = heap.known().null.get(heap).raw();
         let proto_ok =
             proto.as_tagged(heap).raw() == null || !proto.as_tagged(heap).is_primitive(heap);
         if !proto_ok {
@@ -109,12 +113,12 @@ pub fn object_create<'a>(
         }
         if args.len() > 2 {
             let props = args.get(heap, 2);
-            let undefined = heap.known().undefined.as_tagged(heap).raw();
+            let undefined = heap.known().undefined.get(heap).raw();
             if props.raw() != undefined {
                 return raise_runtime(vm, heap, state, VmError::Type);
             }
         }
-        let map = heap.known().object_initial_map;
+        let map = scope.handle(heap.known().object_initial_map.get(heap));
         let empty: [Tagged<'_, Value>; 0] = [];
         let obj = scope.handle(heap.new_object(&scope, map, scope.stage(&empty)));
         let obj = scope
@@ -194,7 +198,7 @@ pub fn object_has_own_property<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -241,7 +245,7 @@ pub fn object_property_is_enumerable<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -309,7 +313,7 @@ pub fn plain_object<'a>(
     fields: &[(&'static str, Handle<'_, Value>)],
 ) -> Result<Tagged<'a, Value>, VmError> {
     state.handle_scope(|scope| {
-        let map = heap.known().object_initial_map;
+        let map = scope.handle(heap.known().object_initial_map.get(heap));
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
@@ -346,7 +350,7 @@ pub fn object_get_own_property_descriptor<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -361,8 +365,8 @@ pub fn object_get_own_property_descriptor<'a>(
             target_v.ordinary_own_descriptor(heap, &scope, key_v)
         };
         // root the oddball singletons once for the descriptor fields
-        let true_v = scope.handle(heap.known().true_object.as_tagged(heap).erase());
-        let false_v = scope.handle(heap.known().false_object.as_tagged(heap).erase());
+        let true_v = scope.handle(heap.known().true_object.get(heap).erase());
+        let false_v = scope.handle(heap.known().false_object.get(heap).erase());
         let bool_ = |b| if b { true_v } else { false_v };
         match desc {
             Some(PropertyDescriptor::Data {
@@ -407,7 +411,7 @@ pub fn object_get_own_property_descriptor<'a>(
                 Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
                 Err(err) => return raise_runtime(vm, heap, state, err),
             },
-            None => heap.known().undefined.as_tagged(heap).erase(),
+            None => heap.known().undefined.get(heap).erase(),
         }
     })
 }
@@ -439,7 +443,7 @@ pub fn object_define_property<'a>(
             state,
             Object::to_property_key(vm, heap, state, raw_key)
         ) else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
@@ -452,7 +456,7 @@ pub fn object_define_property<'a>(
             Lookup::to_property_descriptor(vm, heap, state, &scope, attrs)
         ) {
             Some(partial) => partial,
-            None => return heap.known().exception.as_tagged(heap).erase(),
+            None => return heap.known().exception.get(heap).erase(),
         };
         match rt_try!(
             vm,
@@ -460,7 +464,7 @@ pub fn object_define_property<'a>(
             state,
             Proxy::define_internal(vm, heap, state, &scope, target, key.erase(), partial)
         ) {
-            Flow::Threw => heap.known().exception.as_tagged(heap).erase(),
+            Flow::Threw => heap.known().exception.get(heap).erase(),
             Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),
             Flow::Value(true) => target.as_tagged(heap).erase(),
         }
@@ -481,8 +485,8 @@ pub fn object_set_prototype_of<'a>(
         let proto = args.get(heap, 2);
         let proto = scope.handle(proto);
         let (nullish, target_is_object, proto_ok) = {
-            let null = heap.known().null.as_tagged(heap).raw();
-            let undefined = heap.known().undefined.as_tagged(heap).raw();
+            let null = heap.known().null.get(heap).raw();
+            let undefined = heap.known().undefined.get(heap).raw();
             (
                 target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined,
                 !target.as_tagged(heap).is_primitive(heap),
@@ -528,8 +532,8 @@ pub fn object_prevent_extensions<'a>(
     state.handle_scope(|scope| {
         let target = args.get(heap, 1);
         let target = scope.handle(target);
-        let null = heap.known().null.as_tagged(heap).raw();
-        let undefined = heap.known().undefined.as_tagged(heap).raw();
+        let null = heap.known().null.get(heap).raw();
+        let undefined = heap.known().undefined.get(heap).raw();
         let nullish =
             target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined;
         if nullish {
@@ -550,7 +554,7 @@ pub fn object_prevent_extensions<'a>(
             Coercion::Value(v) => Some(v.raw()),
         };
         let Some(raw) = raw else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         let v = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw) });
         let cond_39 = v.as_tagged(heap).is_truthy(heap);
@@ -591,7 +595,7 @@ pub fn object_is_extensible<'a>(
             Coercion::Value(v) => Some(scope.handle(v)),
         };
         let Some(v) = extensible else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         v.as_tagged(heap).erase()
     })
@@ -674,8 +678,8 @@ pub fn object_seal<'a>(
         vm, heap, state, ..
     } = nctx;
     let target = args.get_handle(heap, 1);
-    let null = heap.known().null.as_tagged(heap).raw();
-    let undefined = heap.known().undefined.as_tagged(heap).raw();
+    let null = heap.known().null.get(heap).raw();
+    let undefined = heap.known().undefined.get(heap).raw();
     let nullish = target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined;
     if nullish {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -698,7 +702,7 @@ pub fn object_seal<'a>(
             Coercion::Value(v) => Some(v.raw()),
         };
         let Some(raw) = raw else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         let v = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw) });
         let cond_42 = v.as_tagged(heap).is_truthy(heap);
@@ -730,8 +734,8 @@ pub fn object_freeze<'a>(
         vm, heap, state, ..
     } = nctx;
     let target = args.get_handle(heap, 1);
-    let null = heap.known().null.as_tagged(heap).raw();
-    let undefined = heap.known().undefined.as_tagged(heap).raw();
+    let null = heap.known().null.get(heap).raw();
+    let undefined = heap.known().undefined.get(heap).raw();
     let nullish = target.as_tagged(heap).raw() == null || target.as_tagged(heap).raw() == undefined;
     if nullish {
         return raise_runtime(vm, heap, state, VmError::Type);
@@ -753,7 +757,7 @@ pub fn object_freeze<'a>(
             Coercion::Value(v) => Some(v.raw()),
         };
         let Some(raw) = raw else {
-            return heap.known().exception.as_tagged(heap).erase();
+            return heap.known().exception.get(heap).erase();
         };
         let v = scope.handle(unsafe { Tagged::<Value>::from_value_unchecked(raw) });
         let cond_45 = v.as_tagged(heap).is_truthy(heap);

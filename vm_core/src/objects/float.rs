@@ -17,7 +17,7 @@ impl HeapObject for Float {
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
-        self.header.map.init(heap.known().float_map.as_tagged(heap));
+        self.header.map.init(heap.known().float_map.get(heap));
         self.value.set(*config);
     }
 

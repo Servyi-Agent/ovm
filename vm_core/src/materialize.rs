@@ -32,7 +32,10 @@ impl Materialize {
         scope: &'s HandleScope<'_>,
         program: &Program,
     ) -> Result<Handle<'s, Object>, VmError> {
-        let empty = thread.heap().known().empty_context;
+        let empty = {
+            let heap = thread.heap();
+            scope.handle(heap.known().empty_context.get(heap))
+        };
         Self::closure(thread, scope, program, empty)
     }
 
@@ -70,7 +73,7 @@ impl Materialize {
             FunctionId::SCRIPT,
         )?;
 
-        let map = heap.known().function_map;
+        let map = scope.handle(heap.known().function_map.get(heap));
         let slots = scope.stage(&[
             info.as_tagged(heap).erase(),
             context.as_tagged(heap).erase(),
@@ -119,8 +122,12 @@ fn materialize_function<'s>(
                 heap.allocate_handle::<ScopeInfo>(ScopeInfoInit { names }, scope)
                     .erase()
             }
-            Constant::ObjectPrototype => heap.known().object_prototype.erase(),
-            Constant::FunctionPrototype => heap.known().function_prototype.erase(),
+            Constant::ObjectPrototype => {
+                scope.handle(heap.known().object_prototype.get(heap).erase())
+            }
+            Constant::FunctionPrototype => {
+                scope.handle(heap.known().function_prototype.get(heap).erase())
+            }
         };
         materialized.push(value);
     }

@@ -49,7 +49,7 @@ pub fn eval_runtime<'a>(
                     Errors::from_vm_error(vm, heap, state, VmError::Type)
                 );
                 state.set_pending_exception(ex);
-                return heap.known().exception.as_tagged(heap).erase();
+                return heap.known().exception.get(heap).erase();
             }
         };
 
@@ -90,7 +90,7 @@ pub fn is_nan<'a>(
         })
     );
     let Some(n) = n else {
-        return heap.known().exception.as_tagged(heap).erase();
+        return heap.known().exception.get(heap).erase();
     };
 
     Convert::boolean(heap, n.is_nan())
@@ -108,7 +108,7 @@ pub fn print<'a>(
     } = nctx;
     if args.len() < 2 {
         println!();
-        return heap.known().undefined.as_tagged(heap).erase();
+        return heap.known().undefined.get(heap).erase();
     }
     let arg = args.get_handle(heap, 1);
     let text = match Object::to_string(vm, heap, state, arg) {
@@ -120,11 +120,11 @@ pub fn print<'a>(
                 .map(|s| s.to_rust_string(heap))
                 .unwrap_or_default()
         }
-        Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+        Ok(None) => return heap.known().exception.get(heap).erase(),
         Err(err) => return raise_runtime(vm, heap, state, err),
     };
     println!("{text}");
-    heap.known().undefined.as_tagged(heap).erase()
+    heap.known().undefined.get(heap).erase()
 }
 
 /// The inline half of a `console.log` argument read: Smis, strings, and the
@@ -135,16 +135,16 @@ fn primitive_to_string(heap: &Heap, v: Tagged<'_, Value>) -> Option<String> {
     if let Some(smi) = Smi::decode(v.raw()) {
         return Some(smi.value().to_string());
     }
-    if v == known.undefined.as_tagged(heap) {
+    if v == known.undefined.get(heap) {
         return Some("undefined".to_string());
     }
-    if v == known.null.as_tagged(heap) {
+    if v == known.null.get(heap) {
         return Some("null".to_string());
     }
-    if v == known.true_object.as_tagged(heap) {
+    if v == known.true_object.get(heap) {
         return Some("true".to_string());
     }
-    if v == known.false_object.as_tagged(heap) {
+    if v == known.false_object.get(heap) {
         return Some("false".to_string());
     }
     v.get_as::<DenseString>(heap)
@@ -194,12 +194,12 @@ pub fn console_log<'a>(
         }
         match console_arg_cold(vm, heap, state, arg) {
             Ok(Some(text)) => parts.push(text),
-            Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+            Ok(None) => return heap.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         }
     }
     println!("{}", parts.join(" "));
-    heap.known().undefined.as_tagged(heap).erase()
+    heap.known().undefined.get(heap).erase()
 }
 
 /// `performance.now()`: fractional milliseconds since the Unix epoch

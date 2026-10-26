@@ -74,7 +74,7 @@ impl Args {
     #[inline(always)]
     pub fn get<'h>(&self, heap: &'h Heap, i: usize) -> Tagged<'h, Value> {
         if i >= self.count {
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         // Safety: the slot is a rooted, GC-visited word.
         unsafe { Tagged::from_value_unchecked(*self.ptr.as_ptr().add(i)) }
@@ -89,7 +89,7 @@ impl Args {
     #[inline(always)]
     pub fn get_handle<'s>(&'s self, heap: &Heap, i: usize) -> Handle<'s, Value> {
         if i >= self.count {
-            return heap.known().undefined.erase();
+            return heap.known().undefined.as_handle().erase();
         }
         // Safety: the window slots are GC-visited for the call duration.
         unsafe {
@@ -711,10 +711,10 @@ impl Stack {
         let info = callee.info;
         let code = info.code.get(heap);
         let constants = info.constants.get(heap);
-        let feedback = info.feedback.get(heap).map_or_else(
-            || heap.known().the_hole.as_tagged(heap).erase(),
-            |v| v.erase(),
-        );
+        let feedback = info
+            .feedback
+            .get(heap)
+            .map_or_else(|| heap.known().the_hole.get(heap).erase(), |v| v.erase());
         let smi = |v: usize| Smi::new(v as i64).into_tagged();
         // Safety: every header word is a Smi or a strong value; the header
         // region is initialized arena space reserved by `push_frame_with`.

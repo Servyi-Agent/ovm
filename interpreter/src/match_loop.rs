@@ -106,7 +106,7 @@ macro_rules! reenter {
         *$acc = Acc::set(v);
         let sentinel = {
             let heap = $ctx.heap();
-            heap.known().exception.as_tagged(heap).raw().to_bits()
+            heap.known().exception.get(heap).raw().to_bits()
         };
         $ctx.reload_code();
         if raw == sentinel {
@@ -186,7 +186,7 @@ fn start<'b>(
             let stack = state.stack();
             let new_target_value = match &new_target {
                 Some(nt) => nt.as_tagged(heap).erase(),
-                None => heap.known().undefined.as_tagged(heap).erase(),
+                None => vm.known().undefined.get(heap).erase(),
             };
             let frame = stack.push_frame_values(
                 heap,
@@ -214,9 +214,9 @@ fn start<'b>(
 fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Value, VmError> {
     let mut ip = ctx.code_ptr();
     let mut regs = unsafe { Regs::new(ctx.regs_ptr()) };
-    let mut acc = Acc::set(ctx.heap().known().undefined.as_tagged(ctx.heap()).erase());
+    let roots = RootsArg::new(ctx.vm().known());
+    let mut acc = Acc::set(roots.undefined.get(ctx.heap()).erase());
     let mut frame_base = ctx.frame_base();
-    let roots = RootsArg::from_heap(ctx.heap());
 
     loop {
         step::<1>(ctx, &mut ip, &mut regs, &mut acc, &mut frame_base, roots);
@@ -239,13 +239,7 @@ fn dispatch<'h>(ctx: &mut Ctx<'h, 'h>) -> Result<Value, VmError> {
                     ip = offset(ctx.code_ptr(), pc);
                 }
                 Unwind::Escaped => {
-                    return Ok(ctx
-                        .heap()
-                        .known()
-                        .exception
-                        .as_tagged(ctx.heap())
-                        .erase()
-                        .raw());
+                    return Ok(roots.exception.get(ctx.heap()).erase().raw());
                 }
             }
         }
@@ -514,11 +508,7 @@ macro_rules! call_enter {
             Err(e) => raise!($ctx, $acc, $pc, e),
             Ok(StagedCall::Value(v)) => reenter!($ctx, $acc, $pc, $next_pc, v),
             Ok(StagedCall::Frame) => {
-                let undefined = {
-                    let heap = $ctx.heap();
-                    heap.known().undefined.as_tagged(heap).erase()
-                };
-                *$acc = Acc::set(undefined);
+                *$acc = Acc::set($roots.undefined.get($ctx.heap()).erase());
                 $ctx.code_ptr()
             }
             Ok(StagedCall::Native { rt, staged }) => {
@@ -554,11 +544,7 @@ fn op_jump_loop<'h, const STRIDE: usize>(
         set_acc!(acc, state.acc_slot().get(ctx.heap()));
         if shutdown {
             state.set_termination(Termination::Shutdown);
-            let undefined = {
-                let heap = ctx.heap();
-                heap.known().undefined.as_tagged(heap).erase()
-            };
-            state.set_pending_exception(undefined);
+            state.set_pending_exception(roots.undefined.get(ctx.heap()).erase());
             ctx.set_throw_pc(pc);
             return throw_ptr();
         }
@@ -634,11 +620,7 @@ fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
                 ops.unsigned::<1>(),
                 ops.signed::<0>(),
                 callee,
-                roots
-                    .known(ctx.heap())
-                    .undefined
-                    .as_tagged(ctx.heap())
-                    .erase(),
+                roots.undefined.get(ctx.heap()).erase(),
                 &[],
             );
             call_enter!(ctx, regs, acc, pc, next_pc, roots, staged)
@@ -654,11 +636,7 @@ fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
                 ops.unsigned::<2>(),
                 ops.signed::<0>(),
                 callee,
-                roots
-                    .known(ctx.heap())
-                    .undefined
-                    .as_tagged(ctx.heap())
-                    .erase(),
+                roots.undefined.get(ctx.heap()).erase(),
                 &[arg0][..1],
             );
             call_enter!(ctx, regs, acc, pc, next_pc, roots, staged)
@@ -675,11 +653,7 @@ fn op_call_function<'h, const STRIDE: usize, const ARGC: usize>(
                 ops.unsigned::<3>(),
                 ops.signed::<0>(),
                 callee,
-                roots
-                    .known(ctx.heap())
-                    .undefined
-                    .as_tagged(ctx.heap())
-                    .erase(),
+                roots.undefined.get(ctx.heap()).erase(),
                 &[arg0, arg1][..2],
             );
             call_enter!(ctx, regs, acc, pc, next_pc, roots, staged)
@@ -771,7 +745,7 @@ fn op_return<'h>(
             .frame_header(ctx.frame_base())
             .new_target_slot()
             .get(heap);
-        new_target != heap.known().undefined.as_tagged(heap).erase()
+        new_target != roots.undefined.get(heap).erase()
     };
 
     if constructing {
@@ -779,7 +753,7 @@ fn op_return<'h>(
         let val = acc.get(heap);
         if val.is_primitive(heap) {
             let this_val = regs.get(0, heap);
-            if this_val == heap.known().the_hole.as_tagged(heap).erase() {
+            if this_val == roots.the_hole.get(heap).erase() {
                 // A derived constructor escaped without initializing `this`.
                 let caller = ctx.stack().pop_frame(ctx.frame_base());
                 ctx.switch_frame(caller.base);
@@ -814,11 +788,7 @@ fn op_construct<'h, const STRIDE: usize>(
 
     match construct_start(ctx, pc, size, regs, callee_reg, args_base, count) {
         Ok(ConstructStart::Frame) => {
-            let undefined = {
-                let heap = ctx.heap();
-                heap.known().undefined.as_tagged(heap).erase()
-            };
-            set_acc!(acc, undefined);
+            set_acc!(acc, roots.undefined.get(ctx.heap()).erase());
             ctx.code_ptr()
         }
         Ok(ConstructStart::Native(rt)) => {

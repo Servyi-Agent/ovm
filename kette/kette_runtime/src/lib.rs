@@ -13,7 +13,10 @@ impl Runtime for KetteRuntime {
         let print = vm.register_runtime(console_print);
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
-            let object_prototype = thread.heap().known().object_prototype;
+            let object_prototype = {
+                let heap = thread.heap();
+                scope.handle(heap.known().object_prototype.get(heap))
+            };
             let map = thread.heap().allocate_handle::<Map>(
                 MapInit {
                     kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
@@ -27,7 +30,10 @@ impl Runtime for KetteRuntime {
             Object::install_method(thread, &scope, console, "print", print)?;
             let console_name = thread.intern(&scope, "Console");
             let console_name = scope.handle(console_name.as_tagged(&*thread.heap()));
-            let global = thread.heap().known().global_object;
+            let global = {
+                let heap = thread.heap();
+                scope.handle(heap.known().global_object.get(heap))
+            };
             // a bare global `print(x)`, same native as `Console.print`
             Object::install_method(thread, &scope, global, "print", print)?;
             Object::define_own_property(
@@ -52,7 +58,7 @@ fn console_print<'a>(
     } = nctx;
     if args.len() < 2 {
         println!();
-        return heap.known().undefined.as_tagged(heap).erase();
+        return heap.known().undefined.get(heap).erase();
     }
     let v = args.get_handle(heap, 1);
     let text = match Object::to_string(vm, heap, state, v) {
@@ -64,9 +70,9 @@ fn console_print<'a>(
                 .map(|s| s.to_rust_string(heap))
                 .unwrap_or_default()
         }
-        Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+        Ok(None) => return heap.known().exception.get(heap).erase(),
         Err(err) => return raise_runtime(vm, heap, state, err),
     };
     println!("{text}");
-    heap.known().undefined.as_tagged(heap).erase()
+    heap.known().undefined.get(heap).erase()
 }

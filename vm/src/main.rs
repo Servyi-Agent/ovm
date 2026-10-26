@@ -172,16 +172,16 @@ fn show_value(thread: &mut Thread, v: Value) -> String {
     {
         let heap = &*thread.heap();
         let known = heap.known();
-        if v == known.undefined.as_tagged(heap).raw() {
+        if v == known.undefined.get(heap).raw() {
             return "undefined".into();
         }
-        if v == known.null.as_tagged(heap).raw() {
+        if v == known.null.get(heap).raw() {
             return "null".into();
         }
-        if v == known.true_object.as_tagged(heap).raw() {
+        if v == known.true_object.get(heap).raw() {
             return "true".into();
         }
-        if v == known.false_object.as_tagged(heap).raw() {
+        if v == known.false_object.get(heap).raw() {
             return "false".into();
         }
         if let Some(f) = unsafe { v.assume_valid(heap) }.get_as::<Float>(heap) {
@@ -201,8 +201,8 @@ fn error_text(heap: &Heap, v: Value) -> Option<String> {
     let tagged = unsafe { v.assume_valid(heap) };
     tagged.as_heap_object()?;
     let known = heap.known();
-    let name = error_property(heap, tagged, known.strings.name.as_tagged(heap));
-    let message = error_property(heap, tagged, known.strings.message.as_tagged(heap));
+    let name = error_property(heap, tagged, known.strings.name.get(heap));
+    let message = error_property(heap, tagged, known.strings.message.get(heap));
     match (name, message) {
         (Some(n), Some(m)) if !m.is_empty() => Some(format!("{n}: {m}")),
         (Some(n), _) => Some(n),

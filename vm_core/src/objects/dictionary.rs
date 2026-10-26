@@ -171,7 +171,7 @@ impl NumberDictionary {
         let mut step = 1usize;
         loop {
             let key = self.key_word(heap, entry);
-            if key == heap.known().undefined.as_tagged(heap) {
+            if key == heap.known().undefined.get(heap) {
                 return None;
             }
             if let Some(k) = key.to_i64().map(|v| v as usize) {
@@ -188,8 +188,8 @@ impl NumberDictionary {
     fn find_insertion(&self, heap: &Heap, index: usize) -> usize {
         let capacity = self.capacity();
         let mask = capacity - 1;
-        let hole = heap.known().the_hole.as_tagged(heap);
-        let undefined = heap.known().undefined.as_tagged(heap);
+        let hole = heap.known().the_hole.get(heap);
+        let undefined = heap.known().undefined.get(heap);
         let mut entry = (Self::hash(index) as usize) & mask;
         let mut step = 1usize;
         loop {
@@ -309,7 +309,7 @@ impl NumberDictionary {
             let t = table.as_tagged(heap);
             let entry = t.find_insertion(heap, index);
             let host = t.tagged(heap);
-            let reused_tombstone = t.key_word(heap, entry) == heap.known().the_hole.as_tagged(heap);
+            let reused_tombstone = t.key_word(heap, entry) == heap.known().the_hole.get(heap);
             t.key_slot(entry)
                 .set(heap, host, Smi::new(index as i64).into_tagged());
             t.value_slot(entry).set(heap, host, value);
@@ -331,7 +331,7 @@ impl NumberDictionary {
             return false;
         };
         let host = self.tagged(heap);
-        let hole = heap.known().the_hole.as_tagged(heap).erase();
+        let hole = heap.known().the_hole.get(heap).erase();
         self.key_slot(entry).set(heap, host, hole);
         self.value_slot(entry).set(heap, host, hole);
         self.nof.set(heap, host, Smi::new((self.nof() - 1) as i64));
@@ -379,13 +379,13 @@ impl HeapObject for NumberDictionary {
         let host = self.tagged(heap);
         self.header
             .map
-            .init(heap.known().number_dictionary_map.as_tagged(heap));
+            .init(heap.known().number_dictionary_map.get(heap));
         self.capacity
             .set(heap, host, Smi::new(config.capacity as i64));
         self.nof.set(heap, host, Smi::new(0));
         self.nod.set(heap, host, Smi::new(0));
         self.flags.set(heap, host, Smi::new(0));
-        let undefined = heap.known().undefined.as_tagged(heap).erase();
+        let undefined = heap.known().undefined.get(heap).erase();
         for entry in 0..config.capacity {
             self.key_slot(entry).set(heap, host, undefined);
             self.value_slot(entry).set(heap, host, undefined);

@@ -51,15 +51,15 @@ fn callable<'s>(
         let heap: &Heap = thread.heap();
         info.as_tagged(heap).set_feedback(heap, vector);
     }
-    let map = thread.heap().known().function_map;
+    let map = thread.heap().known().function_map.as_handle();
     let values = {
         let heap: &Heap = thread.heap();
         scope.stage(&[
             info.as_tagged(heap).erase(),
-            heap.known().empty_context.as_tagged(heap).erase(),
+            heap.known().empty_context.get(heap).erase(),
         ])
     };
-    let empty_fixed_array = thread.heap().known().empty_fixed_array;
+    let empty_fixed_array = thread.heap().known().empty_fixed_array.as_handle();
     let obj = thread.heap().allocate_object(
         scope,
         ObjectSlotsInit {
@@ -359,7 +359,7 @@ fn load_null_handler() {
     let result = result.expect("program must not throw");
     let null = {
         let heap = thread.heap();
-        heap.known().null.as_tagged(heap).raw()
+        heap.known().null.get(heap).raw()
     };
     assert_eq!(result, null);
 }
@@ -422,8 +422,8 @@ fn run_boolean(program: &[u8], register_count: usize, args: &[Value]) -> bool {
         })
         .expect("program must not throw");
     let heap = thread.heap();
-    let t = heap.known().true_object.as_tagged(heap).erase();
-    let f = heap.known().false_object.as_tagged(heap).erase();
+    let t = heap.known().true_object.get(heap).erase();
+    let f = heap.known().false_object.get(heap).erase();
     if result == t.raw() {
         true
     } else if result == f.raw() {
@@ -555,7 +555,7 @@ fn throw_handler() {
     });
     let exception = {
         let heap = thread.heap();
-        heap.known().exception.as_tagged(heap).raw()
+        heap.known().exception.get(heap).raw()
     };
     assert_eq!(result, Ok(exception));
     assert!(thread.has_pending_exception(), "the throw must surface");
@@ -576,7 +576,7 @@ fn call_non_callable_throws() {
     });
     let exception = {
         let heap = thread.heap();
-        heap.known().exception.as_tagged(heap).raw()
+        heap.known().exception.get(heap).raw()
     };
     assert_eq!(result, Ok(exception));
     assert!(thread.has_pending_exception(), "the raise must surface");

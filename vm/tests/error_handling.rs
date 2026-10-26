@@ -18,8 +18,8 @@ fn callable(
     register_count: usize,
     handlers: Option<&[HandlerEntryInit]>,
 ) -> Value {
-    let _the_hole = thread.heap().known().the_hole;
-    let empty_context = thread.heap().known().empty_context;
+    let _the_hole = thread.heap().known().the_hole.as_handle();
+    let empty_context = thread.heap().known().empty_context.as_handle();
     let code = thread
         .heap()
         .allocate_handle::<Code>(CodeInit { bytes: program }, scope);
@@ -42,7 +42,7 @@ fn callable(
         },
         scope,
     );
-    let map = thread.heap().known().function_map;
+    let map = thread.heap().known().function_map.as_handle();
     let values = {
         let heap = &*thread.heap();
         scope.stage(&[
@@ -50,7 +50,7 @@ fn callable(
             empty_context.as_tagged(heap).erase(),
         ])
     };
-    let empty_fixed_array = thread.heap().known().empty_fixed_array;
+    let empty_fixed_array = thread.heap().known().empty_fixed_array.as_handle();
     thread
         .heap()
         .allocate_object(
@@ -281,7 +281,7 @@ fn throw_any_value_escapes_as_sentinel() {
     });
     let exception_word = {
         let heap = thread.heap();
-        heap.known().exception.as_tagged(heap).raw()
+        heap.known().exception.get(heap).raw()
     };
     assert_eq!(result, Ok(exception_word));
     assert_eq!(
@@ -409,7 +409,7 @@ fn throw_from_finally_escapes_past_its_own_handler() {
     });
     let exception_word = {
         let heap = thread.heap();
-        heap.known().exception.as_tagged(heap).raw()
+        heap.known().exception.get(heap).raw()
     };
     assert_eq!(result, Ok(exception_word));
     assert_eq!(thread.take_pending_exception(), Some(smi(3)));

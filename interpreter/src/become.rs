@@ -113,15 +113,7 @@ macro_rules! reenter {
         let pc = $pc;
         $ctx.reload_code();
         let fault_ip = unsafe { $ctx.code_ptr().add(pc) };
-        if $acc.get($ctx.heap()).raw().to_bits()
-            == $roots
-                .known($ctx.heap())
-                .exception
-                .as_tagged($ctx.heap())
-                .erase()
-                .raw()
-                .to_bits()
-        {
+        if $acc.get($ctx.heap()) == $roots.exception.get($ctx.heap()).erase() {
             become throw_dispatch::<STRIDE>(fault_ip, $regs, $acc, $ctx, $table, $roots, $float)
         }
         let p = fault_ip.wrapping_add(
@@ -172,15 +164,7 @@ macro_rules! call_enter {
         if value {
             $ctx.reload_code();
             let fault_ip = unsafe { $ctx.code_ptr().add($pc) };
-            if acc.get($ctx.heap()).raw().to_bits()
-                == $roots
-                    .known($ctx.heap())
-                    .exception
-                    .as_tagged($ctx.heap())
-                    .erase()
-                    .raw()
-                    .to_bits()
-            {
+            if acc.get($ctx.heap()) == $roots.exception.get($ctx.heap()).erase() {
                 become throw_dispatch::<STRIDE>(fault_ip, $regs, acc, $ctx, $table, $roots, $float)
             }
             let size =
@@ -191,13 +175,7 @@ macro_rules! call_enter {
             become h(p, regs, acc, $ctx, $table, $roots, $float)
         }
         let regs = unsafe { Regs::new($ctx.regs_ptr()) };
-        let acc = Acc::set(
-            $roots
-                .known($ctx.heap())
-                .undefined
-                .as_tagged($ctx.heap())
-                .erase(),
-        );
+        let acc = Acc::set($roots.undefined.get($ctx.heap()).erase());
         let entry = $ctx.code_ptr();
         let h = $table.get(unsafe { *entry });
         become h(entry, regs, acc, $ctx, $table, $roots, $float)
@@ -383,7 +361,7 @@ fn enter<'a>(
             let stack = state.stack();
             let new_target_value = match &new_target {
                 Some(nt) => nt.as_tagged(heap).erase(),
-                None => heap.known().undefined.as_tagged(heap).erase(),
+                None => vm.known().undefined.get(heap).erase(),
             };
             let frame = stack.push_frame_values(
                 heap,
@@ -403,15 +381,9 @@ fn enter<'a>(
             let ip = ctx.code_ptr();
             let regs = unsafe { Regs::new(ctx.regs_ptr()) };
             let table = TableArg::new(&TABLE);
-            let roots = RootsArg::from_heap(ctx.heap());
+            let roots = RootsArg::new(vm.known());
 
-            let acc = Acc::set(
-                roots
-                    .known(ctx.heap())
-                    .undefined
-                    .as_tagged(ctx.heap())
-                    .erase(),
-            );
+            let acc = Acc::set(roots.undefined.get(ctx.heap()).erase());
             let acc = table.get(unsafe { *ip })(
                 ip,
                 regs,
@@ -509,13 +481,7 @@ pub extern "rust-preserve-none" fn throw_dispatch<'h, const STRIDE: usize>(
             dispatch_frame!(handler_pc, acc, ctx, table, roots, float)
         }
         if base == ctx.base_anchor() {
-            return Acc::set(
-                roots
-                    .known(ctx.heap())
-                    .exception
-                    .as_tagged(ctx.heap())
-                    .erase(),
-            );
+            return Acc::set(roots.exception.get(ctx.heap()).erase());
         }
         let caller = ctx.stack().pop_frame(base);
         ctx.switch_frame(caller.base);
@@ -536,12 +502,7 @@ fn op_jump_loop(frame: Frame) {
         frame.ctx().reload_code();
         if shutdown {
             state.set_termination(vm_core::Termination::Shutdown);
-            state.set_pending_exception(
-                roots
-                    .known(frame.ctx().heap())
-                    .undefined
-                    .as_tagged(frame.ctx().heap()),
-            );
+            state.set_pending_exception(roots.undefined.get(frame.ctx().heap()));
             let fault_ip = unsafe { frame.ctx().code_ptr().add(fault) };
             become throw_dispatch::<STRIDE>(
                 fault_ip,
@@ -576,7 +537,7 @@ fn op_return(frame: Frame) {
             .frame_header(frame.ctx().frame_base())
             .new_target_slot()
             .get(heap);
-        new_target != roots.known(heap).undefined.as_tagged(heap).erase()
+        new_target != roots.undefined.get(heap).erase()
     };
 
     if constructing {
@@ -584,7 +545,7 @@ fn op_return(frame: Frame) {
         let val = frame.acc();
         if val.is_primitive(heap) {
             let this_val = frame.regs().get(0, heap);
-            if this_val == roots.known(heap).the_hole.as_tagged(heap).erase() {
+            if this_val == roots.the_hole.get(heap).erase() {
                 // a derived constructor escaped without initializing `this`
                 let caller = frame.ctx().stack().pop_frame(frame.ctx().frame_base());
                 frame.ctx().switch_frame(caller.base);
@@ -720,11 +681,7 @@ fn op_call_function0(frame: Frame) {
         frame.unsigned::<1>(),
         frame.signed::<0>(),
         callee,
-        roots
-            .known(frame.ctx().heap())
-            .undefined
-            .as_tagged(frame.ctx().heap())
-            .erase(),
+        roots.undefined.get(frame.ctx().heap()).erase(),
         &[],
     );
     call_enter!(result, pc)
@@ -742,11 +699,7 @@ fn op_call_function1(frame: Frame) {
         frame.unsigned::<2>(),
         frame.signed::<0>(),
         callee,
-        roots
-            .known(frame.ctx().heap())
-            .undefined
-            .as_tagged(frame.ctx().heap())
-            .erase(),
+        roots.undefined.get(frame.ctx().heap()).erase(),
         &[arg0][..1],
     );
     call_enter!(result, pc)
@@ -765,11 +718,7 @@ fn op_call_function2(frame: Frame) {
         frame.unsigned::<3>(),
         frame.signed::<0>(),
         callee,
-        roots
-            .known(frame.ctx().heap())
-            .undefined
-            .as_tagged(frame.ctx().heap())
-            .erase(),
+        roots.undefined.get(frame.ctx().heap()).erase(),
         &[arg0, arg1][..2],
     );
     call_enter!(result, pc)
@@ -794,13 +743,7 @@ fn op_construct(frame: Frame) {
     ) {
         Ok(ConstructStart::Frame) => {
             let regs = unsafe { Regs::new(frame.ctx().regs_ptr()) };
-            let acc = Acc::set(
-                roots
-                    .known(frame.ctx().heap())
-                    .undefined
-                    .as_tagged(frame.ctx().heap())
-                    .erase(),
-            );
+            let acc = Acc::set(roots.undefined.get(frame.ctx().heap()).erase());
             let entry = frame.ctx().code_ptr();
             let h = table.get(unsafe { *entry });
             become h(entry, regs, acc, frame.ctx(), table, roots, float)

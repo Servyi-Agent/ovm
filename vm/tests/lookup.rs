@@ -30,14 +30,14 @@ fn thread() -> (VM, Thread) {
 /// The well-known `null` word for `thread`'s heap.
 fn null_word(thread: &mut Thread) -> Value {
     let heap = thread.heap();
-    heap.known().null.as_tagged(heap).raw()
+    heap.known().null.get(heap).raw()
 }
 
 /// A fresh ordinary object with `proto` (any of the three shapes) and
 /// integer-valued data properties.
 fn object_with(thread: &mut Thread, proto: Value, props: &[(&str, i64)]) -> Value {
     thread.handle_scope(|thread, scope| {
-        let map = thread.heap().known().object_initial_map;
+        let map = thread.heap().known().object_initial_map.as_handle();
         let obj = thread
             .heap()
             .new_object(&scope, map, HandleSlice::EMPTY)
@@ -118,7 +118,7 @@ fn super_lookup_dispatches_all_three_prototype_shapes() {
         let heap = &*thread.heap();
         assert!(matches!(
             unsafe { anchored(heap, home) }.super_lookup(heap, x).unwrap(),
-            LoadOutcome::Value(v) if v.raw() == heap.known().undefined.as_tagged(heap).raw()
+            LoadOutcome::Value(v) if v.raw() == heap.known().undefined.get(heap).raw()
         ));
     };
 

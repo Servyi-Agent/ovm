@@ -31,7 +31,7 @@ pub fn array_constructor<'a>(
             },
             _ => None,
         };
-        let hole = heap.known().the_hole.as_tagged(heap).erase();
+        let hole = heap.known().the_hole.get(heap).erase();
         let (values, _length) = match single_len {
             Some(n) => (vec![hole; n], n),
             None => {
@@ -186,13 +186,13 @@ pub fn array_pop<'a>(
         let this = obj.as_tagged(heap);
         let len = this.as_ref().length();
         if len == 0 {
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         let last = len - 1;
         let value = this
             .as_ref()
             .element_value(heap, last)
-            .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase());
+            .unwrap_or_else(|| heap.known().undefined.get(heap).erase());
         if let Some(dict) = this.as_ref().element_dictionary(heap) {
             dict.as_ref().delete(heap, last);
         } else {
@@ -200,7 +200,7 @@ pub fn array_pop<'a>(
             if elements.is_strong_ptr() && last < elements.as_ref().len() {
                 elements
                     .as_ref()
-                    .set(heap, last, heap.known().the_hole.as_tagged(heap).erase());
+                    .set(heap, last, heap.known().the_hole.get(heap).erase());
             }
         }
         this.as_ref()
@@ -237,7 +237,7 @@ pub fn array_values<'a>(
         return raise_runtime(vm, heap, state, VmError::Type);
     }
     state.handle_scope(|scope| {
-        let map = heap.known().array_iterator_map;
+        let map = scope.handle(heap.known().array_iterator_map.get(heap));
         // Safety: fresh argument word (no allocation since the read).
         let recv = unsafe { Tagged::<Value>::from_value_unchecked(receiver) };
         heap.new_object(&scope, map, scope.stage(&[recv, Smi::new(0).into_tagged()]))
@@ -278,8 +278,8 @@ pub fn array_iterator_next<'a>(
         let done = index.value() as usize >= len;
         let (value, done_value) = if done {
             (
-                scope.handle(heap.known().undefined.as_tagged(heap).erase()),
-                scope.handle(heap.known().true_object.as_tagged(heap).erase()),
+                scope.handle(heap.known().undefined.get(heap).erase()),
+                scope.handle(heap.known().true_object.get(heap).erase()),
             )
         } else {
             // element reads see holes as undefined
@@ -288,12 +288,9 @@ pub fn array_iterator_next<'a>(
                     .as_tagged(heap)
                     .as_heap_object()
                     .and_then(|o| o.as_ref().element_value(heap, index.value() as usize))
-                    .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase()),
+                    .unwrap_or_else(|| heap.known().undefined.get(heap).erase()),
             );
-            (
-                v,
-                scope.handle(heap.known().false_object.as_tagged(heap).erase()),
-            )
+            (v, scope.handle(heap.known().false_object.get(heap).erase()))
         };
         // advance the index slot
         {
@@ -303,7 +300,7 @@ pub fn array_iterator_next<'a>(
             let slots = obj.as_ref().slots(heap);
             slots.set(heap, 1, Smi::new(index.value() + 1).into_tagged());
         };
-        let map = heap.known().iterator_result_map;
+        let map = scope.handle(heap.known().iterator_result_map.get(heap));
         heap.new_object(
             &scope,
             map,
@@ -379,7 +376,7 @@ fn join_impl<'a>(
         }
         // separator = ToString(separator); absent/undefined defaults to ","
         let sep = match separator {
-            Some(h) if h.as_tagged(heap) != heap.known().undefined.as_tagged(heap) => {
+            Some(h) if h.as_tagged(heap) != heap.known().undefined.get(heap) => {
                 match Object::to_string(vm, heap, state, h) {
                     Ok(Some(s)) => {
                         let word = s.raw();
@@ -389,7 +386,7 @@ fn join_impl<'a>(
                             .map(|d| d.to_rust_string(heap))
                             .unwrap_or_default()
                     }
-                    Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+                    Ok(None) => return heap.known().exception.get(heap).erase(),
                     Err(err) => return raise_runtime(vm, heap, state, err),
                 }
             }
@@ -413,8 +410,7 @@ fn join_impl<'a>(
             else {
                 continue;
             };
-            if v == heap.known().undefined.as_tagged(heap) || v == heap.known().null.as_tagged(heap)
-            {
+            if v == heap.known().undefined.get(heap) || v == heap.known().null.get(heap) {
                 continue;
             }
             let h = scope.handle(v);
@@ -427,7 +423,7 @@ fn join_impl<'a>(
                         out.push_str(&d.to_rust_string(heap));
                     }
                 }
-                Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+                Ok(None) => return heap.known().exception.get(heap).erase(),
                 Err(err) => return raise_runtime(vm, heap, state, err),
             }
         }
@@ -474,7 +470,7 @@ pub fn array_length_get<'a>(
         .as_tagged(heap)
         .as_heap_object()
         .map(|o| Smi::new(o.as_ref().length() as i64).into_tagged())
-        .unwrap_or_else(|| heap.known().undefined.as_tagged(heap).erase())
+        .unwrap_or_else(|| heap.known().undefined.get(heap).erase())
 }
 
 /// The array `length` accessor setter (ES 10.4.2.3 ArraySetLength):
@@ -502,7 +498,7 @@ pub fn array_length_set<'a>(
         let value = scope.handle(value);
         let n = match Object::to_numeric(vm, heap, state, value) {
             Ok(Some(n)) => n,
-            Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+            Ok(None) => return heap.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         let new_len = Convert::number_to_uint32(n);
@@ -546,18 +542,18 @@ pub fn array_length_set<'a>(
                     .as_ref()
                     .length
                     .set(heap, obj_t.erase(), Smi::new(effective as i64));
-                return heap.known().undefined.as_tagged(heap).erase();
+                return heap.known().undefined.get(heap).erase();
             }
             let obj_t = obj.as_tagged(heap);
             obj_t
                 .as_ref()
                 .length
                 .set(heap, obj_t.erase(), Smi::new(new_len as i64));
-            return heap.known().undefined.as_tagged(heap).erase();
+            return heap.known().undefined.get(heap).erase();
         }
         let old_len = obj.as_tagged(heap).length();
         if new_len < old_len {
-            let hole = heap.known().the_hole.as_tagged(heap).erase();
+            let hole = heap.known().the_hole.get(heap).erase();
             if let Some(elements) = obj.as_tagged(heap).elements_array(heap) {
                 for i in new_len..old_len.min(elements.len()) {
                     elements.as_ref().set(heap, i, hole);
@@ -576,7 +572,7 @@ pub fn array_length_set<'a>(
             .as_ref()
             .length
             .set(heap, obj_t.erase(), Smi::new(new_len as i64));
-        heap.known().undefined.as_tagged(heap).erase()
+        heap.known().undefined.get(heap).erase()
     })
 }
 
@@ -594,7 +590,7 @@ fn slice_bound(
         return Ok(Some(default));
     };
     let v = h.as_tagged(heap);
-    if v == heap.known().undefined.as_tagged(heap) {
+    if v == heap.known().undefined.get(heap) {
         return Ok(Some(default));
     }
     if let Some(smi) = Smi::decode(v.raw()) {
@@ -637,7 +633,7 @@ pub fn array_slice<'a>(
             0.0,
         ) {
             Ok(Some(v)) => v,
-            Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+            Ok(None) => return heap.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         let end = match slice_bound(
@@ -648,7 +644,7 @@ pub fn array_slice<'a>(
             len,
         ) {
             Ok(Some(v)) => v,
-            Ok(None) => return heap.known().exception.as_tagged(heap).erase(),
+            Ok(None) => return heap.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         let start = if start < 0.0 {
@@ -665,7 +661,7 @@ pub fn array_slice<'a>(
         let start = start as usize;
 
         // one gather pass, then a single bulk FixedArray allocation
-        let hole = heap.known().the_hole.as_tagged(heap).erase().raw();
+        let hole = heap.known().the_hole.get(heap).erase().raw();
         let mut values: Vec<Tagged<'_, Value>> = Vec::with_capacity(count);
         let mut has_hole = false;
         for i in start..start + count {
@@ -711,7 +707,7 @@ pub fn array_sort<'a>(
         // an explicit `undefined` comparator means the default one
         let cmpfn = if args.len() > 1 {
             let c = args.get(heap, 1);
-            if c != heap.known().undefined.as_tagged(heap) {
+            if c != heap.known().undefined.get(heap) {
                 if !c.is_callable(heap) {
                     return raise_runtime(vm, heap, state, VmError::Type);
                 }
@@ -722,8 +718,8 @@ pub fn array_sort<'a>(
         } else {
             None
         };
-        let undefined = heap.known().undefined.as_tagged(heap).erase().raw();
-        let exception = heap.known().exception.as_tagged(heap).erase().raw();
+        let undefined = heap.known().undefined.get(heap).erase().raw();
+        let exception = heap.known().exception.get(heap).erase().raw();
         let len = obj.as_tagged(heap).length();
 
         // Root every element up front. The sort can allocate (`ToString`
@@ -882,7 +878,7 @@ pub fn array_sort<'a>(
                     dict.as_ref().delete(heap, k);
                 }
             } else {
-                let hole = heap.known().the_hole.as_tagged(heap).erase().raw();
+                let hole = heap.known().the_hole.get(heap).erase().raw();
                 if let Some(elements) = obj.as_tagged(heap).elements_array(heap) {
                     for j in total..len.min(elements.len()) {
                         // Safety: old-gen singleton word.

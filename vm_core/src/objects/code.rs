@@ -55,7 +55,7 @@ impl HeapObject for Code {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
-        self.header.map.init(heap.known().code_map.as_tagged(heap));
+        self.header.map.init(heap.known().code_map.get(heap));
         self.size
             .set(heap, host, Smi::new(config.bytes.len() as i64));
         // Safety: `layout_for` reserved `bytes.len()` inline bytes.

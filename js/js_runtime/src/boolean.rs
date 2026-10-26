@@ -20,7 +20,7 @@ pub fn boolean_constructor<'a>(
     state.handle_scope(|scope| {
         let arg = args.get(heap, 1);
         let value = scope.handle(Convert::boolean(heap, arg.is_truthy(heap)));
-        let map = heap.known().boolean_wrapper_map;
+        let map = scope.handle(heap.known().boolean_wrapper_map.get(heap));
         heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap).erase()]))
             .erase()
     })

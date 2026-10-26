@@ -7,7 +7,7 @@ use crate::{
     Visitor, WeakFixedArray, Word,
 };
 
-use crate::bootstrap::{KnownCell, WellKnown};
+use crate::bootstrap::WellKnown;
 
 use crate::WEAK_PTR;
 use core::{alloc::Layout, cell::Cell, marker::PhantomData, ops::FnOnce, ptr::NonNull};
@@ -157,6 +157,15 @@ impl<T> GcSlot<T> {
         &self.cell
     }
 
+    /// A handle to a slot whose storage is guaranteed to be stable forever
+    /// (a well-known/root slot). Object-embedded slots are not `'static`
+    /// and therefore cannot be turned into handles this way.
+    pub fn as_handle(&'static self) -> Handle<'static, T> {
+        // Safety: `'static` storage is stable across collections and the
+        // slot is GC-visited by construction.
+        unsafe { Handle::from_location(NonNull::from(self).cast()) }
+    }
+
     /// Initialize a slot without the generational barrier. The caller
     /// guarantees no old→young edge can form: either the host is a fresh
     /// (young) allocation, or `value` is a known old object (e.g. a
@@ -164,6 +173,19 @@ impl<T> GcSlot<T> {
     #[inline]
     pub fn init<'x, U: 'x>(&self, value: impl Into<Tagged<'x, U>>) {
         let v = value.into().raw();
+        debug_assert!(!v.is_weak_ptr(), "weak value stored into a strong slot");
+        self.cell.store_raw(v.to_bits());
+    }
+
+    /// Initialize a slot from a value already typed for exactly this slot.
+    /// Avoids the `Into` inference ambiguity for slot types such as
+    /// `SlotName` that have several `From` conversions.
+    #[inline]
+    pub fn init_tagged<'x>(&self, value: Tagged<'x, T>)
+    where
+        T: 'x,
+    {
+        let v = value.raw();
         debug_assert!(!v.is_weak_ptr(), "weak value stored into a strong slot");
         self.cell.store_raw(v.to_bits());
     }
@@ -583,7 +605,7 @@ impl EdgeVisitable for () {
 pub struct Heap {
     local: Box<dyn LocalHeap>,
     tlab: Tlab,
-    known: *const KnownCell,
+    known: *const WellKnown,
     prototype_registry: *const PrototypeRegistry,
     #[cfg(feature = "stress-minor-gc")]
     stress_armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -621,15 +643,11 @@ impl Heap {
     }
 
     pub fn known(&self) -> &'static WellKnown {
-        unsafe { (*self.known).get() }
+        unsafe { &*self.known }
     }
 
     pub fn prototype_registry(&self) -> &'static PrototypeRegistry {
         unsafe { &*self.prototype_registry }
-    }
-
-    pub fn set_known(&self, known: WellKnown) {
-        unsafe { (*self.known).set(known) }
     }
 
     pub fn write_barrier(&self, host: Tagged<'_, Value>, slot: &RawCell, value: Tagged<'_, Value>) {
@@ -730,12 +748,12 @@ impl Heap {
         // Resolve the fill after the reservation: a TLAB refill above can
         // run a minor collection (the hole is not immortal), and no GC can
         // run between this read and the slot writes below.
-        let fill = self.known().the_hole.as_tagged(self).raw();
+        let fill = self.known().the_hole.get(self).raw();
         let mut ptr = raw.cast::<FixedArray>();
         // Safety: raw memory just reserved; no GC can run inside init.
         let obj = unsafe { ptr.as_mut() };
         let host = obj.tagged(self);
-        obj.header.map.init(self.known().array_map.as_tagged(self));
+        obj.header.map.init(self.known().array_map.get(self));
         obj.size.set(self, host, Smi::new(len as i64));
         for i in 0..len {
             // the host is fresh, so no old→young barrier is needed
@@ -760,7 +778,7 @@ impl Heap {
         let fill = self
             .known()
             .the_hole
-            .as_tagged(self)
+            .get(self)
             .as_maybe_weak()
             .raw()
             .to_bits();
@@ -769,7 +787,7 @@ impl Heap {
         // (the &mut borrow is still outstanding).
         let obj = unsafe { ptr.as_mut() };
         let host = obj.tagged(self);
-        obj.header.map.init(self.known().array_map.as_tagged(self));
+        obj.header.map.init(self.known().array_map.get(self));
         obj.size.set(self, host, Smi::new(len as i64));
         for i in 0..len {
             obj.element_slot(i).as_raw().store_raw(fill);
@@ -786,7 +804,7 @@ impl Heap {
         config: ObjectSlotsInit<'a, '_>,
     ) -> Tagged<'_, Object> {
         let slots: Handle<'a, FixedArray> = if config.values.is_empty() {
-            self.known().empty_fixed_array
+            handles.create_handle(self.known().empty_fixed_array.get(self))
         } else {
             self.allocate_handle::<FixedArray>(config.values, handles)
         };
@@ -805,12 +823,13 @@ impl Heap {
         map: Handle<'a, Map>,
         values: HandleSlice<'a>,
     ) -> Tagged<'_, Object> {
+        let elements = handles.create_handle(self.known().empty_fixed_array.get(self));
         self.allocate_object(
             handles,
             ObjectSlotsInit {
                 map,
                 values,
-                elements: self.known().empty_fixed_array,
+                elements,
                 length: 0,
             },
         )
@@ -828,14 +847,15 @@ impl Heap {
     ) -> Tagged<'_, Object> {
         let capacity = capacity.max(map.as_tagged(self).value_slot_count());
         let slots: Handle<'a, FixedArray> = if capacity == 0 {
-            self.known().empty_fixed_array
+            handles.create_handle(self.known().empty_fixed_array.get(self))
         } else {
             self.allocate_hole_array(capacity).as_handle(handles)
         };
+        let elements = handles.create_handle(self.known().empty_fixed_array.get(self));
         self.allocate::<Object>(ObjectInit {
             map,
             slots,
-            elements: self.known().empty_fixed_array,
+            elements,
             length: 0,
         })
     }
@@ -877,17 +897,13 @@ impl Heap {
         if self.stress_armed.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        let init = ObjectInit {
-            map: self.known().js_array_map,
-            slots: self.known().empty_fixed_array,
-            elements: self.known().empty_fixed_array,
-            length: 0,
-        };
         let size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
         let raw = self.tlab.try_alloc(size)?;
+        let map = self.known().js_array_map.get(self);
+        let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
-        unsafe { ptr.as_mut() }.init(self, &init);
+        unsafe { ptr.as_mut() }.init_raw(self, map, empty, empty, 0);
         // Safety: fresh strong pointer, anchored at this borrow.
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
@@ -902,17 +918,13 @@ impl Heap {
         if self.stress_armed.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
-        let init = ObjectInit {
-            map: self.known().object_initial_map,
-            slots: self.known().empty_fixed_array,
-            elements: self.known().empty_fixed_array,
-            length: 0,
-        };
         let size = Object::layout_for().size().next_multiple_of(Tlab::ALIGN);
         let raw = self.tlab.try_alloc(size)?;
+        let map = self.known().object_initial_map.get(self);
+        let empty = self.known().empty_fixed_array.get(self);
         let mut ptr = raw.cast::<Object>();
         // Safety: raw memory just reserved; no GC can run here.
-        unsafe { ptr.as_mut() }.init(self, &init);
+        unsafe { ptr.as_mut() }.init_raw(self, map, empty, empty, 0);
         // Safety: fresh strong pointer, anchored at this borrow.
         Some(unsafe { Tagged::from_raw_ptr(ptr) })
     }
@@ -944,8 +956,8 @@ impl Heap {
         // Safety: raw memory just reserved; no GC can run here.
         unsafe { ptr.as_mut() }.init_raw(
             self,
-            self.known().js_array_map.as_tagged(self),
-            self.known().empty_fixed_array.as_tagged(self),
+            self.known().js_array_map.get(self),
+            self.known().empty_fixed_array.get(self),
             elements,
             0,
         );
@@ -972,10 +984,11 @@ impl Heap {
         values: HandleSlice<'_>,
     ) -> Tagged<'_, Object> {
         let elements = self.allocate_handle::<FixedArray>(values, scope);
+        let map = scope.handle(self.known().js_array_map.get(self));
         self.allocate_object(
             scope,
             ObjectSlotsInit {
-                map: self.known().js_array_map,
+                map,
                 values: HandleSlice::EMPTY,
                 elements,
                 length: values.len(),
@@ -992,10 +1005,11 @@ impl Heap {
         capacity: usize,
     ) -> Tagged<'_, Object> {
         let elements = self.allocate_hole_array(capacity).as_handle(scope);
+        let map = scope.handle(self.known().js_array_map.get(self));
         self.allocate_object(
             scope,
             ObjectSlotsInit {
-                map: self.known().js_array_map,
+                map,
                 values: HandleSlice::EMPTY,
                 elements,
                 length: 0,
@@ -1060,11 +1074,11 @@ impl GlobalHeap {
         {}
     }
 
-    pub fn new_local(&self, known: &KnownCell, prototype_registry: &PrototypeRegistry) -> Heap {
+    pub fn new_local(&self, known: &WellKnown, prototype_registry: &PrototypeRegistry) -> Heap {
         Heap {
             local: self.shared.new_local(),
             tlab: Tlab::empty(),
-            known: known as *const KnownCell,
+            known: known as *const WellKnown,
             prototype_registry: prototype_registry as *const PrototypeRegistry,
             #[cfg(feature = "stress-minor-gc")]
             stress_armed: std::sync::Arc::clone(&self.stress_armed),

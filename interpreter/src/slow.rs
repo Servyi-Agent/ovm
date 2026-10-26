@@ -35,12 +35,12 @@ pub fn add_body<'a>(
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
         let lhs = match Object::to_primitive(vm, heap, state, lhs, Hint::Default) {
-            Ok(Coercion::Threw) => return roots.known(heap).exception.as_tagged(heap).erase(),
+            Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
             Ok(Coercion::Value(v)) => scope.handle(v),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         let rhs = match Object::to_primitive(vm, heap, state, rhs, Hint::Default) {
-            Ok(Coercion::Threw) => return roots.known(heap).exception.as_tagged(heap).erase(),
+            Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
             Ok(Coercion::Value(v)) => scope.handle(v),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
@@ -90,12 +90,12 @@ pub fn bitwise_body<'a>(
 ) -> Tagged<'a, Value> {
     let a = match Object::to_numeric(vm, heap, state, lhs) {
         Ok(Some(n)) => n,
-        Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
+        Ok(None) => return roots.exception.get(heap).erase(),
         Err(e) => return raise_runtime(vm, heap, state, e),
     };
     let b = match Object::to_numeric(vm, heap, state, rhs) {
         Ok(Some(n)) => n,
-        Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
+        Ok(None) => return roots.exception.get(heap).erase(),
         Err(e) => return raise_runtime(vm, heap, state, e),
     };
     let (ai, bi) = (Convert::number_to_int32(a), Convert::number_to_uint32(b));
@@ -137,7 +137,7 @@ pub fn compare_body<'a>(
         let hint = if loose { Hint::Default } else { Hint::Number };
         let x = if x_obj {
             match Object::to_primitive(vm, heap, state, x, hint) {
-                Ok(Coercion::Threw) => return roots.known(heap).exception.as_tagged(heap).erase(),
+                Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
                 Ok(Coercion::Value(v)) => scope.handle(v),
                 Err(e) => return raise_runtime(vm, heap, state, e),
             }
@@ -146,7 +146,7 @@ pub fn compare_body<'a>(
         };
         let y = if y_obj {
             match Object::to_primitive(vm, heap, state, y, hint) {
-                Ok(Coercion::Threw) => return roots.known(heap).exception.as_tagged(heap).erase(),
+                Ok(Coercion::Threw) => return roots.exception.get(heap).erase(),
                 Ok(Coercion::Value(v)) => scope.handle(v),
                 Err(e) => return raise_runtime(vm, heap, state, e),
             }
@@ -194,7 +194,7 @@ pub fn incdec_body<'a>(
     state.handle_scope(|scope| {
         let n = match Object::to_numeric(vm, heap, state, old) {
             Ok(Some(n)) => n,
-            Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
+            Ok(None) => return roots.exception.get(heap).erase(),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         let old_num: Handle<'_, Value> =
@@ -255,7 +255,7 @@ pub fn apply_store_outcome_body(
                 Ok(v) => {
                     // erase the heap borrow before the sentinel read
                     let bits = v.raw().to_bits();
-                    let sentinel = roots.known(heap).exception.as_tagged(heap).erase();
+                    let sentinel = roots.exception.get(heap).erase();
                     if bits == sentinel.raw().to_bits() {
                         Err(())
                     } else {
@@ -314,7 +314,7 @@ pub fn store_named_tail_body<'a>(
         if let Err(()) =
             apply_store_outcome_body(vm, heap, state, roots, recv, outcome, value, mode)
         {
-            return roots.known(heap).exception.as_tagged(heap).erase();
+            return roots.exception.get(heap).erase();
         }
         if let (Some(fb), Some(prev)) = (fb_slot, prev) {
             InlineCache::update_store(
@@ -380,7 +380,7 @@ macro_rules! numeric_slow {
                 let heap = frame.ctx().heap_mut();
                 match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
                     Ok(Some(val)) => frame.set_acc(val),
-                    Ok(None) => frame.set_acc(roots.known(heap).exception.as_tagged(heap).erase()),
+                    Ok(None) => frame.set_acc(roots.exception.get(heap).erase()),
                     Err(e) => frame.set_acc(raise_runtime(vm, heap, state, e)),
                 }
             });
@@ -400,7 +400,7 @@ macro_rules! numeric_slow {
                 let heap = frame.ctx().heap_mut();
                 match Object::numeric_op(vm, heap, state, lhs, rhs, |$a, $b| $body) {
                     Ok(Some(val)) => frame.set_acc(val),
-                    Ok(None) => frame.set_acc(roots.known(heap).exception.as_tagged(heap).erase()),
+                    Ok(None) => frame.set_acc(roots.exception.get(heap).erase()),
                     Err(e) => frame.set_acc(raise_runtime(vm, heap, state, e)),
                 }
             });
@@ -433,7 +433,7 @@ pub fn slow_negate(frame: Frame) {
         let heap = frame.ctx().heap_mut();
         match Object::to_numeric(vm, heap, state, arg) {
             Ok(Some(n)) => heap.new_number(-n),
-            Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+            Ok(None) => roots.exception.get(heap).erase(),
             Err(e) => raise_runtime(vm, heap, state, e),
         }
     });
@@ -515,7 +515,7 @@ macro_rules! loc_slow {
                 let val = if $sub {
                     match Object::numeric_op(vm, heap, state, lhs, rhs, |a, b| a - b) {
                         Ok(Some(val)) => val,
-                        Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+                        Ok(None) => roots.exception.get(heap).erase(),
                         Err(e) => raise_runtime(vm, heap, state, e),
                     }
                 } else {
@@ -657,7 +657,7 @@ pub fn slow_instance_of(frame: Frame) {
         let heap = frame.ctx().heap_mut();
         match Object::instance_of(vm, heap, state, object, callable) {
             Ok(Some(r)) => Convert::boolean(heap, r),
-            Ok(None) => roots.known(heap).exception.as_tagged(heap).erase(),
+            Ok(None) => roots.exception.get(heap).erase(),
             Err(e) => raise_runtime(vm, heap, state, e),
         }
     });
@@ -702,15 +702,7 @@ pub fn slow_compare_jump(frame: Frame) {
                 frame.set_acc(v);
                 let result = frame.acc();
                 let heap = frame.ctx().heap();
-                if result.raw().to_bits()
-                    == roots
-                        .known(heap)
-                        .exception
-                        .as_tagged(heap)
-                        .erase()
-                        .raw()
-                        .to_bits()
-                {
+                if result.raw().to_bits() == roots.exception.get(heap).erase().raw().to_bits() {
                     // `reenter!` routes the sentinel into
                     // `throw_dispatch` at the faulting instruction
                     reenter!(pc)
@@ -752,18 +744,15 @@ pub fn slow_create_block_context(frame: Frame) {
             )
             .expect("frame context slot holds a ContextObject");
         let slots = if count == 0 {
-            roots.known(heap).empty_fixed_array
+            scope.handle(roots.empty_fixed_array.get(heap))
         } else {
-            let values = scope.stage(&vec![
-                roots.known(heap).the_hole.as_tagged(heap).erase();
-                count
-            ]);
+            let values = scope.stage(&vec![roots.the_hole.get(heap).erase(); count]);
             heap.allocate_handle::<FixedArray>(values, &scope)
         };
         heap.allocate::<ContextObject>(ContextInit {
             outer: Some(outer),
             slots,
-            scope_info: roots.known(heap).empty_scope_info,
+            scope_info: scope.handle(roots.empty_scope_info.get(heap)),
         })
         .erase()
     });
@@ -837,15 +826,13 @@ pub fn slow_keyed_load(frame: Frame) {
         let heap = frame.ctx().heap_mut();
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return Acc::set(roots.known(heap).exception.as_tagged(heap).erase()),
+            Ok(None) => return Acc::set(roots.exception.get(heap).erase()),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
 
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => {
-                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
-                }
+                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
                 Ok(Coercion::Value(v)) => Acc::set(v),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
@@ -906,14 +893,12 @@ pub fn slow_keyed_load_reg(frame: Frame) {
         let heap = frame.ctx().heap_mut();
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return Acc::set(roots.known(heap).exception.as_tagged(heap).erase()),
+            Ok(None) => return Acc::set(roots.exception.get(heap).erase()),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => {
-                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
-                }
+                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
                 Ok(Coercion::Value(v)) => Acc::set(v),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
@@ -990,9 +975,7 @@ pub fn slow_keyed_load_imm(frame: Frame) {
         }
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => {
-                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
-                }
+                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
                 Ok(Coercion::Value(v)) => Acc::set(v),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
@@ -1037,9 +1020,7 @@ pub fn slow_named_load(frame: Frame) {
         );
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::get(vm, heap, state, recv, recv, name.erase()) {
-                Ok(Coercion::Threw) => {
-                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
-                }
+                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
                 Ok(Coercion::Value(v)) => Acc::set(v),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
@@ -1094,7 +1075,7 @@ pub fn global_load_body<'a>(
     throws: bool,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
-        let global = roots.known(heap).global_object;
+        let global = roots.global_object.get(heap);
         let name = scope.handle(
             state
                 .stack()
@@ -1104,7 +1085,7 @@ pub fn global_load_body<'a>(
                 .erase()
                 .as_name(),
         );
-        let out = match global.as_tagged(heap).lookup(heap, name.as_tagged(heap)) {
+        let out = match global.lookup(heap, name.as_tagged(heap)) {
             Lookup::Data { slot, .. } => {
                 let v = scope.handle(slot.get(heap));
                 InlineCache::update_load(
@@ -1116,7 +1097,7 @@ pub fn global_load_body<'a>(
                         .feedback(&*heap)
                         .map(|v| scope.handle(v)),
                     fb_slot,
-                    Some(scope.handle(global.as_tagged(heap))),
+                    Some(scope.handle(global)),
                     scope.handle(name.as_tagged(heap).erase().as_name()),
                     false,
                 );
@@ -1124,18 +1105,18 @@ pub fn global_load_body<'a>(
             }
             Lookup::Accessor { pair, .. } => {
                 let getter = scope.handle(pair.get.get(heap));
-                if getter.as_tagged(heap) == roots.known(heap).undefined.as_tagged(heap) {
+                if getter.as_tagged(heap) == roots.undefined.get(heap) {
                     // a setter-only accessor: the read yields undefined
-                    return roots.known(heap).undefined.as_tagged(heap).erase();
+                    return roots.undefined.get(heap).erase();
                 }
-                let args = scope.stage(&[global.as_tagged(heap).erase()]);
+                let args = scope.stage(&[global.erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
                     Err(e) => return raise_runtime(vm, heap, state, e),
                 }
             }
             Lookup::NotFound if !throws => {
-                return roots.known(heap).undefined.as_tagged(heap).erase();
+                return roots.undefined.get(heap).erase();
             }
             Lookup::NotFound => {
                 // unresolvable reference: GetValue throws a
@@ -1149,7 +1130,7 @@ pub fn global_load_body<'a>(
                 let ex = Errors::not_defined(vm, heap, state, &text)
                     .expect("error materialization must not fail");
                 state.set_pending_exception(ex);
-                return roots.known(heap).exception.as_tagged(heap).erase();
+                return roots.exception.get(heap).erase();
             }
         };
         out.as_tagged(heap).erase()
@@ -1220,14 +1201,14 @@ pub fn keyed_store_body<'a>(
     state.handle_scope(|scope| {
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::set(vm, heap, state, recv, raw_key, value, recv) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
+                Ok(Coercion::Threw) => roots.exception.get(heap).erase(),
                 Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
                 Err(e) => raise_runtime(vm, heap, state, e),
             };
         }
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return roots.known(heap).exception.as_tagged(heap).erase(),
+            Ok(None) => return roots.exception.get(heap).erase(),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         let name: Handle<'_, SlotName> = match key.as_tagged(heap).erase().classify_key(heap) {
@@ -1253,10 +1234,10 @@ pub fn keyed_store_body<'a>(
                                 .and_then(|d| d.find(heap, i).map(|e| d.value_at(heap, e)))
                                 .and_then(|v| v.get_as::<AccessorPair>(heap));
                             let Some(pair) = pair else {
-                                return roots.known(heap).exception.as_tagged(heap).erase();
+                                return roots.exception.get(heap).erase();
                             };
                             let setter = pair.set.get(heap);
-                            if setter == roots.known(heap).undefined.as_tagged(heap) {
+                            if setter == roots.undefined.get(heap) {
                                 return if mode.is_strict() {
                                     raise_runtime(vm, heap, state, VmError::Type)
                                 } else {
@@ -1275,7 +1256,7 @@ pub fn keyed_store_body<'a>(
                                 mode,
                             ) {
                                 Ok(()) => value.as_tagged(heap).erase(),
-                                Err(()) => roots.known(heap).exception.as_tagged(heap).erase(),
+                                Err(()) => roots.exception.get(heap).erase(),
                             };
                         }
                         Some(EntryClass::ReadOnly) => {
@@ -1378,7 +1359,7 @@ pub fn keyed_store_body<'a>(
         };
         match apply_store_outcome_body(vm, heap, state, roots, recv, outcome, value, mode) {
             Ok(()) => value.as_tagged(heap).erase(),
-            Err(()) => roots.known(heap).exception.as_tagged(heap).erase(),
+            Err(()) => roots.exception.get(heap).erase(),
         }
     })
 }
@@ -1468,7 +1449,7 @@ pub fn slow_store_named(frame: Frame) {
 
         if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
             return match Proxy::set(vm, heap, state, recv, name.erase(), value, recv) {
-                Ok(Coercion::Threw) => roots.known(heap).exception.as_tagged(heap).erase(),
+                Ok(Coercion::Threw) => roots.exception.get(heap).erase(),
                 Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
                 Err(e) => raise_runtime(vm, heap, state, e),
             };
@@ -1539,7 +1520,7 @@ pub fn slow_store_global(frame: Frame) {
                 .erase()
                 .as_name(),
         );
-        let global = scope.handle(roots.known(heap).global_object.as_tagged(heap).erase());
+        let global = scope.handle(roots.global_object.get(heap).erase());
         if mode.is_strict()
             && matches!(
                 global.as_tagged(heap).lookup(heap, name.as_tagged(heap)),
@@ -1662,9 +1643,7 @@ pub fn slow_construct(frame: Frame) {
         let args = state.stack().args(base, args_base, count);
         if Proxy::is_proxy(heap, callee.as_tagged(heap)) {
             return match Proxy::construct(vm, heap, state, callee, args, callee) {
-                Ok(Coercion::Threw) => {
-                    Acc::set(roots.known(heap).exception.as_tagged(heap).erase())
-                }
+                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
                 Ok(Coercion::Value(v)) => Acc::set(v),
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
@@ -1679,11 +1658,11 @@ pub fn slow_construct(frame: Frame) {
             .cast::<Object>(heap, callee.as_tagged(heap))
             .expect("constructible callee is an object");
         let receiver = if derived {
-            scope.handle(roots.known(heap).the_hole.as_tagged(heap).erase())
+            scope.handle(roots.the_hole.get(heap).erase())
         } else {
             match Object::create_construct_receiver_value(vm, heap, state, callee_obj.erase()) {
                 Ok(Some(r)) => scope.handle(r),
-                Ok(None) => return Acc::set(roots.known(heap).exception.as_tagged(heap).erase()),
+                Ok(None) => return Acc::set(roots.exception.get(heap).erase()),
                 Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
             }
         };
@@ -1702,8 +1681,8 @@ pub fn slow_construct(frame: Frame) {
             Ok(v) => scope.handle(v),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
-        if result.as_tagged(heap) == roots.known(heap).exception.as_tagged(heap).erase() {
-            return Acc::set(roots.known(heap).exception.as_tagged(heap).erase());
+        if result.as_tagged(heap) == roots.exception.get(heap).erase() {
+            return Acc::set(roots.exception.get(heap).erase());
         }
         if result.as_tagged(heap).is_primitive(heap) {
             if derived {

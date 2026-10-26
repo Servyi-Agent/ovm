@@ -16,11 +16,7 @@ fn eval_ok(src: &str) {
         Ok(v) => {
             // uncaught throws surface as the exception sentinel value
             let heap = &*thread.heap();
-            assert_ne!(
-                v,
-                heap.known().exception.as_tagged(heap).raw(),
-                "script threw"
-            );
+            assert_ne!(v, heap.known().exception.get(heap).raw(), "script threw");
         }
         Err(e) => panic!("script failed: {e}"),
     }

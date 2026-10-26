@@ -18,7 +18,7 @@ impl WrapperKind {
             WrapperKind::Number => v.is_smi() || v.get_as::<Float>(heap).is_some(),
             WrapperKind::Boolean => {
                 let known = heap.known();
-                v == known.true_object.as_tagged(heap) || v == known.false_object.as_tagged(heap)
+                v == known.true_object.get(heap) || v == known.false_object.get(heap)
             }
             WrapperKind::String => v.get_as::<DenseString>(heap).is_some(),
         }
@@ -62,11 +62,11 @@ impl Object {
                 kind,
                 value_slot_count: 2,
                 descriptors: &[],
-                prototype: heap.known().function_prototype.erase(),
+                prototype: scope.handle(heap.known().function_prototype.get(heap).erase()),
             },
             scope,
         );
-        let empty_context = heap.known().empty_context;
+        let empty_context = scope.handle(heap.known().empty_context.get(heap));
         let obj = heap.new_object(
             scope,
             map,
@@ -87,14 +87,14 @@ impl Object {
         compile: bytecode::CompileFn,
     ) -> Result<(), VmError> {
         let (vm, heap, state) = thread.split();
-        let empty = heap.known().empty_context;
+        let empty = scope.handle(heap.known().empty_context.get(heap));
         let program = compile(src, bytecode::SourceMode::Script).map_err(|e| {
             eprintln!("{name} prelude compile error: {e}");
             VmError::Type
         })?;
         let closure = Materialize::closure_vm(vm, heap, state, scope, &program, empty)?;
         let (vm, heap, state) = thread.split();
-        let exception = heap.known().exception.as_tagged(heap).raw();
+        let exception = heap.known().exception.get(heap).raw();
         let result = HostCtx::enter(
             vm,
             &mut *heap,
@@ -158,7 +158,10 @@ impl Object {
         )?;
 
         // global.Name = fn
-        let global = thread.heap().known().global_object;
+        let global = {
+            let heap = thread.heap();
+            scope.handle(heap.known().global_object.get(heap))
+        };
         // Safety: fresh interned word, rooted below before any allocation.
         let name = scope.handle(name_str.as_tagged(&*thread.heap()));
         Object::define_own_property(

@@ -15,11 +15,7 @@ fn eval_ok(src: &str) {
     match result {
         Ok(v) => {
             let heap = &*thread.heap();
-            assert_ne!(
-                v,
-                heap.known().exception.as_tagged(heap).raw(),
-                "script threw"
-            );
+            assert_ne!(v, heap.known().exception.get(heap).raw(), "script threw");
         }
         Err(e) => panic!("script failed: {e}"),
     }

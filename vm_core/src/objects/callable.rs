@@ -116,9 +116,7 @@ impl HeapObject for CallableInfoObject {
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
         let host = self.tagged(heap);
-        self.header
-            .map
-            .init(heap.known().callable_map.as_tagged(heap));
+        self.header.map.init(heap.known().callable_map.get(heap));
         self.code.set(heap, host, config.code.as_tagged(heap));
         self.mode.set(heap, host, Smi::new(config.mode as i64));
         self.constants
@@ -135,8 +133,7 @@ impl HeapObject for CallableInfoObject {
             None => self.handlers.clear(heap),
         }
         self.feedback.clear(heap);
-        self.name
-            .init(heap.known().the_hole.as_tagged(heap).erase());
+        self.name.init(heap.known().the_hole.get(heap).erase());
         self.formal_parameter_count.set(heap, host, Smi::new(0));
         self.formal_length.set(heap, host, Smi::new(0));
         self.expected_slots
@@ -209,7 +206,7 @@ impl CallableInfoObject {
         self.name.set(
             heap,
             host,
-            name.unwrap_or_else(|| heap.known().the_hole.as_tagged(heap).erase()),
+            name.unwrap_or_else(|| heap.known().the_hole.get(heap).erase()),
         );
         self.formal_parameter_count
             .set(heap, host, Smi::new(formal_parameter_count as i64));
