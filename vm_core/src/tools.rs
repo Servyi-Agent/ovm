@@ -1,6 +1,6 @@
 use crate::{
     Args, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind, NativeIndex,
-    Object, PropertyDescriptor, StringInterner, Tagged, Value, VmError,
+    Object, PropertyDescriptor, StringInterner, Tagged, Value, VmError, WellKnown,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -16,9 +16,9 @@ impl KetteTools {
         _new_target: Option<Handle<'_, Value>>,
         _args: Args,
     ) -> Tagged<'a, Value> {
-        let HostCtx { heap, .. } = ctx;
+        let HostCtx { vm, heap, .. } = ctx;
         heap.collect_minor();
-        heap.known().undefined.get(heap).erase()
+        vm.known().undefined.get(heap).erase()
     }
 
     pub fn force_major_gc<'a>(
@@ -26,9 +26,9 @@ impl KetteTools {
         _new_target: Option<Handle<'_, Value>>,
         _args: Args,
     ) -> Tagged<'a, Value> {
-        let HostCtx { heap, .. } = ctx;
+        let HostCtx { vm, heap, .. } = ctx;
         heap.collect();
-        heap.known().undefined.get(heap).erase()
+        vm.known().undefined.get(heap).erase()
     }
 
     pub fn shutdown<'a>(
@@ -42,22 +42,23 @@ impl KetteTools {
         heap.cancel_executions(&|| {});
         vm.note_shutdown();
         state.set_termination(Termination::Shutdown);
-        state.set_pending_exception(heap.known().undefined.get(heap));
-        heap.known().exception.get(heap).erase()
+        state.set_pending_exception(vm.known().undefined.get(heap));
+        vm.known().exception.get(heap).erase()
     }
 
     pub fn install(
         heap: &mut Heap,
+        roots: &WellKnown,
         interner: &StringInterner,
         scope: &HandleScope<'_>,
     ) -> Result<(), VmError> {
-        let global = heap.known().global_object.as_handle();
+        let global = scope.handle(roots.global_object.get(heap));
         let map = heap.allocate_handle::<Map>(
             MapInit {
                 kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
                 value_slot_count: 0,
                 descriptors: &[],
-                prototype: heap.known().object_prototype.as_handle().erase(),
+                prototype: scope.handle(roots.object_prototype.get(heap).erase()),
             },
             scope,
         );

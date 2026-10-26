@@ -29,13 +29,13 @@ pub fn string_constructor<'a>(
         }
         let s = match Object::to_string(vm, heap, state, arg) {
             Ok(Some(s)) => scope.handle(s),
-            Ok(None) => return heap.known().exception.get(heap).erase(),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
         if !is_construct {
             return s.as_tagged(heap).erase();
         }
-        let map = scope.handle(heap.known().string_wrapper_map.get(heap));
+        let map = scope.handle(vm.known().string_wrapper_map.get(heap));
         heap.new_object(&scope, map, scope.stage(&[s.as_tagged(heap).erase()]))
             .erase()
     })
@@ -51,7 +51,7 @@ pub fn string_value_of<'a>(
     } = nctx;
     let arg = args.get(heap, 0);
     match unsafe { Tagged::<Value>::from_value_unchecked(arg.raw()) }
-        .wrapper_value(heap, WrapperKind::String)
+        .wrapper_value(heap, vm.known(), WrapperKind::String)
         .map(|v| v.raw())
     {
         Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
@@ -69,7 +69,7 @@ pub fn string_to_string<'a>(
     } = nctx;
     let arg = args.get(heap, 0);
     match unsafe { Tagged::<Value>::from_value_unchecked(arg.raw()) }
-        .wrapper_value(heap, WrapperKind::String)
+        .wrapper_value(heap, vm.known(), WrapperKind::String)
         .map(|v| v.raw())
     {
         Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },

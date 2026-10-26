@@ -11,11 +11,12 @@ impl Runtime for KetteRuntime {
 
     fn setup(vm: &mut VM, _state: &mut Self::State) -> Result<(), VmError> {
         let print = vm.register_runtime(console_print);
+        let known = vm.known();
         let mut thread = vm.attach();
         thread.handle_scope(|thread, scope| {
             let object_prototype = {
                 let heap = thread.heap();
-                scope.handle(heap.known().object_prototype.get(heap))
+                scope.handle(known.object_prototype.get(heap))
             };
             let map = thread.heap().allocate_handle::<Map>(
                 MapInit {
@@ -32,7 +33,7 @@ impl Runtime for KetteRuntime {
             let console_name = scope.handle(console_name.as_tagged(&*thread.heap()));
             let global = {
                 let heap = thread.heap();
-                scope.handle(heap.known().global_object.get(heap))
+                scope.handle(known.global_object.get(heap))
             };
             // a bare global `print(x)`, same native as `Console.print`
             Object::install_method(thread, &scope, global, "print", print)?;
@@ -58,7 +59,7 @@ fn console_print<'a>(
     } = nctx;
     if args.len() < 2 {
         println!();
-        return heap.known().undefined.get(heap).erase();
+        return vm.known().undefined.get(heap).erase();
     }
     let v = args.get_handle(heap, 1);
     let text = match Object::to_string(vm, heap, state, v) {
@@ -70,9 +71,9 @@ fn console_print<'a>(
                 .map(|s| s.to_rust_string(heap))
                 .unwrap_or_default()
         }
-        Ok(None) => return heap.known().exception.get(heap).erase(),
+        Ok(None) => return vm.known().exception.get(heap).erase(),
         Err(err) => return raise_runtime(vm, heap, state, err),
     };
     println!("{text}");
-    heap.known().undefined.get(heap).erase()
+    vm.known().undefined.get(heap).erase()
 }

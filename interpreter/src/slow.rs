@@ -154,7 +154,7 @@ pub fn compare_body<'a>(
             y
         };
         let b = match cmp {
-            0 => Compare::equal(heap, x.as_tagged(heap), y.as_tagged(heap)),
+            0 => Compare::equal(heap, &roots, x.as_tagged(heap), y.as_tagged(heap)),
             1 => Ok(Compare::strict_equal(
                 heap,
                 x.as_tagged(heap),
@@ -511,7 +511,7 @@ macro_rules! loc_slow {
                 let lhs = scope.handle(frame.regs().get(dst, frame.ctx().heap()));
                 let rhs = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
                 let heap = frame.ctx().heap_mut();
-                let known = heap.known();
+                let known = &*roots;
                 let val = if $sub {
                     match Object::numeric_op(vm, heap, state, lhs, rhs, |a, b| a - b) {
                         Ok(Some(val)) => val,

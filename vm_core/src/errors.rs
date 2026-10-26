@@ -62,16 +62,16 @@ impl Errors {
 
             // per-class maps carry the right prototype chain (.constructor etc.)
             let map = match class {
-                "TypeError" => heap.known().type_error_map.get(heap),
-                "ReferenceError" => heap.known().reference_error_map.get(heap),
-                "RangeError" => heap.known().range_error_map.get(heap),
-                _ => heap.known().error_map.get(heap),
+                "TypeError" => vm.known().type_error_map.get(heap),
+                "ReferenceError" => vm.known().reference_error_map.get(heap),
+                "RangeError" => vm.known().range_error_map.get(heap),
+                _ => vm.known().error_map.get(heap),
             };
             let obj = heap
                 .new_object(&scope, scope.handle(map), HandleSlice::EMPTY)
                 .as_handle(&scope);
-            let name = scope.handle(heap.known().strings.name.get(heap));
-            let message = scope.handle(heap.known().strings.message.get(heap));
+            let name = scope.handle(vm.known().strings.name.get(heap));
+            let message = scope.handle(vm.known().strings.message.get(heap));
             // root fresh copies before the (allocating) defines below
             let name_value: Handle<'_, DenseString> = scope.handle(name_value.as_tagged(heap));
             let message_value: Handle<'_, DenseString> =

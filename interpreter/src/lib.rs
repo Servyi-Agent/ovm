@@ -78,11 +78,6 @@ impl<'s> RootsArg<'s> {
     }
 
     #[inline(always)]
-    pub fn from_heap(heap: &'s Heap) -> RootsArg<'s> {
-        RootsArg(heap.known())
-    }
-
-    #[inline(always)]
     pub fn known(&self, _heap: &Heap) -> &'s WellKnown {
         self.0
     }

@@ -72,7 +72,7 @@ fn math_unary<'a>(
     f: impl Fn(f64) -> f64,
 ) -> Tagged<'a, Value> {
     let Some(x) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 1)) else {
-        return heap.known().exception.get(heap).erase();
+        return vm.known().exception.get(heap).erase();
     };
     heap.new_number(f(x))
 }
@@ -129,10 +129,10 @@ pub fn math_pow<'a>(
         vm, heap, state, ..
     } = nctx;
     let Some(base) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 1)) else {
-        return heap.known().exception.get(heap).erase();
+        return vm.known().exception.get(heap).erase();
     };
     let Some(exp) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, 2)) else {
-        return heap.known().exception.get(heap).erase();
+        return vm.known().exception.get(heap).erase();
     };
     heap.new_number(base.powf(exp))
 }
@@ -224,7 +224,7 @@ fn math_minmax<'a>(nctx: HostCtx<'a>, args: Args, min: bool) -> Tagged<'a, Value
     let mut i = 1;
     while i < args.len() {
         let Some(x) = rt_try!(vm, heap, state, arg_as_f64(vm, heap, state, args, i)) else {
-            return heap.known().exception.get(heap).erase();
+            return vm.known().exception.get(heap).erase();
         };
         if x.is_nan() {
             result = f64::NAN;

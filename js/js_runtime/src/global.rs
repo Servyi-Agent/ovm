@@ -5,7 +5,7 @@ use vm_core::Object;
 use vm_core::materialize::Materialize;
 use vm_core::{
     Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, Smi, Tagged,
-    ThreadState, VM, Value, VmError,
+    ThreadState, VM, Value, VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -49,7 +49,7 @@ pub fn eval_runtime<'a>(
                     Errors::from_vm_error(vm, heap, state, VmError::Type)
                 );
                 state.set_pending_exception(ex);
-                return heap.known().exception.get(heap).erase();
+                return vm.known().exception.get(heap).erase();
             }
         };
 
@@ -90,7 +90,7 @@ pub fn is_nan<'a>(
         })
     );
     let Some(n) = n else {
-        return heap.known().exception.get(heap).erase();
+        return vm.known().exception.get(heap).erase();
     };
 
     Convert::boolean(heap, n.is_nan())
@@ -108,7 +108,7 @@ pub fn print<'a>(
     } = nctx;
     if args.len() < 2 {
         println!();
-        return heap.known().undefined.get(heap).erase();
+        return vm.known().undefined.get(heap).erase();
     }
     let arg = args.get_handle(heap, 1);
     let text = match Object::to_string(vm, heap, state, arg) {
@@ -120,18 +120,18 @@ pub fn print<'a>(
                 .map(|s| s.to_rust_string(heap))
                 .unwrap_or_default()
         }
-        Ok(None) => return heap.known().exception.get(heap).erase(),
+        Ok(None) => return vm.known().exception.get(heap).erase(),
         Err(err) => return raise_runtime(vm, heap, state, err),
     };
     println!("{text}");
-    heap.known().undefined.get(heap).erase()
+    vm.known().undefined.get(heap).erase()
 }
 
 /// The inline half of a `console.log` argument read: Smis, strings, and the
 /// singleton primitives stringify with no coercion and no allocation.
 #[inline]
-fn primitive_to_string(heap: &Heap, v: Tagged<'_, Value>) -> Option<String> {
-    let known = heap.known();
+fn primitive_to_string(heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> Option<String> {
+    let known = roots;
     if let Some(smi) = Smi::decode(v.raw()) {
         return Some(smi.value().to_string());
     }
@@ -188,18 +188,18 @@ pub fn console_log<'a>(
     for i in 1..args.len() {
         // Safety: `i < args.len()`, so the slot exists.
         let arg = args.get_handle(heap, i);
-        if let Some(text) = primitive_to_string(heap, arg.as_tagged(heap)) {
+        if let Some(text) = primitive_to_string(heap, vm.known(), arg.as_tagged(heap)) {
             parts.push(text);
             continue;
         }
         match console_arg_cold(vm, heap, state, arg) {
             Ok(Some(text)) => parts.push(text),
-            Ok(None) => return heap.known().exception.get(heap).erase(),
+            Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         }
     }
     println!("{}", parts.join(" "));
-    heap.known().undefined.get(heap).erase()
+    vm.known().undefined.get(heap).erase()
 }
 
 /// `performance.now()`: fractional milliseconds since the Unix epoch

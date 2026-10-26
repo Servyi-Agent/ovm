@@ -86,7 +86,7 @@ pub fn raise_runtime<'a>(
         Errors::from_vm_error(vm, heap, state, err).expect("error materialization must not fail");
     state.set_pending_exception(ex);
     state.set_last_error(err);
-    heap.known().exception.get(heap).erase()
+    vm.known().exception.get(heap).erase()
 }
 
 /// `?` for runtime bodies: fold an internal `Result` into the sentinel

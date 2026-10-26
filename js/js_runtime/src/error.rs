@@ -53,16 +53,16 @@ pub fn make_error<'a>(nctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, 
             )
         };
         let map = match class {
-            "TypeError" => heap.known().type_error_map.get(heap),
-            "ReferenceError" => heap.known().reference_error_map.get(heap),
-            _ => heap.known().error_map.get(heap),
+            "TypeError" => vm.known().type_error_map.get(heap),
+            "ReferenceError" => vm.known().reference_error_map.get(heap),
+            _ => vm.known().error_map.get(heap),
         };
 
         let obj = heap
             .new_object(&scope, scope.handle(map), HandleSlice::EMPTY)
             .as_handle(&scope);
-        let name = scope.handle(heap.known().strings.name.get(heap));
-        let message_key = scope.handle(heap.known().strings.message.get(heap));
+        let name = scope.handle(vm.known().strings.name.get(heap));
+        let message_key = scope.handle(vm.known().strings.message.get(heap));
         let class_value = vm.interner().intern_str(heap, &scope, class);
         let _ = Object::define_own_property(
             heap,
@@ -101,7 +101,7 @@ pub fn error_to_string<'a>(
             Lookup::get_property_on(vm, heap, state, receiver, receiver, name_key.erase())
         ) {
             Coercion::Value(v) => scope.handle(v),
-            Coercion::Threw => scope.handle(heap.known().exception.get(heap).erase()),
+            Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),
         };
         let message_key = vm.interner().intern_str(heap, &scope, "message");
         let message = match rt_try!(
@@ -111,7 +111,7 @@ pub fn error_to_string<'a>(
             Lookup::get_property_on(vm, heap, state, receiver, receiver, message_key.erase(),)
         ) {
             Coercion::Value(v) => scope.handle(v),
-            Coercion::Threw => scope.handle(heap.known().exception.get(heap).erase()),
+            Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),
         };
 
         let a = scope.handle(

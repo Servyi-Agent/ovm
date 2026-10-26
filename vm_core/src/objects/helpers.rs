@@ -1,7 +1,7 @@
 use crate::materialize::Materialize;
 use crate::{
     DenseString, Float, Handle, HandleScope, HandleSlice, Heap, HostCtx, Map, MapInit, MapKind,
-    NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, Value, VmError,
+    NativeIndex, Object, PropertyDescriptor, Smi, Tagged, Thread, Value, VmError, WellKnown,
 };
 
 #[derive(Copy, Clone)]
@@ -13,12 +13,11 @@ pub enum WrapperKind {
 
 impl WrapperKind {
     #[inline]
-    fn matches(self, heap: &Heap, v: Tagged<'_, Value>) -> bool {
+    fn matches(self, heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> bool {
         match self {
             WrapperKind::Number => v.is_smi() || v.get_as::<Float>(heap).is_some(),
             WrapperKind::Boolean => {
-                let known = heap.known();
-                v == known.true_object.get(heap) || v == known.false_object.get(heap)
+                v == roots.true_object.get(heap) || v == roots.false_object.get(heap)
             }
             WrapperKind::String => v.get_as::<DenseString>(heap).is_some(),
         }
@@ -87,14 +86,14 @@ impl Object {
         compile: bytecode::CompileFn,
     ) -> Result<(), VmError> {
         let (vm, heap, state) = thread.split();
-        let empty = scope.handle(heap.known().empty_context.get(heap));
+        let empty = scope.handle(vm.known().empty_context.get(heap));
         let program = compile(src, bytecode::SourceMode::Script).map_err(|e| {
             eprintln!("{name} prelude compile error: {e}");
             VmError::Type
         })?;
         let closure = Materialize::closure_vm(vm, heap, state, scope, &program, empty)?;
         let (vm, heap, state) = thread.split();
-        let exception = heap.known().exception.get(heap).raw();
+        let exception = vm.known().exception.get(heap).raw();
         let result = HostCtx::enter(
             vm,
             &mut *heap,
@@ -159,8 +158,8 @@ impl Object {
 
         // global.Name = fn
         let global = {
-            let heap = thread.heap();
-            scope.handle(heap.known().global_object.get(heap))
+            let (vm, heap, _state) = thread.split();
+            scope.handle(vm.known().global_object.get(heap))
         };
         // Safety: fresh interned word, rooted below before any allocation.
         let name = scope.handle(name_str.as_tagged(&*thread.heap()));
@@ -206,9 +205,10 @@ impl<'a> Tagged<'a, Value> {
     pub fn wrapper_value(
         self,
         heap: &'a Heap,
+        roots: &WellKnown,
         kind: WrapperKind,
     ) -> Result<Tagged<'a, Value>, VmError> {
-        if kind.matches(heap, self) {
+        if kind.matches(heap, roots, self) {
             return Ok(self);
         }
         let Some(obj) = self.as_heap_object() else {
@@ -219,7 +219,7 @@ impl<'a> Tagged<'a, Value> {
             return Err(VmError::Type);
         }
         let value = obj.slots(heap).at(heap, 0);
-        if kind.matches(heap, value) {
+        if kind.matches(heap, roots, value) {
             Ok(value)
         } else {
             Err(VmError::Type)

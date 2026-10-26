@@ -11,7 +11,7 @@ pub fn boolean_constructor<'a>(
 ) -> Tagged<'a, Value> {
     let is_construct = new_target.is_some();
     let HostCtx {
-        vm: _, heap, state, ..
+        vm, heap, state, ..
     } = nctx;
     if !is_construct {
         let arg = args.get(heap, 1);
@@ -20,7 +20,7 @@ pub fn boolean_constructor<'a>(
     state.handle_scope(|scope| {
         let arg = args.get(heap, 1);
         let value = scope.handle(Convert::boolean(heap, arg.is_truthy(heap)));
-        let map = scope.handle(heap.known().boolean_wrapper_map.get(heap));
+        let map = scope.handle(vm.known().boolean_wrapper_map.get(heap));
         heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap).erase()]))
             .erase()
     })
@@ -36,7 +36,7 @@ pub fn boolean_value_of<'a>(
     } = nctx;
     let arg = args.get(heap, 0);
     match unsafe { Tagged::<Value>::from_value_unchecked(arg.raw()) }
-        .wrapper_value(heap, WrapperKind::Boolean)
+        .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
         .map(|v| v.raw())
     {
         Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
@@ -55,7 +55,7 @@ pub fn boolean_to_string<'a>(
     state.handle_scope(|scope| {
         let arg = args.get(heap, 0);
         let v = match unsafe { Tagged::<Value>::from_value_unchecked(arg.raw()) }
-            .wrapper_value(heap, WrapperKind::Boolean)
+            .wrapper_value(heap, vm.known(), WrapperKind::Boolean)
             .map(|v| v.raw())
         {
             Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },

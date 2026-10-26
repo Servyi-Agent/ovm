@@ -7,7 +7,7 @@ use vm_core::Lookup;
 use vm_core::materialize::Materialize;
 use vm_core::{
     Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, Smi, Tagged,
-    Value, VmError,
+    Value, VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -73,6 +73,7 @@ pub fn function_apply<'a>(
     state.handle_scope(|scope| {
         let staged = scope.stage(&spread_apply_args(
             heap,
+            vm.known(),
             this_arg.as_tagged(heap),
             array.map(|a| a.as_tagged(heap)),
         ));
@@ -114,7 +115,7 @@ pub fn function_bind<'a>(
             .interner()
             .intern_str(heap, &scope, "__makeBound")
             .erase();
-        let proto = heap.known().function_prototype.as_handle().erase();
+        let proto = scope.handle(vm.known().function_prototype.get(heap).erase());
         let make_bound = match rt_try!(
             vm,
             heap,
@@ -122,7 +123,7 @@ pub fn function_bind<'a>(
             Lookup::get_property_on(vm, heap, state, proto, proto, name)
         ) {
             Coercion::Threw => {
-                return heap.known().exception.get(heap).erase();
+                return vm.known().exception.get(heap).erase();
             }
             // Safety: fresh word from the lookup, rooted immediately.
             Coercion::Value(v) => scope.handle(v),
@@ -137,7 +138,7 @@ pub fn function_bind<'a>(
         // args[0] is the receiver (undefined for the plain call)
         // Safety: fresh rooted-slot words staged for the call.
         let staged = scope.stage(&[
-            heap.known().undefined.get(heap).erase(),
+            vm.known().undefined.get(heap).erase(),
             f.as_tagged(heap).erase(),
             this_arg.as_tagged(heap).erase(),
             array.as_tagged(heap).erase(),
@@ -182,7 +183,7 @@ pub fn function_constructor<'a>(
         let context = scope.handle(
             state
                 .current_context(heap)
-                .unwrap_or_else(|| heap.known().empty_context.get(heap).erase()),
+                .unwrap_or_else(|| vm.known().empty_context.get(heap).erase()),
         );
         // ToString all arguments (user toString may run)
         let mut parts: Vec<String> = Vec::with_capacity(argv.len());
@@ -213,7 +214,7 @@ pub fn function_constructor<'a>(
                     Errors::from_vm_error(vm, heap, state, VmError::Type)
                 );
                 state.set_pending_exception(ex);
-                return heap.known().exception.get(heap).erase();
+                return vm.known().exception.get(heap).erase();
             }
         };
         let Some(context) = scope.cast::<ContextObject>(heap, context.as_tagged(heap)) else {
@@ -239,6 +240,7 @@ pub fn function_constructor<'a>(
 /// undefined; a missing/nullish array yields just the receiver).
 fn spread_apply_args<'a>(
     heap: &'a Heap,
+    roots: &WellKnown,
     this_arg: Tagged<'a, Value>,
     array: Option<Tagged<'a, Value>>,
 ) -> Vec<Tagged<'a, Value>> {
@@ -246,15 +248,15 @@ fn spread_apply_args<'a>(
     let Some(array) = array else {
         return out;
     };
-    let undefined = heap.known().undefined.get(heap).erase();
-    if array == undefined || array == heap.known().null.get(heap) {
+    let undefined = roots.undefined.get(heap).erase();
+    if array == undefined || array == roots.null.get(heap) {
         return out;
     }
     let len = array
         .as_heap_object()
         .map(|o| {
             o.as_ref()
-                .array_length(heap, heap.known().strings.length.get(heap))
+                .array_length(heap, roots.strings.length.get(heap))
                 .and_then(|v| Smi::decode(v.raw()).map(|s| s.value() as usize))
                 .unwrap_or(0)
         })

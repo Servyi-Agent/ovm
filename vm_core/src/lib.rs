@@ -426,10 +426,10 @@ impl SharedVM {
     /// stack handle scope; the installed object stays reachable through
     /// the global object after it dies.
     fn install_tools(&self, local: &mut Heap) {
-        let data = HandleData::new(local.known().the_hole.get(local).erase());
+        let data = HandleData::new(self.known.the_hole.get(local).erase());
         // Safety: `data` outlives every use of the scope below.
         let scope = unsafe { HandleScope::from_raw(NonNull::from(&data)) };
-        KetteTools::install(local, &self.interner, &scope)
+        KetteTools::install(local, &self.known, &self.interner, &scope)
             .expect("installing KetteTools must not fail");
     }
 }
@@ -532,7 +532,7 @@ impl Thread {
         if self.state.termination().is_some() {
             let _ = self.state.take_pending_exception();
             let heap = &self.heap;
-            return Ok(heap.known().undefined.get(heap).raw());
+            return Ok(self.vm.known().undefined.get(heap).raw());
         }
         result
     }
@@ -542,7 +542,7 @@ impl Thread {
     }
 
     pub fn run_runtime(&mut self, f: NativeFn, args: &[Value]) -> Result<Value, VmError> {
-        let exception = self.heap.known().exception.get(&self.heap).raw();
+        let exception = self.vm.known().exception.get(&self.heap).raw();
         let nctx = HostCtx::new(&self.vm, &mut self.heap, &self.state);
         // stage a rooted copy: the runtime may keep reading it across its
         // own allocations
@@ -727,8 +727,8 @@ impl VM {
             .heap
             .new_local(&self.shared.known, &self.shared.prototype_registry);
         // Safety: root-slot reads stored straight into rooted fill cells.
-        let the_hole = heap.known().the_hole.get(&heap).erase();
-        let undefined = heap.known().undefined.get(&heap).erase();
+        let the_hole = self.known().the_hole.get(&heap).erase();
+        let undefined = self.known().undefined.get(&heap).erase();
         let state = Arc::new(ThreadState {
             handles: HandleData::new(the_hole),
             stack: Stack::new(STACK_SLOTS, the_hole, undefined),

@@ -642,6 +642,9 @@ impl Heap {
         Ok(ptr)
     }
 
+    /// Root table access for allocator/init paths and heap-internal code
+    /// (`GcSlot`, `OptionGcSlot`, stack/root machinery, bootstrap).
+    /// Normal VM/context-aware code should use `VM::known()` instead.
     pub fn known(&self) -> &'static WellKnown {
         unsafe { &*self.known }
     }

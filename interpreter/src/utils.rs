@@ -3,7 +3,8 @@ use vm_core::ic::{CallHit, CallProbe, CallRecord, InlineCache};
 use vm_core::proxy::Proxy;
 use vm_core::{
     Acc, Args, CallTarget, Callee, Coercion, FeedbackVector, FunctionKind, Handle, HandleScope,
-    Heap, HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, raise_runtime,
+    Heap, HostCtx, Map, NativeIndex, Object, Tagged, ThreadState, Value, VmError, WellKnown,
+    raise_runtime,
 };
 
 use crate::{Regs, RootsArg};
@@ -284,6 +285,7 @@ pub fn proxy_apply_staged<'a>(
 /// so subsequent `new` calls can allocate directly.
 fn construct_cache_record(
     heap: &mut Heap,
+    roots: &WellKnown,
     state: &ThreadState,
     scope: &HandleScope<'_>,
     callee: Handle<'_, Object>,
@@ -298,7 +300,7 @@ fn construct_cache_record(
     let map: Tagged<Map> =
         unsafe { Tagged::from_value_unchecked(obj.as_tagged(heap).map(heap).raw()) };
     // find the closure's `.prototype` data-property slot
-    let proto_name = heap.known().strings.prototype.get(heap);
+    let proto_name = roots.strings.prototype.get(heap);
     let closure_map = callee.as_tagged(heap).map(heap);
     let mut found = None;
     for d in closure_map.as_ref().descriptors() {
@@ -356,11 +358,12 @@ fn construct_receiver_args<'a>(
     callee_reg: i32,
 ) -> Result<Option<Args>, VmError> {
     let vm = x.vm();
+    let roots = vm.known();
     let state = x.state();
     state.handle_scope(|scope| {
         let heap = x.heap_mut();
         let receiver: Handle<'_, Value> = if derived {
-            scope.handle(heap.known().the_hole.get(heap).erase())
+            scope.handle(roots.the_hole.get(heap).erase())
         } else {
             let callee_word = regs.get(callee_reg, heap);
             let Some(callee) = scope.cast::<Object>(heap, callee_word) else {
@@ -391,7 +394,7 @@ fn construct_receiver_args<'a>(
                 let obj: Handle<'_, Object> = scope
                     .cast::<Object>(heap, obj.as_tagged(heap))
                     .expect("receiver is an object");
-                construct_cache_record(heap, state, &scope, callee, obj);
+                construct_cache_record(heap, roots, state, &scope, callee, obj);
                 scope.handle(obj.as_tagged(heap).erase())
             }
         };
@@ -492,7 +495,7 @@ pub fn construct_native<'a>(
         Ok(a) => a,
         Err(err) => {
             let _ = x.raise_tag(err);
-            return x.heap().known().exception.get(x.heap()).erase();
+            return x.vm().known().exception.get(x.heap()).erase();
         }
     };
     let saved = stack.top();

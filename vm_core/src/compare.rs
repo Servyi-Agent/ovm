@@ -1,4 +1,4 @@
-use crate::{DenseString, Float, Heap, Smi, Tagged, Value, VmError};
+use crate::{DenseString, Float, Heap, Smi, Tagged, Value, VmError, WellKnown};
 
 pub struct Compare;
 
@@ -44,10 +44,11 @@ impl Compare {
     /// ES IsLooselyEqual (==) for primitives.
     pub fn equal<'a>(
         heap: &'a Heap,
+        roots: &WellKnown,
         x: Tagged<'a, Value>,
         y: Tagged<'a, Value>,
     ) -> Result<bool, VmError> {
-        let known = heap.known();
+        let known = roots;
         if Self::strict_equal(heap, x, y) {
             return Ok(true);
         }
@@ -76,7 +77,7 @@ impl Compare {
                 0
             })
             .into_tagged();
-            return Self::equal(heap, n, y);
+            return Self::equal(heap, roots, n, y);
         }
         if is_bool(y) {
             let n = Smi::new(if y == known.true_object.get(heap) {
@@ -85,7 +86,7 @@ impl Compare {
                 0
             })
             .into_tagged();
-            return Self::equal(heap, x, n);
+            return Self::equal(heap, roots, x, n);
         }
         let is_object = |v: Tagged<'_, Value>| {
             !v.is_smi() && !is_bool(v) && !nullish(v) && !is_string(v) && !is_number(v)

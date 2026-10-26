@@ -320,7 +320,7 @@ pub fn date_parse<'a>(
                 .map(|d| d.to_rust_string(heap))
                 .unwrap_or_default()
         }
-        Ok(None) => return heap.known().exception.get(heap).erase(),
+        Ok(None) => return vm.known().exception.get(heap).erase(),
         Err(err) => return raise_runtime(vm, heap, state, err),
     };
     let ms = parse_iso(&text)
@@ -356,7 +356,7 @@ pub fn date_constructor<'a>(
                 })
             );
             let Some(ms) = ms else {
-                return heap.known().exception.get(heap).erase();
+                return vm.known().exception.get(heap).erase();
             };
             ms
         }
@@ -375,7 +375,7 @@ pub fn date_constructor<'a>(
     }
 
     state.handle_scope(|scope| {
-        let map = scope.handle(heap.known().date_instance_map.get(heap));
+        let map = scope.handle(vm.known().date_instance_map.get(heap));
         let value = scope.handle(heap.new_number(ms));
         heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap).erase()]))
             .erase()
@@ -425,7 +425,7 @@ fn format_with<'a>(
     } = nctx;
     state.handle_scope(|scope| {
         let receiver = args.get(heap, 0);
-        let exception = heap.known().exception.get(heap).erase().raw();
+        let exception = vm.known().exception.get(heap).erase().raw();
         let word = date_slot(
             vm,
             heap,
@@ -494,7 +494,7 @@ fn date_slot<'a>(
         return raise_runtime(vm, heap, state, VmError::Type);
     };
     let map = obj.as_ref().map(heap);
-    if map != heap.known().date_instance_map.get(heap) {
+    if map != vm.known().date_instance_map.get(heap) {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
     obj.as_ref().slots(heap).at(heap, 0)

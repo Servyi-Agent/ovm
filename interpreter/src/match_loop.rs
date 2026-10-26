@@ -104,10 +104,7 @@ macro_rules! reenter {
         // `ctx` again; the sentinel word is then read through a fresh
         // shared borrow.
         *$acc = Acc::set(v);
-        let sentinel = {
-            let heap = $ctx.heap();
-            heap.known().exception.get(heap).raw().to_bits()
-        };
+        let sentinel = $ctx.vm().known().exception.get($ctx.heap()).raw().to_bits();
         $ctx.reload_code();
         if raw == sentinel {
             $ctx.set_throw_pc($pc);

@@ -88,7 +88,7 @@ pub fn proxy_revocable<'a>(
             .interner()
             .intern_str(heap, &scope, "__makeRevoke")
             .erase();
-        let proto = heap.known().function_prototype.as_handle().erase();
+        let proto = scope.handle(vm.known().function_prototype.get(heap).erase());
         let make_revoke = match rt_try!(
             vm,
             heap,
@@ -96,14 +96,14 @@ pub fn proxy_revocable<'a>(
             Lookup::get_property_on(vm, heap, state, proto, proto, name)
         ) {
             Coercion::Threw => {
-                return heap.known().exception.get(heap).erase();
+                return vm.known().exception.get(heap).erase();
             }
             Coercion::Value(v) => scope.handle(v),
         };
         // Safety: fresh rooted-slot words staged for the call.
-        let exception = heap.known().exception.get(heap).raw();
+        let exception = vm.known().exception.get(heap).raw();
         let staged = scope.stage(&[
-            heap.known().undefined.get(heap).erase(),
+            vm.known().undefined.get(heap).erase(),
             proxy.as_tagged(heap).erase(),
         ]);
         let r = rt_try!(
@@ -113,11 +113,11 @@ pub fn proxy_revocable<'a>(
             HostCtx::enter(vm, &mut *heap, state, make_revoke, staged, None)
         );
         if r.raw() == exception {
-            return heap.known().exception.get(heap).erase();
+            return vm.known().exception.get(heap).erase();
         }
         // Safety: fresh call result, rooted below.
         let revoke = scope.handle(r);
-        let map = scope.handle(heap.known().object_initial_map.get(heap));
+        let map = scope.handle(vm.known().object_initial_map.get(heap));
         let obj = heap
             .new_object(&scope, map, HandleSlice::EMPTY)
             .as_handle(&scope);
@@ -152,10 +152,7 @@ pub fn proxy_revoke<'a>(
     args: Args,
 ) -> Tagged<'a, Value> {
     let HostCtx {
-        vm: _,
-        heap,
-        state: _,
-        ..
+        vm, heap, state: _, ..
     } = nctx;
     let proxy = args.get(heap, 1);
     let proxy = proxy.raw();
@@ -164,7 +161,7 @@ pub fn proxy_revoke<'a>(
         // Safety: fresh argument word, consumed with no allocation delay.
         unsafe { Tagged::<Value>::from_value_unchecked(proxy) },
     );
-    heap.known().undefined.get(heap).erase()
+    vm.known().undefined.get(heap).erase()
 }
 
 /// The revoke-closure template: `done` plays [[RevocableProxy]]'s
