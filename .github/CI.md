@@ -214,8 +214,8 @@ KETTEVM_GC_STRESS=1 cargo run -p vm --example regression     # collect every all
 cargo +nightly run -p vm --features fast --example regression # become interpreter
 ```
 
-The CI `test` job runs the suite for both interpreters after the workspace
-tests. Add a new `tests/regression/*.js` file to include it automatically.
+The CI `regression` job runs the suite for both interpreters. Add a new
+`tests/regression/*.js` file to include it automatically.
 
 ## Badges
 

@@ -112,6 +112,23 @@ jobs:
         working-directory: interpreter
         run: cargo +nightly test --release --locked --features fast
 
+
+  regression:
+    name: regression
+    needs: build
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 10
+    container:
+      image: localhost:5000/kettevm-ci:1
+      options: --user 1501:1501 --cap-drop=ALL --security-opt=no-new-privileges
+      volumes:
+        - kettevm-cargo-target:/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Regression (stable match)
         run: cargo run --release -p vm --example regression --locked
 
