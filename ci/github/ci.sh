@@ -17,6 +17,8 @@ cargo fmt --all --check
 cargo test --workspace --locked
 cargo +nightly test --workspace --locked --features vm/fast
 cargo test --workspace --locked --features vm/stress-minor-gc
+cargo run --release -p vm --example regression --locked
+cargo +nightly run --release -p vm --example regression --features fast --locked
 cargo build --release -p vm --locked
 cargo +nightly build --release -p vm --features fast --locked
 (

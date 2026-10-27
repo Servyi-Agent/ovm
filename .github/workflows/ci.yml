@@ -60,6 +60,7 @@ jobs:
         run: |
           cargo build --release -p vm --locked
           cargo build --release -p vm --example test262 --locked
+          cargo build --release -p vm --example regression --locked
 
       - name: Build tests (match)
         run: cargo test --workspace --locked --no-run
@@ -71,6 +72,7 @@ jobs:
         run: |
           cargo +nightly build --release -p vm --features fast --locked
           cargo +nightly build --release -p vm --example test262 --features fast --locked
+          cargo +nightly build --release -p vm --example regression --features fast --locked
 
       - name: Build tests (nightly become)
         run: cargo +nightly test --workspace --locked --no-run --features vm/fast
@@ -109,3 +111,9 @@ jobs:
       - name: Test (interpreter)
         working-directory: interpreter
         run: cargo +nightly test --release --locked --features fast
+
+      - name: Regression (stable match)
+        run: cargo run --release -p vm --example regression --locked
+
+      - name: Regression (nightly become)
+        run: cargo +nightly run --release -p vm --example regression --features fast --locked

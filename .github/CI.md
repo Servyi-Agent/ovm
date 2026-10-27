@@ -202,6 +202,21 @@ Then update `.github/test262-baseline` (`corpus_commit`, `min_pass`,
 `max_panic`) and the README test262 count badge to the new intentional
 values.
 
+## Regression suite
+
+Small issue-based tests live in `tests/regression/` and run with a
+test262-style `assert` harness from `tests/regression/harness/assert.js`:
+
+```bash
+cargo run -p vm --example regression
+KETTEVM_JOBS=4 cargo run -p vm --example regression          # worker shards
+KETTEVM_GC_STRESS=1 cargo run -p vm --example regression     # collect every allocation
+cargo +nightly run -p vm --features fast --example regression # become interpreter
+```
+
+The CI `test` job runs the suite for both interpreters after the workspace
+tests. Add a new `tests/regression/*.js` file to include it automatically.
+
 ## Badges
 
 The README CI badge tracks the `CI` workflow for `master` pushes. The
