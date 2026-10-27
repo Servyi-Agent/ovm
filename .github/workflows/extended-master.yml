@@ -81,6 +81,32 @@ jobs:
           overwrite: true
           retention-days: 14
 
+  publish-test262-badge:
+    name: publish-test262-badge
+    needs: test262-become
+    if: always()
+    runs-on: [self-hosted, kettevm-ci]
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download test262 log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: test262-become-log-${{ github.sha }}
+          path: badge-log
+
+      - name: Publish test262 badge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./ci/github/publish-test262-badge.sh badge-log/test262.log
+
   gc-stress-match:
     name: gc-stress-match
     needs: test262-become

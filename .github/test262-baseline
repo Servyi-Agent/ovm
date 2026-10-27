@@ -8,10 +8,11 @@
 # Calibrated against test262 main:
 #   d53ebc8b1931d9f1541e43d59650776e4b766248
 # with KETTEVM_JOBS=64:
-#   match:  total=53910 pass=11745 fail=15531 panic=45
-#   become: total=53910 pass=11828 fail=15448 panic=45
+#   match:  total=53910 pass=12582 fail=26315 panic=0
+#   become: total=53910 pass=12582 fail=26315 panic=0
 #
-# The shared minimum is the lower of the two actual pass counts (11745).
+# Both interpreters now dispatch through the same handlers, so the shared
+# minimum is their common current pass count.
 corpus_commit=d53ebc8b1931d9f1541e43d59650776e4b766248
-min_pass=11745
-max_panic=45
+min_pass=12582
+max_panic=0

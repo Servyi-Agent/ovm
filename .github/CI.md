@@ -166,17 +166,18 @@ PR result is the commit status. A failed manual run can therefore show a red
 Both engines use the same gate in `.github/test262-baseline`:
 
 ```text
-min_pass=11745
-max_panic=45
+min_pass=12582
+max_panic=0
 ```
 
 Current actual counts on test262 main `d53ebc8...`:
 
-- match: `pass=11745`, `panic=45`
-- become: `pass=11828`, `panic=45`
+- match: `pass=12582`, `panic=0`
+- become: `pass=12582`, `panic=0`
 
-The shared minimum is the lower of the two pass counts. To see raw counts
-without the gate:
+Both interpreters dispatch through the same handlers, so their counts agree;
+the minimum is the current common pass count. To see raw counts without the
+gate:
 
 ```bash
 TEST262_ENGINES=match  TEST262_MIN_PASS=0 TEST262_MAX_PANIC=999 CI_TEST262=1 ./ci/github/ci.sh
@@ -198,14 +199,16 @@ TEST262_ENGINES="match become" CI_TEST262=1 ./ci/github/ci.sh
 ```
 
 Then update `.github/test262-baseline` (`corpus_commit`, `min_pass`,
-`max_panic`) and the README test262 count badges to the new intentional
-values.
+`max_panic`). The README test262 badge updates itself from the next
+`test262-become` run.
 
 ## Badges
 
 The README CI badge tracks the `CI` workflow for `master` pushes. The
-test262 badge shows the current pass count and percentage of the corpus; it
-is updated when the baseline is recalibrated.
+test262 badge is a shields.io endpoint badge fed from the `badges` branch;
+`publish-test262-badge` parses the `test262-become` log after every master
+push and updates it, so it always shows the latest become pass count and
+percentage of the corpus.
 
 ## Performance runs
 
