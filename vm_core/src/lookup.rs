@@ -106,77 +106,6 @@ impl<'a> Tagged<'a, Value> {
         }
     }
 
-    pub fn chain_holds_index_name(self, heap: &Heap, i: usize) -> bool {
-        self.chain_holds_name(heap, ChainQuery::Index(i))
-    }
-
-    pub fn chain_holds_any_index_name(self, heap: &Heap) -> bool {
-        self.chain_holds_name(heap, ChainQuery::AnyIndex)
-    }
-
-    fn chain_holds_name(self, heap: &Heap, query: ChainQuery) -> bool {
-        let matches = |name: Tagged<'_, SlotName>| match query {
-            ChainQuery::Index(i) => {
-                let smi_name: Tagged<'_, SlotName> = Tagged::from(Smi::new(i as i64));
-                name.ptr_eq(smi_name)
-            }
-            ChainQuery::AnyIndex => name.to_i64().is_some(),
-        };
-        let mut hop = self;
-        while let Some(obj) = hop.as_heap_object() {
-            let map = obj.map(heap);
-            let proto = map.prototype.get(heap);
-            if proto.get_as::<FixedArray>(heap).is_some() {
-                return true;
-            }
-            let known = heap.known();
-            if !proto.is_strong_ptr()
-                || proto == known.null.get(heap).erase()
-                || proto == known.the_hole.get(heap).erase()
-                || proto == known.undefined.get(heap).erase()
-            {
-                return false;
-            }
-            let Some(next) = proto.get_as::<Object>(heap) else {
-                return false;
-            };
-            if next.map(heap).kind().is_proxy() {
-                return true;
-            }
-            let next_map = next.map(heap);
-            if next_map.descriptors().iter().any(|d| matches(d.name(heap))) {
-                return true;
-            }
-            // dictionary hops: accessor or read-only entries intercept
-            // stores at their indices
-            if let Some(dict) = next.element_dictionary(heap) {
-                let intercepts = |details: i64| {
-                    details & (DETAILS_ACCESSOR | DETAILS_WRITABLE) != DETAILS_WRITABLE
-                };
-                let dirty = match query {
-                    ChainQuery::Index(i) => dict
-                        .find(heap, i)
-                        .map(|e| intercepts(dict.details_at(heap, e)))
-                        .unwrap_or(false),
-                    ChainQuery::AnyIndex => {
-                        let mut any = false;
-                        dict.for_each_entry(heap, |_, _, details| {
-                            if intercepts(details) {
-                                any = true;
-                            }
-                        });
-                        any
-                    }
-                };
-                if dirty {
-                    return true;
-                }
-            }
-            hop = next.erase();
-        }
-        false
-    }
-
     pub fn ordinary_own_descriptor<'s>(
         self,
         heap: &'a Heap,
@@ -282,15 +211,6 @@ impl<'a> Tagged<'a, Value> {
         let obj = self.as_heap_object()?;
         Some(obj.prototype(heap))
     }
-
-    pub fn super_lookup(
-        self,
-        heap: &'a Heap,
-        name: Tagged<'a, SlotName>,
-    ) -> Result<LoadOutcome<'a>, VmError> {
-        let proto = self.home_proto(heap);
-        Lookup::super_lookup_from_proto(heap, proto, name)
-    }
 }
 
 impl<'a> Lookup<'a> {
@@ -377,46 +297,6 @@ impl<'a> Lookup<'a> {
         match walk_has(vm, heap, state, scope, start, key)? {
             HasWalk::Value(found) => Ok(Coercion::Value(Convert::boolean(heap, found))),
             HasWalk::Threw => Ok(Coercion::Threw),
-        }
-    }
-}
-
-impl Lookup<'_> {
-    /// Super lookup with a pre-resolved prototype link (ES 15.4.2): the
-    /// prototype is read before the key is coerced, so user `toString` cannot
-    /// change which chain is searched.
-    pub fn super_lookup_from_proto<'a>(
-        heap: &'a Heap,
-        proto: Option<Tagged<'a, Value>>,
-        name: Tagged<'a, SlotName>,
-    ) -> Result<LoadOutcome<'a>, VmError> {
-        match super_start_from_proto(heap, proto) {
-            // single parent: full load semantics
-            SuperStart::Object(start) => start.get_no_gc(heap, name),
-            SuperStart::Parents(parents) => {
-                let mut i = 1;
-                while i < parents.len() {
-                    let parent = parents.at(heap, i);
-                    if let Some(obj) = parent.as_heap_object()
-                        && let Some(v) = obj.array_length(heap, name)
-                    {
-                        return Ok(LoadOutcome::Value(v));
-                    }
-                    match parent.lookup(heap, name) {
-                        Lookup::Data { slot, .. } => {
-                            return Ok(LoadOutcome::Value(slot.get(heap)));
-                        }
-                        Lookup::Accessor { pair, .. } => {
-                            return Ok(LoadOutcome::Getter(pair.get.get(heap)));
-                        }
-                        Lookup::NotFound => {
-                            i += 2;
-                        }
-                    }
-                }
-                Ok(LoadOutcome::Value(heap.known().undefined.get(heap).erase()))
-            }
-            SuperStart::End => Ok(LoadOutcome::Value(heap.known().undefined.get(heap).erase())),
         }
     }
 }
@@ -516,25 +396,6 @@ impl Lookup<'_> {
     }
 }
 
-enum SuperStart<'a> {
-    End,
-    Object(Tagged<'a, Value>),
-    Parents(Tagged<'a, FixedArray>),
-}
-
-fn super_start_from_proto<'a>(heap: &'a Heap, proto: Option<Tagged<'a, Value>>) -> SuperStart<'a> {
-    let Some(proto) = proto else {
-        return SuperStart::End;
-    };
-    if proto == heap.known().null.get(heap) || !proto.is_strong_ptr() {
-        return SuperStart::End;
-    }
-    if let Some(parents) = proto.get_as::<FixedArray>(heap) {
-        return SuperStart::Parents(parents);
-    }
-    SuperStart::Object(proto)
-}
-
 enum Walk<'a> {
     Value(Tagged<'a, Value>),
     Getter(Tagged<'a, Value>),
@@ -559,8 +420,22 @@ struct ChainWalk<'s> {
 
 impl<'s> ChainWalk<'s> {
     fn new(heap: &Heap, scope: &'s HandleScope<'_>, start: Handle<'_, Value>) -> Self {
+        let start = start.as_tagged(heap);
+        if let Some(pairs) = start.get_as::<FixedArray>(heap) {
+            let mut pending = Vec::new();
+            let mut i = pairs.len();
+            while i >= 2 {
+                i -= 2;
+                pending.push(scope.handle(pairs.at(heap, i + 1)));
+            }
+            return Self {
+                current: None,
+                pending,
+                steps: 0,
+            };
+        }
         Self {
-            current: Some(scope.handle(start.as_tagged(heap).erase())),
+            current: Some(scope.handle(start.erase())),
             pending: Vec::new(),
             steps: 0,
         }
@@ -981,11 +856,6 @@ pub fn chain_needs_full_set(heap: &Heap, receiver: Tagged<'_, Value>) -> bool {
         }
         cur = proto;
     }
-}
-
-enum ChainQuery {
-    Index(usize),
-    AnyIndex,
 }
 
 impl<'a> Tagged<'a, Value> {

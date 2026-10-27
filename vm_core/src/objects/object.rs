@@ -1,14 +1,23 @@
 use core::alloc::Layout;
 
+use crate::proxy::{Flow, Proxy};
 use crate::reanchor;
 use crate::{
     CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_CONFIGURABLE, DETAILS_DATA,
     DenseString, EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot,
     Handle, HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, LoadOutcome, Lookup,
-    Map, NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor,
-    Prototype, SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value,
-    Visitor, VmError,
+    Map, NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PartialDescriptor,
+    PropertyDescriptor, Prototype, SetWalk, SiblingChange, SlotName, Smi, Symbol, Tagged,
+    ThreadState, Transition, VM, Value, Visitor, VmError,
 };
+
+/// What a set action did, for callers that only need to update caches.
+pub enum SetApplied {
+    Done,
+    Transition,
+    CallSetter,
+    Rejected,
+}
 
 /// The elements slot is typed `FixedArray` but holds a
 /// `NumberDictionary` in dictionary mode; the map's elements kind is
@@ -933,6 +942,54 @@ impl Object {
     /// ES `[[Get]]` value driver: lookup on `holder`, getter `this` =
     /// `receiver` (the proxy-forward shape), then invoke an ordinary
     /// accessor. The lookup itself never runs getters.
+    /// Apply a `Lookup::set` action. Proxy traps and setters are invoked
+    /// here; the lookup itself only selected the action.
+    pub fn apply_set_walk<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<'_, Value>,
+        value: Handle<'_, Value>,
+        walk: SetWalk<'_>,
+    ) -> Result<Flow<SetApplied>, VmError> {
+        let receiver = scope.handle(receiver.as_tagged(heap).erase());
+        let value = scope.handle(value.as_tagged(heap).erase());
+        match walk {
+            SetWalk::Done => Ok(Flow::Value(SetApplied::Done)),
+            SetWalk::Rejected => Ok(Flow::Value(SetApplied::Rejected)),
+            SetWalk::Threw => Ok(Flow::Threw),
+            SetWalk::CallSetter(setter) => {
+                let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
+                let result = scope.handle(HostCtx::enter(vm, heap, state, setter, args, None)?);
+                if result.as_tagged(heap) == heap.known().exception.get(heap) {
+                    Ok(Flow::Threw)
+                } else {
+                    Ok(Flow::Value(SetApplied::CallSetter))
+                }
+            }
+            SetWalk::Define { receiver, key } => {
+                let current = Proxy::own_descriptor(vm, heap, state, scope, receiver, key)?;
+                let partial = match current {
+                    Flow::Threw => return Ok(Flow::Threw),
+                    Flow::Value(Some(d))
+                        if d.is_accessor_descriptor()
+                            || (d.is_data_descriptor() && d.writable == Some(false)) =>
+                    {
+                        return Ok(Flow::Value(SetApplied::Rejected));
+                    }
+                    Flow::Value(Some(_)) => PartialDescriptor::value(value),
+                    Flow::Value(None) => PartialDescriptor::new_data(value),
+                };
+                match Proxy::define_own_property(vm, heap, state, scope, receiver, key, partial)? {
+                    Flow::Threw => Ok(Flow::Threw),
+                    Flow::Value(true) => Ok(Flow::Value(SetApplied::Transition)),
+                    Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
+                }
+            }
+        }
+    }
+
     pub fn get_property<'h>(
         vm: &VM,
         heap: &'h mut Heap,

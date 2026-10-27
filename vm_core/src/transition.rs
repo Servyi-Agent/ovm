@@ -2,8 +2,8 @@ use core::alloc::Layout;
 
 use crate::{
     AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
-    LanguageMode, Lookup, Map, MapInit, MapKind, MaybeWeak, Object, Prototype, SlotFlags, SlotName,
-    Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
+    Map, MapInit, MapKind, MaybeWeak, Object, Prototype, SlotFlags, SlotName, Smi, Symbol, Tagged,
+    Value, VmError, WeakFixedArray, WeakFixedArrayInit,
 };
 
 /// Store semantics:
@@ -13,18 +13,6 @@ use crate::{
 pub enum StoreSemantics {
     WriteThrough,
     Shadow,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum StoreOutcome<'s> {
-    Done,
-    Transition {
-        receiver: Handle<'s, Object>,
-        name: Handle<'s, SlotName>,
-    },
-    CallSetter {
-        setter: Handle<'s, Value>,
-    },
 }
 
 pub enum SiblingChange<'s> {
@@ -71,135 +59,6 @@ impl<'s> SiblingChange<'s> {
     }
 }
 
-impl<'a> Tagged<'a, Value> {
-    pub fn store_lookup<'s>(
-        self,
-        heap: &'a Heap,
-        scope: &'s HandleScope<'_>,
-        name: Tagged<'a, SlotName>,
-        value: Tagged<'a, Value>,
-        semantics: StoreSemantics,
-        mode: LanguageMode,
-    ) -> Result<StoreOutcome<'s>, VmError> {
-        let strict = mode.is_strict();
-        // null/undefined have no [[Prototype]]: property access throws
-        if self.ptr_eq(heap.known().null.get(heap).erase())
-            || self.ptr_eq(heap.known().undefined.get(heap).erase())
-        {
-            return Err(VmError::Type);
-        }
-        // non-receiver heap values (VMStrings, Symbols, Floats, ...) and
-        // smis are not property stores' targets: sloppy-mode stores onto
-        // primitives are silently ignored, strict ones throw (ES 10.4.5.5
-        // PutValue step 5)
-        let Some(receiver) = scope.cast::<Object>(heap, self) else {
-            return if strict {
-                Err(VmError::Type)
-            } else {
-                Ok(StoreOutcome::Done)
-            };
-        };
-        match self.lookup(heap, name) {
-            Lookup::Data {
-                slot,
-                holder,
-                flags,
-                ..
-            } => {
-                if !flags.is_writable() {
-                    return if strict {
-                        Err(VmError::Type)
-                    } else {
-                        Ok(StoreOutcome::Done)
-                    };
-                }
-                let host = holder.erase();
-                if semantics == StoreSemantics::Shadow && host != self {
-                    // inherited writable data property: JS creates an own
-                    // property on the receiver
-                    return Ok(StoreOutcome::Transition {
-                        receiver,
-                        name: scope.handle(name),
-                    });
-                }
-                slot.set(heap, host, value);
-                Ok(StoreOutcome::Done)
-            }
-            Lookup::NotFound => Ok(StoreOutcome::Transition {
-                receiver,
-                name: scope.handle(name),
-            }),
-            Lookup::Accessor { pair, .. } => {
-                let setter = pair.set.get(heap);
-                // no setter (undefined sentinel): sloppy-mode writes to a
-                // setter-less accessor are silently ignored, strict ones
-                // throw (ES 10.4.5.5 PutValue step 5)
-                if setter.ptr_eq(heap.known().undefined.get(heap).erase()) {
-                    return if strict {
-                        Err(VmError::Type)
-                    } else {
-                        Ok(StoreOutcome::Done)
-                    };
-                }
-                Ok(StoreOutcome::CallSetter {
-                    setter: scope.handle(setter),
-                })
-            }
-        }
-    }
-}
-
-impl<'s, T> Handle<'s, T> {
-    pub fn store_lookup<'a, 'd>(
-        self,
-        heap: &'a Heap,
-        scope: &'d HandleScope<'_>,
-        name: Tagged<'a, SlotName>,
-        value: Tagged<'a, Value>,
-        semantics: StoreSemantics,
-        mode: LanguageMode,
-    ) -> Result<StoreOutcome<'d>, VmError> {
-        self.as_tagged(heap)
-            .erase()
-            .store_lookup(heap, scope, name, value, semantics, mode)
-    }
-}
-
-fn super_store_on_receiver<'a, 's>(
-    heap: &'a Heap,
-    scope: &'s HandleScope<'_>,
-    recv: Tagged<'a, Value>,
-    name: Tagged<'a, SlotName>,
-    value: Tagged<'a, Value>,
-) -> Result<StoreOutcome<'s>, VmError> {
-    let Some(receiver) = scope.cast::<Object>(heap, recv) else {
-        return Err(VmError::Type);
-    };
-    match recv.lookup(heap, name) {
-        // already owned (the nearest hit is the receiver itself, not an
-        // inherited one): overwrite the slot instead of re-adding it
-        Lookup::Data {
-            holder,
-            slot,
-            flags,
-            ..
-        } if holder.erase() == recv => {
-            if !flags.is_writable() {
-                return Err(VmError::Type);
-            }
-            slot.set(heap, recv, value);
-            Ok(StoreOutcome::Done)
-        }
-        // own accessor: Receiver.[[DefineOwnProperty]]({value}) on an
-        // accessor is an incompatible change (ES 9.1.9.2 step 3.d.i)
-        Lookup::Accessor { holder, .. } if holder.erase() == recv => Err(VmError::Type),
-        // not owned by the receiver: define a fresh own property
-        _ => Ok(StoreOutcome::Transition {
-            receiver,
-            name: scope.handle(name),
-        }),
-    }
-}
 pub struct Transition;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -728,61 +587,6 @@ impl Transition {
                     change,
                 );
                 Self::swap_map(heap, receiver, name, flags, Some((get, set)));
-            }
-        }
-    }
-
-    pub fn super_store_lookup<'a, 's>(
-        heap: &'a Heap,
-        scope: &'s HandleScope<'_>,
-        proto: Option<Tagged<'a, Value>>,
-        recv: Tagged<'a, Value>,
-        name: Tagged<'a, SlotName>,
-        value: Tagged<'a, Value>,
-        semantics: StoreSemantics,
-    ) -> Result<StoreOutcome<'s>, VmError> {
-        if recv.ptr_eq(heap.known().null.get(heap).erase())
-            || recv.ptr_eq(heap.known().undefined.get(heap).erase())
-        {
-            return Err(VmError::Type);
-        }
-        let Some(proto) = proto else {
-            // non-object home: no parent chain, define on the receiver
-            return super_store_on_receiver(heap, scope, recv, name, value);
-        };
-        match proto.lookup_in_parents(heap, name) {
-            Lookup::Data {
-                slot,
-                holder,
-                flags,
-                ..
-            } => {
-                if !flags.is_writable() {
-                    return Err(VmError::Type);
-                }
-                match semantics {
-                    StoreSemantics::WriteThrough => {
-                        let host = holder.erase();
-                        slot.set(heap, host, value);
-                        Ok(StoreOutcome::Done)
-                    }
-                    // receiver (`this`) differs from the holder by
-                    // construction: OrdinarySet creates an own property on
-                    // the receiver
-                    StoreSemantics::Shadow => {
-                        super_store_on_receiver(heap, scope, recv, name, value)
-                    }
-                }
-            }
-            Lookup::NotFound => super_store_on_receiver(heap, scope, recv, name, value),
-            Lookup::Accessor { pair, .. } => {
-                let setter = pair.set.get(heap);
-                if setter.ptr_eq(heap.known().undefined.get(heap).erase()) {
-                    return Ok(StoreOutcome::Done);
-                }
-                Ok(StoreOutcome::CallSetter {
-                    setter: scope.handle(setter),
-                })
             }
         }
     }

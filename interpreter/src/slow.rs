@@ -9,9 +9,8 @@ use vm_core::proxy::Proxy;
 use vm_core::{
     AccessorPair, ChainLoad, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString,
     EntryClass, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
-    LoadOutcome, Lookup, Object, PartialDescriptor, PropertyDescriptor, Prototype, SetWalk,
-    SlotName, Smi, StoreOutcome, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
-    raise_runtime,
+    LoadOutcome, Lookup, Object, PropertyDescriptor, Prototype, SetApplied, SetWalk, SlotName, Smi,
+    StoreSemantics, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -214,69 +213,43 @@ pub fn incdec_body<'a>(
     })
 }
 
-/// Apply the result of `Lookup::set`. Setters are invoked
-/// here, in the interpreter, not in the lookup core.
+/// Apply the result of `Lookup::set`. The shared `Object::apply_set_walk`
+/// invokes setters/proxy defines; this wrapper adds strict-mode mapping
+/// and the IC outcome kind.
 #[inline(never)]
 pub fn apply_set_walk_body(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
-    roots: RootsArg<'_>,
     receiver: Handle<'_, Value>,
     walk: SetWalk<'_>,
     value: Handle<'_, Value>,
     mode: LanguageMode,
 ) -> Result<StoreOutcomeKind, ()> {
-    match walk {
-        SetWalk::Done => Ok(StoreOutcomeKind::Done),
-        SetWalk::Rejected => {
-            if mode.is_strict() {
+    state.handle_scope(|scope| {
+        match Object::apply_set_walk(vm, heap, state, &scope, receiver, value, walk) {
+            Ok(vm_core::proxy::Flow::Threw) => Err(()),
+            Ok(vm_core::proxy::Flow::Value(SetApplied::Rejected)) if mode.is_strict() => {
                 raise_runtime(vm, heap, state, VmError::Type);
                 Err(())
-            } else {
-                Ok(StoreOutcomeKind::Done)
+            }
+            Ok(vm_core::proxy::Flow::Value(SetApplied::Rejected)) => Ok(StoreOutcomeKind::Done),
+            Ok(vm_core::proxy::Flow::Value(SetApplied::Done)) => Ok(StoreOutcomeKind::Done),
+            Ok(vm_core::proxy::Flow::Value(SetApplied::Transition)) => {
+                Ok(StoreOutcomeKind::Transition)
+            }
+            Ok(vm_core::proxy::Flow::Value(SetApplied::CallSetter)) => {
+                Ok(StoreOutcomeKind::CallSetter)
+            }
+            Err(e) => {
+                raise_runtime(vm, heap, state, e);
+                Err(())
             }
         }
-        SetWalk::Threw => Err(()),
-        SetWalk::CallSetter(setter) => state.handle_scope(|scope| {
-            let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
-            match HostCtx::enter(vm, heap, state, setter, args, None) {
-                Ok(v) => {
-                    let bits = v.raw().to_bits();
-                    let sentinel = roots.exception.get(heap).erase();
-                    if bits == sentinel.raw().to_bits() {
-                        Err(())
-                    } else {
-                        Ok(StoreOutcomeKind::CallSetter)
-                    }
-                }
-                Err(e) => {
-                    raise_runtime(vm, heap, state, e);
-                    Err(())
-                }
-            }
-        }),
-        SetWalk::Define { receiver, key } => state.handle_scope(|scope| {
-            let value = scope.handle(value.as_tagged(heap).erase());
-            let partial = PartialDescriptor::new_data(value);
-            match Proxy::define_own_property(vm, heap, state, &scope, receiver, key, partial) {
-                Ok(vm_core::proxy::Flow::Threw) => Err(()),
-                Ok(vm_core::proxy::Flow::Value(true)) => Ok(StoreOutcomeKind::Transition),
-                Ok(vm_core::proxy::Flow::Value(false)) if mode.is_strict() => {
-                    raise_runtime(vm, heap, state, VmError::Type);
-                    Err(())
-                }
-                Ok(vm_core::proxy::Flow::Value(false)) => Ok(StoreOutcomeKind::Done),
-                Err(e) => {
-                    raise_runtime(vm, heap, state, e);
-                    Err(())
-                }
-            }
-        }),
-    }
+    })
 }
 
-/// The named-store tail: generic `store_lookup`, outcome application,
+/// The named-store tail: generic `Lookup::set`, outcome application,
 /// then the IC fill (a transition is cached against the map the store
 /// produced; a setter ran before the fill).
 pub fn store_named_tail_body<'a>(
@@ -309,7 +282,7 @@ pub fn store_named_tail_body<'a>(
             Ok(walk) => walk,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let kind = match apply_set_walk_body(vm, heap, state, roots, recv, walk, value, mode) {
+        let kind = match apply_set_walk_body(vm, heap, state, recv, walk, value, mode) {
             Ok(kind) => kind,
             Err(()) => return roots.exception.get(heap).erase(),
         };
@@ -1150,7 +1123,7 @@ pub fn keyed_store_body<'a>(
             Ok(walk) => walk,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        match apply_set_walk_body(vm, heap, state, roots, recv, walk, value, mode) {
+        match apply_set_walk_body(vm, heap, state, recv, walk, value, mode) {
             Ok(_) => value.as_tagged(heap).erase(),
             Err(()) => roots.exception.get(heap).erase(),
         }

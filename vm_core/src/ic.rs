@@ -842,7 +842,7 @@ fn store_handler<'s>(
 /// A setter found on a prototype or owned by the receiver: run it, or treat
 /// a setter-less accessor as a silently ignored write in sloppy code. Strict
 /// code must throw, which is not representable as a `StoreHit`; `None`
-/// defers to the slow path, where `store_lookup` raises.
+/// defers to the slow path, where `Lookup::set` applies strict-mode rules.
 fn setter_action<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,

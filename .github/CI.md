@@ -166,14 +166,14 @@ PR result is the commit status. A failed manual run can therefore show a red
 Both engines use the same gate in `.github/test262-baseline`:
 
 ```text
-min_pass=12726
+min_pass=12729
 max_panic=0
 ```
 
 Current actual counts on test262 main `d53ebc8...`:
 
-- match: `pass=12726`, `panic=0`
-- become: `pass=12726`, `panic=0`
+- match: `pass=12729`, `panic=0`
+- become: `pass=12729`, `panic=0`
 
 Both interpreters dispatch through the same handlers, so their counts agree;
 the minimum is the current common pass count. To see raw counts without the

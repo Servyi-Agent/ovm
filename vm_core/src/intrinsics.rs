@@ -6,8 +6,8 @@
 use crate::{
     AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Handle,
     HandleSlice, Heap, Key, LanguageMode, LoadOutcome, Lookup, Object, ObjectSlotsInit,
-    PropertyDescriptor, SlotName, Smi, StoreOutcome, StoreSemantics, StringData, StringOwn, Symbol,
-    Tagged, Transition, Value, VmError, WellKnown,
+    PropertyDescriptor, SetApplied, SlotName, Smi, StoreSemantics, StringData, StringOwn, Symbol,
+    Tagged, Value, VmError, WellKnown,
 };
 
 use crate::Float;
@@ -829,13 +829,7 @@ fn has_property<'a>(
     } = nctx;
     let key = args.get_handle(heap, 0);
     let obj = args.get_handle(heap, 1);
-    // `in` requires an Object right operand (ES 14.11.2). The shell's
-    // top-level `this` is still undefined, so preserve its historical
-    // `false` here rather than turning every script-level `in this` into a
-    // TypeError.
-    if obj.as_tagged(heap).is_nullish(heap) {
-        return Convert::boolean(heap, false);
-    }
+    // `in` requires an Object right operand (ES 14.11.2).
     if !Proxy::is_js_receiver(heap, obj.as_tagged(heap)) {
         return raise_runtime(vm, heap, state, VmError::Type);
     }
@@ -1295,53 +1289,6 @@ fn frame_super_parts<'a>(
 }
 
 // ---- store outcomes ---------------------------------------------------------
-
-/// Apply a store outcome: transitions add the property on the receiver,
-/// setters are invoked with (receiver, value). Returns `true` when a
-/// setter threw (the pending exception is set; the caller propagates the
-/// exception sentinel).
-fn apply_store_outcome(
-    vm: &VM,
-    heap: &mut Heap,
-    state: &ThreadState,
-    receiver: Handle<'_, Value>,
-    outcome: StoreOutcome<'_>,
-    value: Handle<'_, Value>,
-    mode: LanguageMode,
-) -> Result<bool, VmError> {
-    match outcome {
-        StoreOutcome::Transition {
-            receiver: recv,
-            name,
-        } => {
-            let strict = mode.is_strict();
-            state.handle_scope(|scope| {
-                let added = Object::add_own_property(
-                    heap,
-                    &scope,
-                    recv,
-                    name,
-                    PropertyDescriptor::data(value),
-                )?;
-                // non-extensible receiver: silent in sloppy code,
-                // TypeError in strict (ES 10.4.5.5 PutValue step 5)
-                if !added && strict {
-                    return Err(VmError::Type);
-                }
-                Ok(false)
-            })
-        }
-        StoreOutcome::CallSetter { setter } => state.handle_scope(|scope| {
-            let recv = receiver.as_tagged(heap);
-            let val = value.as_tagged(heap);
-            let call_args = scope.stage(&[recv, val]);
-            let result = HostCtx::enter(vm, heap, state, setter, call_args, None)?;
-            let word = result.raw();
-            Ok(word == vm.known().exception.get(heap).erase().raw())
-        }),
-        StoreOutcome::Done => Ok(false),
-    }
-}
 
 /// A full [[Get]] that treats non-callable getters (an absent half of an
 /// accessor pair) as undefined instead of throwing.
@@ -2077,15 +2024,16 @@ fn store_dynamic_name<'a>(
                 let mode = info.mode();
                 let global = scope.handle(vm.known().global_object.get(heap).erase());
                 let threw = state.handle_scope(|scope| -> Result<bool, VmError> {
-                    let outcome = global.store_lookup(
-                        heap,
-                        &scope,
-                        name.as_tagged(heap).as_name(),
-                        value.as_tagged(heap),
-                        StoreSemantics::WriteThrough,
-                        mode,
-                    )?;
-                    apply_store_outcome(vm, heap, state, global, outcome, value, mode)
+                    let key = scope.handle(name.as_tagged(heap).erase());
+                    let walk =
+                        Lookup::set::<true>(vm, heap, state, &scope, global, global, key, value)?;
+                    match Object::apply_set_walk(vm, heap, state, &scope, global, value, walk)? {
+                        crate::proxy::Flow::Threw => Ok(true),
+                        crate::proxy::Flow::Value(SetApplied::Rejected) if mode.is_strict() => {
+                            Err(VmError::Type)
+                        }
+                        crate::proxy::Flow::Value(_) => Ok(false),
+                    }
                 });
                 let threw = rt_try!(vm, heap, state, threw);
                 if threw {
@@ -2188,11 +2136,16 @@ fn super_get_property<'a>(
             Key::Element(i) => Tagged::from(Smi::new(i as i64)),
             Key::Name(name) => name,
         };
+        let Some(proto) = proto else {
+            return vm.known().undefined.get(heap).erase();
+        };
+        let start = scope.handle(proto);
+        let key = scope.handle(name.erase());
         let outcome = match rt_try!(
             vm,
             heap,
             state,
-            Lookup::super_lookup_from_proto(heap, proto, name)
+            Lookup::get(vm, heap, state, &scope, start, recv, key)
         ) {
             LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
             LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
@@ -2268,37 +2221,38 @@ fn super_set_property<'a>(
             Key::Element(i) => Tagged::from(Smi::new(i as i64)),
             Key::Name(name) => name,
         };
-        let outcome = rt_try!(
-            vm,
-            heap,
-            state,
-            Transition::super_store_lookup(
-                heap,
-                &scope,
-                proto,
-                recv.as_tagged(heap),
-                name,
-                value.as_tagged(heap),
-                semantics,
-            )
-        );
-        if rt_try!(
-            vm,
-            heap,
-            state,
-            apply_store_outcome(
+        let start = match proto {
+            Some(proto) => scope.handle(proto),
+            None => recv,
+        };
+        let key = scope.handle(name.erase());
+        let walk = if semantics == StoreSemantics::WriteThrough {
+            rt_try!(
                 vm,
                 heap,
                 state,
-                recv,
-                outcome,
-                value,
-                // `super.x = v` always throws on a failed [[Set]]
-                // (ES 13.15.5.1), independent of the language mode
-                LanguageMode::Strict,
+                Lookup::set::<true>(vm, heap, state, &scope, start, recv, key, value)
             )
-        ) {
-            return vm.known().exception.get(heap).erase();
+        } else {
+            rt_try!(
+                vm,
+                heap,
+                state,
+                Lookup::set::<false>(vm, heap, state, &scope, start, recv, key, value)
+            )
+        };
+        let applied = rt_try!(
+            vm,
+            heap,
+            state,
+            Object::apply_set_walk(vm, heap, state, &scope, recv, value, walk)
+        );
+        match applied {
+            crate::proxy::Flow::Threw => return vm.known().exception.get(heap).erase(),
+            crate::proxy::Flow::Value(SetApplied::Rejected) => {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
+            crate::proxy::Flow::Value(_) => {}
         }
         value.as_tagged(heap)
     })

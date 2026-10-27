@@ -1,7 +1,7 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{
-    FixedArray, HandleSlice, Heap, LoadOutcome, Object, PropertyDescriptor, SlotName, Smi, Tagged,
-    Thread, VM, Value,
+    FixedArray, HandleSlice, Heap, Object, PropertyDescriptor, SlotName, Smi, Tagged, Thread, VM,
+    Value,
 };
 
 fn smi(v: i64) -> Value {
@@ -96,53 +96,6 @@ fn parents_of(thread: &mut Thread, p1: Value, p2: Value) -> Value {
 }
 
 #[test]
-fn super_lookup_dispatches_all_three_prototype_shapes() {
-    let (_vm, mut thread) = thread();
-    let null = null_word(&mut thread);
-
-    // single-object prototype: the parent's property is found
-    let parent = object_with(&mut thread, null, &[("x", 7)]);
-    let home = object_with(&mut thread, parent, &[]);
-    let x = slot_name(&mut thread, "x");
-    {
-        let heap = thread.heap();
-        assert!(matches!(
-            unsafe { anchored(heap, home) }.super_lookup(heap, x).unwrap(),
-            LoadOutcome::Value(v) if v.raw() == smi(7)
-        ));
-    };
-
-    // null prototype terminates the chain
-    let home = object_with(&mut thread, null, &[("x", 7)]);
-    {
-        let heap = thread.heap();
-        assert!(matches!(
-            unsafe { anchored(heap, home) }.super_lookup(heap, x).unwrap(),
-            LoadOutcome::Value(v) if v.raw() == heap.known().undefined.get(heap).raw()
-        ));
-    };
-
-    // FixedArray: multiple parents (Self-style), priority order
-    let p1 = object_with(&mut thread, null, &[("a", 1)]);
-    let p2 = object_with(&mut thread, null, &[("a", 2), ("b", 3)]);
-    let protos = parents_of(&mut thread, p1, p2);
-    let home = object_with(&mut thread, protos, &[]);
-    let a = slot_name(&mut thread, "a");
-    let b = slot_name(&mut thread, "b");
-    {
-        let heap = thread.heap();
-        assert!(matches!(
-            unsafe { anchored(heap, home) }.super_lookup(heap, a).unwrap(),
-            LoadOutcome::Value(v) if v.raw() == smi(1)
-        ));
-        assert!(matches!(
-            unsafe { anchored(heap, home) }.super_lookup(heap, b).unwrap(),
-            LoadOutcome::Value(v) if v.raw() == smi(3)
-        ));
-    };
-}
-
-#[test]
 fn lookup_in_parents_respects_priority_order() {
     let (_vm, mut thread) = thread();
     let null = null_word(&mut thread);
@@ -178,6 +131,3 @@ fn lookup_in_parents_respects_priority_order() {
         ));
     };
 }
-
-// TODO: write tests for `super_store_lookup` (Shadow / WriteThrough
-// semantics, readonly holders, nullish receivers).

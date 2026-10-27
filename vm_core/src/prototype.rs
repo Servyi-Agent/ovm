@@ -212,36 +212,6 @@ impl Prototype {
         }
         invalidate_prototype_chains(heap, obj.map(heap));
     }
-
-    /// Whether an indexed store into `receiver` (map `map`) may skip the
-    /// prototype chain
-    pub fn indexed_store_chain_ok<'s>(
-        heap: &mut Heap,
-        scope: &'s HandleScope<'_>,
-        receiver: &Handle<'_, Value>,
-        map: &Handle<'s, Map>,
-        index: usize,
-    ) -> bool {
-        if map
-            .as_tagged(heap)
-            .published_validity_cell(heap)
-            .is_some_and(|cell| cell.is_valid(heap))
-        {
-            return true;
-        }
-        let holds = { receiver.as_tagged(heap).chain_holds_index_name(heap, index) };
-        if holds {
-            return false;
-        }
-        // only cacheable when the chain holds no integer-named
-        // descriptors at all: otherwise cleanliness depends on the index
-        let any_index = { receiver.as_tagged(heap).chain_holds_any_index_name(heap) };
-        if any_index {
-            return true;
-        }
-        Self::ensure_store_transition_validity_cell(heap, scope, *map);
-        true
-    }
 }
 
 fn trackable_prototype<'a>(heap: &'a Heap, value: Tagged<'a, Value>) -> Option<Tagged<'a, Object>> {
