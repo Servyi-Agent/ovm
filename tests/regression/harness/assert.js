@@ -1,8 +1,7 @@
 // Minimal test262-style harness for the local regression suite.
 //
 // The runner prepends this file to every test. Only the pieces the local
-// tests need are implemented; `Object.is` is intentionally not used because
-// the VM does not implement it yet.
+// tests need are implemented.
 
 function __sameValue(a, b) {
     if (a === b) {

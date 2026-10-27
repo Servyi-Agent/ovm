@@ -7,7 +7,6 @@ use core::ptr::NonNull;
 
 pub mod api;
 pub mod bootstrap;
-pub mod cold;
 pub mod compare;
 pub mod convert;
 pub mod error;
@@ -50,7 +49,7 @@ pub use heap::{
 pub use interner::StringInterner;
 pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
 pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
-pub use lookup::{Key, LoadOutcome, Lookup};
+pub use lookup::{ChainLoad, Key, LoadOutcome, Lookup, SetWalk};
 pub use native::{HostCtx, NativeFn, NativeIndex, NativeRegistry, raise_runtime};
 pub use objects::{
     AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit,

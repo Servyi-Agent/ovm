@@ -337,12 +337,12 @@ fn for_in_initial_level<'a>(
         "Boolean" => strings.boolean_ctor.get(heap),
         _ => strings.symbol_ctor.get(heap),
     };
-    let ctor = match global.erase().load_outcome(heap, ctor_handle).ok()? {
+    let ctor = match global.erase().get_no_gc(heap, ctor_handle).ok()? {
         LoadOutcome::Value(v) if v.is_strong_ptr() => v,
         _ => return None,
     };
     match ctor
-        .load_outcome(heap, roots.strings.prototype.get(heap))
+        .get_no_gc(heap, roots.strings.prototype.get(heap))
         .ok()?
     {
         LoadOutcome::Value(p) if p.is_strong_ptr() => Some(p),
@@ -604,7 +604,7 @@ fn for_in_next_level<'s>(
         let global = roots.global_object.get(heap);
         let Some(string_ctor) = global
             .erase()
-            .load_outcome(heap, roots.strings.string.get(heap))
+            .get_no_gc(heap, roots.strings.string.get(heap))
             .ok()
             .and_then(|o| match o {
                 LoadOutcome::Value(v) => Some(v),
@@ -614,7 +614,7 @@ fn for_in_next_level<'s>(
             return Ok(None);
         };
         let proto = string_ctor
-            .load_outcome(heap, roots.strings.prototype.get(heap))
+            .get_no_gc(heap, roots.strings.prototype.get(heap))
             .ok()
             .and_then(|o| match o {
                 LoadOutcome::Value(v) => Some(v),
@@ -699,7 +699,7 @@ fn get_iterator<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, obj, obj, symbol)
+            Object::get_property(vm, heap, state, obj, obj, symbol)
         );
         let method = match method {
             Coercion::Threw => {
@@ -738,7 +738,7 @@ fn iterator_next<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, iter, iter, next_name)
+            Object::get_property(vm, heap, state, iter, iter, next_name)
         );
         let next = match next {
             Coercion::Threw => {
@@ -782,7 +782,7 @@ fn iterator_done<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, result, result, done_name)
+            Object::get_property(vm, heap, state, result, result, done_name)
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
@@ -808,7 +808,7 @@ fn iterator_value<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, result, result, value_name)
+            Object::get_property(vm, heap, state, result, result, value_name)
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
@@ -829,6 +829,16 @@ fn has_property<'a>(
     } = nctx;
     let key = args.get_handle(heap, 0);
     let obj = args.get_handle(heap, 1);
+    // `in` requires an Object right operand (ES 14.11.2). The shell's
+    // top-level `this` is still undefined, so preserve its historical
+    // `false` here rather than turning every script-level `in this` into a
+    // TypeError.
+    if obj.as_tagged(heap).is_nullish(heap) {
+        return Convert::boolean(heap, false);
+    }
+    if !Proxy::is_js_receiver(heap, obj.as_tagged(heap)) {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    }
     // the key coercion allocates (wrapper keys run toString/valueOf):
     // the receiver stays rooted in its argument handle across it
     state.handle_scope(|scope| {
@@ -842,21 +852,16 @@ fn has_property<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        if Proxy::is_proxy(heap, obj.as_tagged(heap)) {
-            let has = match rt_try!(
-                vm,
-                heap,
-                state,
-                Proxy::has(vm, heap, state, obj, key.erase())
-            ) {
-                Coercion::Threw => return vm.known().exception.get(heap).erase(),
-                Coercion::Value(v) => scope.handle(v),
-            };
-            return has.as_tagged(heap);
-        }
-        // lookup::has_property covers array `length` slots along the chain
-        let has = obj.as_tagged(heap).has_property(heap, key.as_tagged(heap));
-        Convert::boolean(heap, has)
+        let has = match rt_try!(
+            vm,
+            heap,
+            state,
+            Lookup::has(vm, heap, state, &scope, obj, key.erase())
+        ) {
+            Coercion::Threw => return vm.known().exception.get(heap).erase(),
+            Coercion::Value(v) => scope.handle(v),
+        };
+        has.as_tagged(heap).erase()
     })
 }
 
@@ -962,7 +967,7 @@ fn copy_data_properties<'a>(
                     vm,
                     heap,
                     state,
-                    Lookup::get_property_on(vm, heap, state, source, source, key)
+                    Object::get_property(vm, heap, state, source, source, key)
                 ) {
                     Coercion::Threw => return vm.known().exception.get(heap).erase(),
                     Coercion::Value(v) => scope.handle(v),
@@ -970,7 +975,9 @@ fn copy_data_properties<'a>(
             };
             // CreateDataProperty: skipped when already present
             let exists = !matches!(
-                target.lookup(heap, key.as_tagged(heap).as_name()),
+                target
+                    .as_tagged(heap)
+                    .lookup(heap, key.as_tagged(heap).as_name()),
                 Lookup::NotFound
             );
             if exists {
@@ -1353,7 +1360,7 @@ fn get_property_lenient<'a>(
             state,
             receiver
                 .as_tagged(heap)
-                .load_outcome(heap, name.as_tagged(heap).as_name())
+                .get_no_gc(heap, name.as_tagged(heap).as_name())
         ) {
             LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
             LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),

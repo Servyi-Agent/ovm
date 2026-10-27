@@ -1,10 +1,9 @@
 use core::alloc::Layout;
 
-use crate::proxy::Proxy;
 use crate::{
-    AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap,
-    HeapObject, Key, LanguageMode, Lookup, Map, MapInit, MapKind, MaybeWeak, Object, Prototype,
-    SlotFlags, SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
+    AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
+    LanguageMode, Lookup, Map, MapInit, MapKind, MaybeWeak, Object, Prototype, SlotFlags, SlotName,
+    Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
 };
 
 /// Store semantics:
@@ -163,57 +162,6 @@ impl<'s, T> Handle<'s, T> {
         self.as_tagged(heap)
             .erase()
             .store_lookup(heap, scope, name, value, semantics, mode)
-    }
-}
-
-impl<'a> Tagged<'a, Value> {
-    pub fn store_lookup_existing(
-        self,
-        heap: &'a Heap,
-        name: Tagged<'a, SlotName>,
-        value: Tagged<'a, Value>,
-        semantics: StoreSemantics,
-        mode: LanguageMode,
-    ) -> Result<bool, VmError> {
-        let strict = mode.is_strict();
-        if self.ptr_eq(heap.known().null.get(heap).erase())
-            || self.ptr_eq(heap.known().undefined.get(heap).erase())
-        {
-            return Err(VmError::Type);
-        }
-        debug_assert!(
-            !Proxy::is_proxy(heap, self.erase()),
-            "fast store on a proxy receiver"
-        );
-        if !self
-            .as_heap_object()
-            .is_some_and(|obj| Object::matches_kind(obj.map(heap).kind().kind()))
-        {
-            return Ok(true);
-        }
-        match self.lookup(heap, name) {
-            Lookup::Data {
-                slot,
-                holder,
-                flags,
-                ..
-            } => {
-                if !flags.is_writable() {
-                    return if strict { Err(VmError::Type) } else { Ok(true) };
-                }
-                let host = holder.erase();
-                if semantics == StoreSemantics::Shadow && host != self {
-                    return Ok(false);
-                }
-                slot.set(heap, host, value);
-                Ok(true)
-            }
-            Lookup::NotFound => Ok(false),
-            Lookup::Accessor { .. } => {
-                debug_assert!(false, "fast store on an accessor property");
-                Ok(true)
-            }
-        }
     }
 }
 
@@ -1368,6 +1316,19 @@ impl<'s> PartialDescriptor<'s> {
     pub fn value(value: Handle<'s, Value>) -> Self {
         Self {
             value: Some(value),
+            ..Self::default()
+        }
+    }
+
+    /// The full data descriptor OrdinarySet uses when the receiver has no
+    /// existing own property: `{ value, writable: true, enumerable: true,
+    /// configurable: true }`.
+    pub fn new_data(value: Handle<'s, Value>) -> Self {
+        Self {
+            value: Some(value),
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(true),
             ..Self::default()
         }
     }

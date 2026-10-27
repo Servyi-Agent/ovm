@@ -46,7 +46,7 @@ use number::{
 use object::{
     object_constructor, object_create, object_define_property, object_freeze,
     object_get_own_property_descriptor, object_get_own_property_names, object_get_prototype_of,
-    object_has_own_property, object_is_extensible, object_prevent_extensions,
+    object_has_own_property, object_is, object_is_extensible, object_prevent_extensions,
     object_property_is_enumerable, object_proto_get, object_proto_set, object_seal,
     object_set_prototype_of, object_to_string,
 };
@@ -132,6 +132,7 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         array_iterator_symbol_iterator: vm.register_runtime(array_iterator_symbol_iterator),
         symbol: vm.register_runtime(symbol_constructor),
         object_has_own_property: vm.register_runtime(object_has_own_property),
+        object_is: vm.register_runtime(object_is),
         object_property_is_enumerable: vm.register_runtime(object_property_is_enumerable),
         object_proto_get: vm.register_runtime(object_proto_get),
         object_proto_set: vm.register_runtime(object_proto_set),
@@ -213,6 +214,7 @@ pub struct BuiltinIndices {
     pub array_iterator_symbol_iterator: NativeIndex,
     pub symbol: NativeIndex,
     pub object_has_own_property: NativeIndex,
+    pub object_is: NativeIndex,
     pub object_property_is_enumerable: NativeIndex,
     pub object_proto_get: NativeIndex,
     pub object_proto_set: NativeIndex,
@@ -1224,6 +1226,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
         )?;
 
         // ---- Object extensibility statics --------------------------------------
+        Object::install_method(thread, &scope, object_fn, "is", idx.object_is)?;
         Object::install_method(
             thread,
             &scope,

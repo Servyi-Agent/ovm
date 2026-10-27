@@ -299,20 +299,83 @@ impl Convert {
         // before the allocation so its heap borrow is released.
         let float = v.as_tagged(heap).get_as::<Float>(heap);
         if let Some(f) = float {
-            let x = f.value.get();
-            let text = if x.is_nan() {
-                "NaN".to_string()
-            } else if x == f64::INFINITY {
-                "Infinity".to_string()
-            } else if x == f64::NEG_INFINITY {
-                "-Infinity".to_string()
-            } else {
-                format!("{x}")
-            };
+            let text = Self::number_to_string(f.value.get());
             let s = DenseString::from_utf8(heap, scope, &text);
             return Ok(s.as_tagged(heap).erase());
         }
         // Symbols (and anything else reaching this point) are a TypeError.
         Err(VmError::Type)
+    }
+
+    /// ES 6.1.6.1.20 `Number::toString`. Rust's `Display` for `f64` stays
+    /// in fixed notation, while ECMAScript switches to exponential form at
+    /// `1e21` and below `1e-6`; `LowerExp` supplies the shortest round-trip
+    /// digits, which are then laid out using the spec's `n`/`k` rules.
+    pub fn number_to_string(x: f64) -> String {
+        if x.is_nan() {
+            return "NaN".to_string();
+        }
+        if x == f64::INFINITY {
+            return "Infinity".to_string();
+        }
+        if x == f64::NEG_INFINITY {
+            return "-Infinity".to_string();
+        }
+        // Both +0 and -0 stringify as "0".
+        if x == 0.0 {
+            return "0".to_string();
+        }
+
+        let negative = x.is_sign_negative();
+        let scientific = format!("{:e}", x.abs());
+        let (mantissa, exponent) = scientific
+            .split_once('e')
+            .expect("LowerExp always includes an exponent");
+        let exponent: i32 = exponent
+            .parse()
+            .expect("LowerExp exponent is a base-10 integer");
+        let mut digits = String::with_capacity(mantissa.len());
+        for c in mantissa.chars() {
+            if c != '.' {
+                digits.push(c);
+            }
+        }
+
+        let k = digits.len() as i32;
+        let n = exponent + 1;
+        let mut out = String::with_capacity(digits.len() + 8);
+        if negative {
+            out.push('-');
+        }
+        if k <= n && n <= 21 {
+            out.push_str(&digits);
+            for _ in 0..(n - k) {
+                out.push('0');
+            }
+        } else if 0 < n && n <= 21 {
+            let split = n as usize;
+            out.push_str(&digits[..split]);
+            out.push('.');
+            out.push_str(&digits[split..]);
+        } else if -6 < n && n <= 0 {
+            out.push_str("0.");
+            for _ in 0..(-n) {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            out.push_str(&digits[..1]);
+            if k > 1 {
+                out.push('.');
+                out.push_str(&digits[1..]);
+            }
+            out.push('e');
+            let exponent = n - 1;
+            if exponent >= 0 {
+                out.push('+');
+            }
+            out.push_str(&exponent.to_string());
+        }
+        out
     }
 }

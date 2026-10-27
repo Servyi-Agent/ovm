@@ -218,7 +218,7 @@ fn error_property<'a>(
     v: Tagged<'a, Value>,
     name: Tagged<'a, SlotName>,
 ) -> Option<String> {
-    match v.load_outcome_on(heap, name) {
+    match v.get_no_gc(heap, name) {
         Ok(LoadOutcome::Value(x)) => x
             .get_as::<DenseString>(heap)
             .map(|s| s.to_rust_string(heap)),

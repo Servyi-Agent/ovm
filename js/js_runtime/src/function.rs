@@ -3,11 +3,10 @@
 
 use vm_core::Coercion;
 use vm_core::HostCtx;
-use vm_core::Lookup;
 use vm_core::materialize::Materialize;
 use vm_core::{
-    Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, Smi, Tagged,
-    Value, VmError, WellKnown,
+    Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, Object, Smi,
+    Tagged, Value, VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -120,7 +119,7 @@ pub fn function_bind<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, proto, proto, name)
+            Object::get_property(vm, heap, state, proto, proto, name)
         ) {
             Coercion::Threw => {
                 return vm.known().exception.get(heap).erase();

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/TriedAngle/KetteVM/actions/workflows/ci.yml)
 [![Extended Tests](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml/badge.svg?branch=master&event=push)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
-[![test262](https://img.shields.io/badge/test262-12615%20passing%20%2823.4%25%20of%2053910%29-yellow)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
+[![test262](https://img.shields.io/badge/test262-12726%20passing%20%2823.6%25%20of%2053910%29-yellow)](https://github.com/TriedAngle/KetteVM/actions/workflows/extended-master.yml)
 
 A fast virtual machine for dynamic languages.
 

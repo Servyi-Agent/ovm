@@ -6,7 +6,7 @@ use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Object,
+    Args, Compare, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Object,
     PropertyDescriptor, Prototype, SlotName, Smi, StringOwn, Tagged, ThreadState, VM, Value,
     VmError, WellKnown,
 };
@@ -710,6 +710,25 @@ pub fn object_prevent_extensions<'a>(
             // code and may have moved the receiver
             target.as_tagged(heap).erase()
         }
+    })
+}
+
+/// `Object.is(A, B)` (ES 20.1.2.13): SameValue, including NaN and ±0.
+pub fn object_is<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx { heap, state, .. } = nctx;
+    state.handle_scope(|scope| {
+        let a = args.get_handle(heap, 1);
+        let b = args.get_handle(heap, 2);
+        let a = scope.handle(a.as_tagged(heap).erase());
+        let b = scope.handle(b.as_tagged(heap).erase());
+        Convert::boolean(
+            heap,
+            Compare::same_value(heap, a.as_tagged(heap), b.as_tagged(heap)),
+        )
     })
 }
 

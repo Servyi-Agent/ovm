@@ -1,12 +1,13 @@
 use core::alloc::Layout;
 
+use crate::reanchor;
 use crate::{
-    CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_DATA, DenseString, EdgeVisitable,
-    ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot, Handle, HandleScope,
-    HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Lookup, Map, NativeIndex,
-    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
-    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
-    VmError,
+    CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_CONFIGURABLE, DETAILS_DATA,
+    DenseString, EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot,
+    Handle, HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, LoadOutcome, Lookup,
+    Map, NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor,
+    Prototype, SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value,
+    Visitor, VmError,
 };
 
 /// The elements slot is typed `FixedArray` but holds a
@@ -486,6 +487,82 @@ impl Object {
         Ok(())
     }
 
+    /// ES 10.4.2.3 ArraySetLength after the caller has performed
+    /// ToNumber/ToUint32 and range validation. Shrinking punches holes and
+    /// drops configurable dictionary entries; non-configurable entries
+    /// clamp the effective length.
+    pub fn set_array_length(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        receiver: &Handle<'_, Object>,
+        new_len: usize,
+    ) -> Result<bool, VmError> {
+        if !receiver.as_tagged(heap).is_array(heap) {
+            return Err(VmError::Type);
+        }
+        if new_len > 32 * 1024 * 1024
+            && receiver
+                .as_tagged(heap)
+                .map(heap)
+                .kind()
+                .is_dense_elements()
+        {
+            Self::normalize_elements(heap, scope, receiver);
+        }
+        if let Some(dict) = receiver.as_tagged(heap).element_dictionary(heap) {
+            let old_len = receiver.as_tagged(heap).length();
+            if new_len < old_len {
+                let mut effective = new_len;
+                let mut doomed: Vec<usize> = Vec::new();
+                dict.as_ref().for_each_entry(heap, |k, _, details| {
+                    if k >= new_len {
+                        if details & DETAILS_CONFIGURABLE == 0 {
+                            effective = effective.max(k + 1);
+                        } else {
+                            doomed.push(k);
+                        }
+                    }
+                });
+                for k in doomed {
+                    dict.as_ref().delete(heap, k);
+                }
+                Prototype::element_mutated(heap, receiver.as_tagged(heap));
+                let obj = receiver.as_tagged(heap);
+                obj.as_ref()
+                    .length
+                    .set(heap, obj.erase(), Smi::new(effective as i64));
+                return Ok(effective == new_len);
+            }
+            let obj = receiver.as_tagged(heap);
+            obj.as_ref()
+                .length
+                .set(heap, obj.erase(), Smi::new(new_len as i64));
+            return Ok(true);
+        }
+
+        let old_len = receiver.as_tagged(heap).length();
+        if new_len < old_len {
+            let hole = heap.known().the_hole.get(heap).erase();
+            if let Some(elements) = receiver.as_tagged(heap).elements_array(heap) {
+                for i in new_len..old_len.min(elements.len()) {
+                    elements.as_ref().set(heap, i, hole);
+                }
+            }
+            // a later length grow re-exposes the punched holes
+            Self::promote_holey(heap, scope, receiver);
+            Prototype::element_mutated(heap, receiver.as_tagged(heap));
+        } else if new_len > old_len {
+            // the indices [old_len, new_len) are holes: the map must stop
+            // promising packed elements (and packed capacity covers length)
+            Self::promote_holey(heap, scope, receiver);
+        }
+        let obj = receiver.as_tagged(heap);
+        obj.as_ref()
+            .length
+            .set(heap, obj.erase(), Smi::new(new_len as i64));
+        Ok(true)
+    }
+
     pub fn normalize_elements(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
@@ -778,7 +855,7 @@ impl Object {
         }
         HostCtx::new(vm, heap, state).handle_scope(|vm, heap, state, scope| {
             // 1. exotic @@toPrimitive (GetMethod)
-            let exotic = match Lookup::get_property_on(
+            let exotic = match Object::get_property(
                 vm,
                 heap,
                 state,
@@ -831,7 +908,7 @@ impl Object {
                 }
             };
             for name in method_names {
-                let method = match Lookup::get_property_on(vm, heap, state, value, value, name)? {
+                let method = match Object::get_property(vm, heap, state, value, value, name)? {
                     Coercion::Threw => return Ok(Coercion::Threw),
                     Coercion::Value(v) => scope.handle(v),
                 };
@@ -850,6 +927,44 @@ impl Object {
                 // object result: try the next method name
             }
             Err(VmError::Type)
+        })
+    }
+
+    /// ES `[[Get]]` value driver: lookup on `holder`, getter `this` =
+    /// `receiver` (the proxy-forward shape), then invoke an ordinary
+    /// accessor. The lookup itself never runs getters.
+    pub fn get_property<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
+        holder: Handle<'_, Value>,
+        receiver: Handle<'_, Value>,
+        name: Handle<'_, Value>,
+    ) -> Result<Coercion<'h>, VmError> {
+        state.handle_scope(|scope| -> Result<Coercion<'h>, VmError> {
+            match Lookup::get(vm, heap, state, &scope, holder, receiver, name)? {
+                LoadOutcome::Value(v) => {
+                    let v = scope.handle(v);
+                    Ok(Coercion::Value(v.as_tagged(heap)))
+                }
+                LoadOutcome::Threw => Ok(Coercion::Threw),
+                LoadOutcome::Getter(getter) => {
+                    let getter = scope.handle(getter);
+                    let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
+                    let result = HostCtx::enter(vm, heap, state, getter, args, None)?;
+                    reanchor!(
+                        result,
+                        heap,
+                        |heap_ref: &Heap, tagged: Tagged<'h, Value>| {
+                            if tagged == heap_ref.known().exception.get(heap_ref) {
+                                Ok(Coercion::Threw)
+                            } else {
+                                Ok(Coercion::Value(tagged))
+                            }
+                        }
+                    );
+                }
+            }
         })
     }
 
@@ -917,7 +1032,11 @@ impl Object {
         v: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, SlotName>>, VmError> {
         // Smis are pointer-free: valid at any lifetime, no rooting needed.
-        if let Some(smi) = Smi::decode(v.as_tagged(heap).raw()) {
+        // Only a canonical array index keeps the Smi spelling; negative
+        // and out-of-range numbers stringify (ES 6.1.7.1, ToPropertyKey).
+        if let Some(smi) = Smi::decode(v.as_tagged(heap).raw())
+            && (0..u32::MAX as i64).contains(&smi.value())
+        {
             return Ok(Some(Tagged::from(smi)));
         }
         state.handle_scope(|scope| {
@@ -996,7 +1115,7 @@ impl Object {
         // 4. P = Get(C, "prototype") — full [[Get]]; a getter may run user
         // code and move the heap, so only its result has to be rooted here
         state.handle_scope(|scope| {
-            let proto = match Lookup::get_property_on(
+            let proto = match Object::get_property(
                 vm,
                 heap,
                 state,
@@ -1053,8 +1172,7 @@ impl Object {
     ) -> Result<Option<Tagged<'a, Value>>, VmError> {
         state.handle_scope(|scope| {
             let proto_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
-            let proto =
-                Lookup::get_property_on(vm, heap, state, new_target, new_target, proto_name)?;
+            let proto = Object::get_property(vm, heap, state, new_target, new_target, proto_name)?;
             let proto = match proto {
                 Coercion::Threw => return Ok(None),
                 Coercion::Value(v) => scope.handle(v),

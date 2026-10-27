@@ -1,6 +1,5 @@
 use vm_core::Coercion;
 use vm_core::HostCtx;
-use vm_core::Lookup;
 
 use vm_core::{
     Args, Convert, DenseString, Handle, HandleSlice, Object, PropertyDescriptor, Tagged, Value,
@@ -98,7 +97,7 @@ pub fn error_to_string<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, receiver, receiver, name_key.erase())
+            Object::get_property(vm, heap, state, receiver, receiver, name_key.erase())
         ) {
             Coercion::Value(v) => scope.handle(v),
             Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),
@@ -108,7 +107,7 @@ pub fn error_to_string<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, receiver, receiver, message_key.erase(),)
+            Object::get_property(vm, heap, state, receiver, receiver, message_key.erase(),)
         ) {
             Coercion::Value(v) => scope.handle(v),
             Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),

@@ -6,7 +6,7 @@ use crate::{
     AccessorPair, Args, Compare, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE,
     DETAILS_ENUMERABLE, DETAILS_WRITABLE, EdgeVisitable, GcSlot, Handle, HandleScope, HandleSlice,
     Header, Heap, HeapObject, HostCtx, Key, Lookup, Map, NumberDictionary, Object, ObjectKind,
-    PartialDescriptor, PropertyDescriptor, Prototype, SlotName, Smi, Tagged, ThreadState,
+    PartialDescriptor, PropertyDescriptor, Prototype, SetWalk, SlotName, Smi, Tagged, ThreadState,
     Transition, VM, Value, Visitor, VmError,
 };
 
@@ -148,7 +148,7 @@ fn get_trap<'s>(
     trap: Trap,
 ) -> Result<TrapLookup<'s>, VmError> {
     let name = scope.handle(trap.name(heap).erase());
-    match Lookup::get_property_on(vm, heap, state, *handler, *handler, name)? {
+    match Object::get_property(vm, heap, state, *handler, *handler, name)? {
         Coercion::Threw => Ok(TrapLookup::Threw),
         Coercion::Value(v) => {
             let v = scope.handle(v);
@@ -252,7 +252,8 @@ fn own_descriptor_h<'s>(
         TrapLookup::Threw => Ok(Flow::Threw),
         TrapLookup::None => own_descriptor_h(vm, heap, state, scope, &target, key),
         TrapLookup::Trap(t) => {
-            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, *key])?;
+            let trap_key = materialize_trap_key(heap, scope, key)?;
+            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, trap_key])?;
             let result = match result {
                 Coercion::Threw => return Ok(Flow::Threw),
                 Coercion::Value(v) => scope.handle(v),
@@ -427,22 +428,6 @@ fn set_prototype_of_h(
     }
 }
 
-/// CreateDataProperty-style full descriptor ({w,e,c} true) — the payload
-/// of OrdinarySet's receiver-define step.
-fn create_data_partial<'s>(
-    _scope: &'s HandleScope<'_>,
-    value: &Handle<'s, Value>,
-) -> PartialDescriptor<'s> {
-    PartialDescriptor {
-        value: Some(*value),
-        get: None,
-        set: None,
-        writable: Some(true),
-        enumerable: Some(true),
-        configurable: Some(true),
-    }
-}
-
 /// FromPropertyDescriptor (ES 6.2.6.4): a descriptor object carrying
 /// exactly the fields present in the partial (what a
 /// `defineProperty`/`getOwnPropertyDescriptor` trap receives/returns).
@@ -512,6 +497,47 @@ fn define_internal_h<'s>(
         return Err(VmError::Type);
     }
     let undefined = scope.handle(heap.known().undefined.get(heap).erase());
+    // `length` is an array's exotic own property: route a value define
+    // through ArraySetLength instead of adding a normal descriptor.
+    if obj
+        .as_tagged(heap)
+        .as_heap_object()
+        .is_some_and(|o| o.is_array(heap))
+    {
+        let is_length = name
+            .as_tagged(heap)
+            .as_name()
+            .erase()
+            .ptr_eq(heap.known().strings.length.get(heap));
+        if is_length {
+            // ArraySetLength: length is non-configurable and
+            // non-enumerable; a shrinking write that would drop a
+            // non-configurable element fails after clamping the length.
+            if partial.is_accessor_descriptor()
+                || partial.configurable == Some(true)
+                || partial.enumerable == Some(true)
+            {
+                return Ok(Flow::Value(false));
+            }
+            if let Some(value) = partial.value {
+                let n = Object::to_numeric(vm, heap, state, value)?;
+                let Some(n) = n else {
+                    return Ok(Flow::Threw);
+                };
+                let len = Convert::number_to_uint32(n);
+                if len as f64 != n {
+                    return Err(VmError::OutOfBounds);
+                }
+                let array = scope
+                    .cast::<Object>(heap, obj.as_tagged(heap))
+                    .expect("array checked above");
+                return Object::set_array_length(heap, scope, &array, len as usize)
+                    .map(Flow::Value);
+            }
+            // Attribute-only changes fall through to the generic
+            // descriptor machinery below.
+        }
+    }
     // dense array elements: element defines land in the backing
     // store, not as descriptors
     let element = 'element: {
@@ -624,69 +650,44 @@ fn define_internal_h<'s>(
     Ok(Flow::Value(defined))
 }
 
-/// OrdinarySet (receiver-aware) for an ordinary target with a proxy
-/// (or arbitrary) receiver: the spec's define-on-receiver shape.
-fn ordinary_set_forward<'a>(
+/// Materialize the spec-visible key argument of a proxy trap. Canonical
+/// array indices travel internally as Smis (same as map keys), but traps
+/// always observe property keys: numbers are stringified there.
+fn materialize_trap_key<'s>(
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    key: &Handle<'_, Value>,
+) -> Result<Handle<'s, Value>, VmError> {
+    let key = *key;
+    if key.as_tagged(heap).is_smi() {
+        let text = Convert::to_string(heap, scope, key)?;
+        Ok(scope.handle(text))
+    } else {
+        Ok(scope.handle(key.as_tagged(heap).erase()))
+    }
+}
+
+/// Apply the result of `Lookup::set` for a proxy whose own
+/// `set` trap is absent. This is proxy forwarding, not the ordinary lookup
+/// core: defining on the receiver may itself run a proxy define trap.
+fn apply_set_walk<'a, 's>(
     vm: &VM,
     heap: &'a mut Heap,
     state: &ThreadState,
-    scope: &HandleScope<'_>,
-    target: &Handle<'_, Value>,
+    scope: &'s HandleScope<'_>,
     receiver: &Handle<'_, Value>,
-    name: &Handle<'_, Value>,
     value: &Handle<'_, Value>,
+    walk: SetWalk<'s>,
 ) -> Result<Coercion<'a>, VmError> {
-    // array element keys on arrays route through the define path
-    // (which stores into the backing store)
-    let classified = (
-        matches!(name.as_tagged(heap).classify_key(heap), Ok(Key::Element(_))),
-        target
-            .as_tagged(heap)
-            .as_heap_object()
-            .is_some_and(|o| o.is_array(heap)),
-    );
-    if let (true, true) = classified {
-        let partial = create_data_partial(scope, value);
-        let flow = define_internal_h(vm, heap, state, scope, receiver, name, partial)?;
-        return define_flow_to_coercion(heap, flow);
-    }
-
-    // owned summary of the chain lookup starting at the target
-    // (Lookup borrows its non-allocating region, so it is consumed inside)
-    enum SetLookup<'s> {
-        DataWritable,
-        DataReadonly,
-        Setter(Handle<'s, Value>),
-        NotFound,
-    }
-    let lookup = match target.lookup(heap, name.as_tagged(heap).as_name()) {
-        Lookup::Data { flags, .. } => {
-            if flags.is_writable() {
-                SetLookup::DataWritable
-            } else {
-                SetLookup::DataReadonly
-            }
-        }
-        Lookup::Accessor { pair, .. } => SetLookup::Setter(scope.handle(pair.set.get(heap))),
-        Lookup::NotFound => SetLookup::NotFound,
-    };
-    match lookup {
-        SetLookup::DataReadonly => Ok(Coercion::Value(Convert::boolean(heap, false))),
-        SetLookup::DataWritable | SetLookup::NotFound => {
-            let partial = create_data_partial(scope, value);
-            let flow = define_internal_h(vm, heap, state, scope, receiver, name, partial)?;
-            define_flow_to_coercion(heap, flow)
-        }
-        SetLookup::Setter(setter) => {
-            if setter.as_tagged(heap) == heap.known().undefined.get(heap) {
-                return Ok(Coercion::Value(Convert::boolean(heap, false)));
-            }
-            let words = [
-                receiver.as_tagged(heap).erase(),
-                value.as_tagged(heap).erase(),
-            ];
-            let staged = scope.stage(&words);
-            let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, setter, staged, None)?);
+    let receiver = scope.handle(receiver.as_tagged(heap).erase());
+    let value = scope.handle(value.as_tagged(heap).erase());
+    match walk {
+        SetWalk::Done => Ok(Coercion::Value(Convert::boolean(heap, true))),
+        SetWalk::Rejected => Ok(Coercion::Value(Convert::boolean(heap, false))),
+        SetWalk::Threw => Ok(Coercion::Threw),
+        SetWalk::CallSetter(setter) => {
+            let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
+            let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, setter, args, None)?);
             let exception = heap.known().exception.get(heap);
             if result.as_tagged(heap) == exception {
                 Ok(Coercion::Threw)
@@ -694,14 +695,26 @@ fn ordinary_set_forward<'a>(
                 Ok(Coercion::Value(Convert::boolean(heap, true)))
             }
         }
+        SetWalk::Define { receiver, key } => {
+            // OrdinarySet consults Receiver.[[GetOwnProperty]] before the
+            // define: an existing property preserves its attributes, while
+            // a fresh one uses the full writable/enumerable/configurable
+            // data descriptor.
+            let partial = if matches!(
+                Proxy::own_descriptor(vm, heap, state, scope, receiver, key)?,
+                Flow::Value(Some(_))
+            ) {
+                PartialDescriptor::value(value)
+            } else {
+                PartialDescriptor::new_data(value)
+            };
+            let flow = Proxy::define_own_property(vm, heap, state, scope, receiver, key, partial)?;
+            match flow {
+                Flow::Threw => Ok(Coercion::Threw),
+                Flow::Value(b) => Ok(Coercion::Value(Convert::boolean(heap, b))),
+            }
+        }
     }
-}
-
-fn define_flow_to_coercion<'a>(heap: &'a Heap, flow: Flow<bool>) -> Result<Coercion<'a>, VmError> {
-    Ok(match flow {
-        Flow::Threw => Coercion::Threw,
-        Flow::Value(b) => Coercion::Value(Convert::boolean(heap, b)),
-    })
 }
 
 // ---- the internal methods (ES 20.2.5.x) ------------------------------------
@@ -722,7 +735,7 @@ fn get_h<'a>(
             // forward: lookup on the target, getter `this` = the
             // original receiver (a proxy target re-enters its own
             // `get` trap with the same receiver)
-            let forwarded = Lookup::get_property_on(vm, heap, state, target, *receiver, *name)?;
+            let forwarded = Object::get_property(vm, heap, state, target, *receiver, *name)?;
             match forwarded {
                 Coercion::Threw => Ok(Coercion::Threw),
                 Coercion::Value(v) => {
@@ -732,13 +745,14 @@ fn get_h<'a>(
             }
         }
         TrapLookup::Trap(t) => {
+            let trap_name = materialize_trap_key(heap, scope, name)?;
             let result = call_trap(
                 vm,
                 heap,
                 state,
                 scope,
                 &t,
-                &[handler, target, *name, *receiver],
+                &[handler, target, trap_name, *receiver],
             )?;
             let result = match result {
                 Coercion::Threw => return Ok(Coercion::Threw),
@@ -791,21 +805,19 @@ fn set_h<'a, 's>(
     match get_trap(vm, heap, state, scope, &handler, Trap::Set)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
         TrapLookup::None => {
-            let cond_14 = Proxy::is_proxy(heap, target.as_tagged(heap));
-            if cond_14 {
-                set_h(vm, heap, state, scope, &target, name, value, receiver)
-            } else {
-                ordinary_set_forward(vm, heap, state, scope, &target, receiver, name, value)
-            }
+            let walk =
+                Lookup::set::<false>(vm, heap, state, scope, target, *receiver, *name, *value)?;
+            apply_set_walk(vm, heap, state, scope, receiver, value, walk)
         }
         TrapLookup::Trap(t) => {
+            let trap_name = materialize_trap_key(heap, scope, name)?;
             let result = call_trap(
                 vm,
                 heap,
                 state,
                 scope,
                 &t,
-                &[handler, target, *name, *value, *receiver],
+                &[handler, target, trap_name, *value, *receiver],
             )?;
             let result = match result {
                 Coercion::Threw => return Ok(Coercion::Threw),
@@ -858,19 +870,10 @@ fn has_h<'a>(
     let (target, handler) = enter_trap(scope, heap, proxy, Trap::Has)?;
     match get_trap(vm, heap, state, scope, &handler, Trap::Has)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
-        TrapLookup::None => {
-            let cond_15 = Proxy::is_proxy(heap, target.as_tagged(heap));
-            if cond_15 {
-                has_h(vm, heap, state, scope, &target, name)
-            } else {
-                let found = target
-                    .as_tagged(heap)
-                    .has_property(heap, name.as_tagged(heap).as_name());
-                Ok(Coercion::Value(Convert::boolean(heap, found)))
-            }
-        }
+        TrapLookup::None => Lookup::has(vm, heap, state, scope, target, *name),
         TrapLookup::Trap(t) => {
-            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, *name])?;
+            let trap_name = materialize_trap_key(heap, scope, name)?;
+            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, trap_name])?;
             let result = match result {
                 Coercion::Threw => return Ok(Coercion::Threw),
                 Coercion::Value(v) => scope.handle(v),
@@ -926,7 +929,8 @@ fn delete_h<'a>(
             }
         }
         TrapLookup::Trap(t) => {
-            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, *key])?;
+            let trap_key = materialize_trap_key(heap, scope, key)?;
+            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, trap_key])?;
             let result = match result {
                 Coercion::Threw => return Ok(Coercion::Threw),
                 Coercion::Value(v) => scope.handle(v),
@@ -974,13 +978,14 @@ fn proxy_define_h(
         TrapLookup::None => define_internal_h(vm, heap, state, scope, &target, name, partial),
         TrapLookup::Trap(t) => {
             let desc_obj = descriptor_object(heap, scope, &partial)?;
+            let trap_name = materialize_trap_key(heap, scope, name)?;
             let result = call_trap(
                 vm,
                 heap,
                 state,
                 scope,
                 &t,
-                &[handler, target, *name, desc_obj],
+                &[handler, target, trap_name, desc_obj],
             )?;
             let result = match result {
                 Coercion::Threw => return Ok(Flow::Threw),

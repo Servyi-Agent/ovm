@@ -7,10 +7,11 @@ use bytecode::Opcode;
 use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    AccessorPair, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass,
-    Errors, FixedArray, Handle, Heap, Hint, HostCtx, Key, LanguageMode, LoadOutcome, Lookup,
-    Object, PropertyDescriptor, Prototype, SlotName, Smi, StoreOutcome, StoreSemantics, Tagged,
-    ThreadState, VM, Value, VmError, raise_runtime,
+    AccessorPair, ChainLoad, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString,
+    EntryClass, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
+    LoadOutcome, Lookup, Object, PartialDescriptor, PropertyDescriptor, Prototype, SetWalk,
+    SlotName, Smi, StoreOutcome, StoreSemantics, Tagged, ThreadState, VM, Value, VmError,
+    raise_runtime,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -213,57 +214,40 @@ pub fn incdec_body<'a>(
     })
 }
 
-/// Apply a store outcome: transitions define the own property, setters
-/// run as a blocking call (their return value is ignored; the stored
-/// value stays the expression's result). `Err(())` = threw (pending set).
-pub fn apply_store_outcome_body(
+/// Apply the result of `Lookup::set`. Setters are invoked
+/// here, in the interpreter, not in the lookup core.
+#[inline(never)]
+pub fn apply_set_walk_body(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
     roots: RootsArg<'_>,
     receiver: Handle<'_, Value>,
-    outcome: StoreOutcome<'_>,
+    walk: SetWalk<'_>,
     value: Handle<'_, Value>,
     mode: LanguageMode,
-) -> Result<(), ()> {
-    match outcome {
-        StoreOutcome::Transition {
-            receiver: recv,
-            name,
-        } => {
-            let strict = mode.is_strict();
-            state.handle_scope(|scope| {
-                match Object::add_own_property(
-                    heap,
-                    &scope,
-                    recv,
-                    name,
-                    PropertyDescriptor::data(value),
-                ) {
-                    Ok(true) => Ok(()),
-                    Ok(false) if strict => {
-                        raise_runtime(vm, heap, state, VmError::Type);
-                        Err(())
-                    }
-                    Ok(false) => Ok(()),
-                    Err(e) => {
-                        raise_runtime(vm, heap, state, e);
-                        Err(())
-                    }
-                }
-            })
+) -> Result<StoreOutcomeKind, ()> {
+    match walk {
+        SetWalk::Done => Ok(StoreOutcomeKind::Done),
+        SetWalk::Rejected => {
+            if mode.is_strict() {
+                raise_runtime(vm, heap, state, VmError::Type);
+                Err(())
+            } else {
+                Ok(StoreOutcomeKind::Done)
+            }
         }
-        StoreOutcome::CallSetter { setter } => state.handle_scope(|scope| {
+        SetWalk::Threw => Err(()),
+        SetWalk::CallSetter(setter) => state.handle_scope(|scope| {
             let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
             match HostCtx::enter(vm, heap, state, setter, args, None) {
                 Ok(v) => {
-                    // erase the heap borrow before the sentinel read
                     let bits = v.raw().to_bits();
                     let sentinel = roots.exception.get(heap).erase();
                     if bits == sentinel.raw().to_bits() {
                         Err(())
                     } else {
-                        Ok(())
+                        Ok(StoreOutcomeKind::CallSetter)
                     }
                 }
                 Err(e) => {
@@ -272,7 +256,23 @@ pub fn apply_store_outcome_body(
                 }
             }
         }),
-        StoreOutcome::Done => Ok(()),
+        SetWalk::Define { receiver, key } => state.handle_scope(|scope| {
+            let value = scope.handle(value.as_tagged(heap).erase());
+            let partial = PartialDescriptor::new_data(value);
+            match Proxy::define_own_property(vm, heap, state, &scope, receiver, key, partial) {
+                Ok(vm_core::proxy::Flow::Threw) => Err(()),
+                Ok(vm_core::proxy::Flow::Value(true)) => Ok(StoreOutcomeKind::Transition),
+                Ok(vm_core::proxy::Flow::Value(false)) if mode.is_strict() => {
+                    raise_runtime(vm, heap, state, VmError::Type);
+                    Err(())
+                }
+                Ok(vm_core::proxy::Flow::Value(false)) => Ok(StoreOutcomeKind::Done),
+                Err(e) => {
+                    raise_runtime(vm, heap, state, e);
+                    Err(())
+                }
+            }
+        }),
     }
 }
 
@@ -299,27 +299,20 @@ pub fn store_named_tail_body<'a>(
             .as_tagged(heap)
             .as_heap_object()
             .map(|o| scope.handle(o.map(heap)));
-        let outcome = match recv.as_tagged(heap).erase().store_lookup(
-            heap,
-            &scope,
-            name.as_tagged(heap),
-            value.as_tagged(heap),
-            semantics,
-            mode,
-        ) {
-            Ok(o) => o,
+        let key = scope.handle(name.as_tagged(heap).erase());
+        let walk = if semantics == StoreSemantics::Shadow {
+            Lookup::set::<false>(vm, heap, state, &scope, recv, recv, key, value)
+        } else {
+            Lookup::set::<true>(vm, heap, state, &scope, recv, recv, key, value)
+        };
+        let walk = match walk {
+            Ok(walk) => walk,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let kind = match &outcome {
-            StoreOutcome::Done => StoreOutcomeKind::Done,
-            StoreOutcome::Transition { .. } => StoreOutcomeKind::Transition,
-            StoreOutcome::CallSetter { .. } => StoreOutcomeKind::CallSetter,
+        let kind = match apply_set_walk_body(vm, heap, state, roots, recv, walk, value, mode) {
+            Ok(kind) => kind,
+            Err(()) => return roots.exception.get(heap).erase(),
         };
-        if let Err(()) =
-            apply_store_outcome_body(vm, heap, state, roots, recv, outcome, value, mode)
-        {
-            return roots.exception.get(heap).erase();
-        }
         if let (Some(fb), Some(prev)) = (fb_slot, prev) {
             InlineCache::update_store(
                 heap,
@@ -816,36 +809,21 @@ pub fn slow_dec_loc(frame: Frame) {
 
 // --- loads ---
 
-#[handler(LoadKeyedProperty)]
-#[cold]
-pub fn slow_keyed_load(frame: Frame) {
-    let pc = frame.pc();
-    let base = frame.ctx().frame_base();
-    let fb = frame.unsigned::<1>();
-    let vm = frame.ctx().vm();
-    let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| -> Acc {
-        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
-        let raw_key = scope.handle(frame.acc());
-        let heap = frame.ctx().heap_mut();
-        let key = match Object::to_property_key(vm, heap, state, raw_key) {
-            Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return Acc::set(roots.exception.get(heap).erase()),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-        };
-
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
-                Ok(Coercion::Value(v)) => Acc::set(v),
-                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
-            };
-        }
-        let element_index = match key.as_tagged(heap).erase().classify_key(heap) {
-            Ok(Key::Element(i)) => Some(i),
-            _ => None,
-        };
-        if let Some(i) = element_index {
+fn load_keyed_body<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    roots: RootsArg<'_>,
+    scope: &HandleScope<'_>,
+    base: usize,
+    fb: usize,
+    recv: Handle<'_, Value>,
+    key: Handle<'_, Value>,
+) -> Tagged<'a, Value> {
+    {
+        let recv = scope.handle(recv.as_tagged(heap).erase());
+        let key = scope.handle(key.as_tagged(heap).erase());
+        if let Ok(Key::Element(i)) = key.as_tagged(heap).erase().classify_key(heap) {
             InlineCache::update_load_element(
                 heap,
                 &scope,
@@ -858,27 +836,48 @@ pub fn slow_keyed_load(frame: Frame) {
                 Some(recv),
                 i,
             );
-            if let Some(unit) = DenseString::index_element(heap, &scope, recv, key) {
-                return Acc::set(scope.handle(unit).as_tagged(heap).erase());
+            let name = scope.handle(key.as_tagged(heap).erase().as_name());
+            if let Some(unit) = DenseString::index_element(heap, &scope, recv, name) {
+                return scope.handle(unit).as_tagged(heap).erase();
             }
         }
-        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
-        {
+        let out = match Lookup::get(vm, heap, state, &scope, recv, recv, key.erase()) {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
                 let getter = scope.handle(getter);
                 let args = scope.stage(&[recv.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
-                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+                    Err(e) => return raise_runtime(vm, heap, state, e),
                 }
             }
             Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        Acc::set(out.as_tagged(heap).erase())
+        out.as_tagged(heap).erase()
+    }
+}
+
+#[handler(LoadKeyedProperty)]
+#[cold]
+pub fn slow_keyed_load(frame: Frame) {
+    let pc = frame.pc();
+    let base = frame.ctx().frame_base();
+    let fb = frame.unsigned::<1>();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let raw_key = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        let key = match Object::to_property_key(vm, heap, state, raw_key) {
+            Ok(Some(k)) => scope.handle(k),
+            Ok(None) => return roots.exception.get(heap).erase(),
+            Err(e) => return raise_runtime(vm, heap, state, e),
+        };
+        load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
     });
-    frame.set_acc(v.get(frame.ctx().heap()));
+    frame.set_acc(v);
     reenter!(pc)
 }
 
@@ -890,60 +889,18 @@ pub fn slow_keyed_load_reg(frame: Frame) {
     let fb = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| -> Acc {
+    let v = state.handle_scope(|scope| {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let raw_key = scope.handle(frame.regs().get(frame.signed::<1>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
-            Ok(None) => return Acc::set(roots.exception.get(heap).erase()),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            Ok(None) => return roots.exception.get(heap).erase(),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
-                Ok(Coercion::Value(v)) => Acc::set(v),
-                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
-            };
-        }
-        let element_index = match key.as_tagged(heap).erase().classify_key(heap) {
-            Ok(Key::Element(i)) => Some(i),
-            _ => None,
-        };
-        if let Some(i) = element_index {
-            InlineCache::update_load_element(
-                heap,
-                &scope,
-                state
-                    .stack()
-                    .frame_header(base)
-                    .feedback(heap)
-                    .map(|v| scope.handle(v)),
-                fb,
-                Some(recv),
-                i,
-            );
-            if let Some(unit) = DenseString::index_element(heap, &scope, recv, key) {
-                return Acc::set(scope.handle(unit).as_tagged(heap).erase());
-            }
-        }
-        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
-        {
-            Ok(LoadOutcome::Value(v)) => scope.handle(v),
-            Ok(LoadOutcome::Getter(getter)) => {
-                let getter = scope.handle(getter);
-                let args = scope.stage(&[recv.as_tagged(heap).erase()]);
-                match HostCtx::enter(vm, heap, state, getter, args, None) {
-                    Ok(v) => scope.handle(v),
-                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-                }
-            }
-            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-        };
-        Acc::set(out.as_tagged(heap).erase())
+        load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
     });
-    frame.set_acc(v.get(frame.ctx().heap()));
+    frame.set_acc(v);
     reenter!(pc)
 }
 
@@ -955,50 +912,14 @@ pub fn slow_keyed_load_imm(frame: Frame) {
     let fb = frame.unsigned::<2>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
-    let v = state.handle_scope(|scope| -> Acc {
+    let v = state.handle_scope(|scope| {
         let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
         let heap = frame.ctx().heap_mut();
         let smi = Smi::new(idx as i64).into_tagged();
-        let key: Handle<'_, SlotName> = scope.handle(smi.as_name());
-        InlineCache::update_load_element(
-            heap,
-            &scope,
-            state
-                .stack()
-                .frame_header(base)
-                .feedback(heap)
-                .map(|v| scope.handle(v)),
-            fb,
-            Some(recv),
-            idx,
-        );
-        if let Some(unit) = DenseString::index_element(heap, &scope, recv, key) {
-            return Acc::set(scope.handle(unit).as_tagged(heap).erase());
-        }
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::get(vm, heap, state, recv, recv, key.erase()) {
-                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
-                Ok(Coercion::Value(v)) => Acc::set(v),
-                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
-            };
-        }
-        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
-        {
-            Ok(LoadOutcome::Value(v)) => scope.handle(v),
-            Ok(LoadOutcome::Getter(getter)) => {
-                let getter = scope.handle(getter);
-                let args = scope.stage(&[recv.as_tagged(heap).erase()]);
-                match HostCtx::enter(vm, heap, state, getter, args, None) {
-                    Ok(v) => scope.handle(v),
-                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-                }
-            }
-            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
-            Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-        };
-        Acc::set(out.as_tagged(heap).erase())
+        let key = scope.handle(smi.as_name());
+        load_keyed_body(vm, heap, state, roots, &scope, base, fb, recv, key.erase())
     });
-    frame.set_acc(v.get(frame.ctx().heap()));
+    frame.set_acc(v);
     reenter!(pc)
 }
 
@@ -1019,15 +940,7 @@ pub fn slow_named_load(frame: Frame) {
                 .callable(heap, base)
                 .constant_slot_name(heap, name_idx),
         );
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::get(vm, heap, state, recv, recv, name.erase()) {
-                Ok(Coercion::Threw) => Acc::set(roots.exception.get(heap).erase()),
-                Ok(Coercion::Value(v)) => Acc::set(v),
-                Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
-            };
-        }
-        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, name.erase())
-        {
+        let out = match Lookup::get(vm, heap, state, &scope, recv, recv, name.erase()) {
             Ok(LoadOutcome::Value(v)) => {
                 let v = scope.handle(v);
                 InlineCache::update_load(
@@ -1085,9 +998,17 @@ pub fn global_load_body<'a>(
                 .erase()
                 .as_name(),
         );
-        let out = match global.lookup(heap, name.as_tagged(heap)) {
-            Lookup::Data { slot, .. } => {
-                let v = scope.handle(slot.get(heap));
+        let global_handle = scope.handle(global);
+        let out = match Lookup::get_with_missing(
+            vm,
+            heap,
+            state,
+            &scope,
+            global_handle.erase(),
+            name.erase(),
+        ) {
+            Ok(ChainLoad::Value(v)) => {
+                let v = scope.handle(v);
                 InlineCache::update_load(
                     heap,
                     &scope,
@@ -1097,28 +1018,28 @@ pub fn global_load_body<'a>(
                         .feedback(heap)
                         .map(|v| scope.handle(v)),
                     fb_slot,
-                    Some(scope.handle(global)),
+                    Some(global_handle),
                     scope.handle(name.as_tagged(heap).erase().as_name()),
                     false,
                 );
                 v
             }
-            Lookup::Accessor { pair, .. } => {
-                let getter = scope.handle(pair.get.get(heap));
+            Ok(ChainLoad::Getter(getter)) => {
+                let getter = scope.handle(getter);
                 if getter.as_tagged(heap) == roots.undefined.get(heap) {
                     // a setter-only accessor: the read yields undefined
                     return roots.undefined.get(heap).erase();
                 }
-                let args = scope.stage(&[global.erase()]);
+                let args = scope.stage(&[global_handle.as_tagged(heap).erase()]);
                 match HostCtx::enter(vm, heap, state, getter, args, None) {
                     Ok(v) => scope.handle(v),
                     Err(e) => return raise_runtime(vm, heap, state, e),
                 }
             }
-            Lookup::NotFound if !throws => {
+            Ok(ChainLoad::NotFound) if !throws => {
                 return roots.undefined.get(heap).erase();
             }
-            Lookup::NotFound => {
+            Ok(ChainLoad::NotFound) => {
                 // unresolvable reference: GetValue throws a
                 // ReferenceError naming the binding
                 let text = name
@@ -1132,6 +1053,8 @@ pub fn global_load_body<'a>(
                 state.set_pending_exception(ex);
                 return roots.exception.get(heap).erase();
             }
+            Ok(ChainLoad::Threw) => return roots.exception.get(heap).erase(),
+            Err(e) => return raise_runtime(vm, heap, state, e),
         };
         out.as_tagged(heap).erase()
     })
@@ -1190,8 +1113,8 @@ pub fn keyed_store_body<'a>(
     heap: &'a mut Heap,
     state: &'a ThreadState,
     roots: RootsArg<'_>,
-    base: usize,
-    fb: usize,
+    _base: usize,
+    _fb: usize,
     recv: Handle<'_, Value>,
     raw_key: Handle<'_, Value>,
     value: Handle<'_, Value>,
@@ -1199,166 +1122,36 @@ pub fn keyed_store_body<'a>(
     mode: LanguageMode,
 ) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
-        if Proxy::is_proxy(heap, recv.as_tagged(heap)) {
-            return match Proxy::set(vm, heap, state, recv, raw_key, value, recv) {
-                Ok(Coercion::Threw) => roots.exception.get(heap).erase(),
-                Ok(Coercion::Value(_)) => value.as_tagged(heap).erase(),
-                Err(e) => raise_runtime(vm, heap, state, e),
-            };
-        }
         let key = match Object::to_property_key(vm, heap, state, raw_key) {
             Ok(Some(k)) => scope.handle(k),
             Ok(None) => return roots.exception.get(heap).erase(),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let name: Handle<'_, SlotName> = match key.as_tagged(heap).erase().classify_key(heap) {
-            Ok(Key::Element(i)) => {
-                // sparse arrays: the stored entry's details dispatch
-                // (accessors call setters, read-only data ignores)
-                let dict_mode = recv
-                    .as_tagged(heap)
-                    .as_heap_object()
-                    .is_some_and(|h| h.element_dictionary(heap).is_some());
-                let dict_fallthrough: Option<Handle<'_, SlotName>> = if dict_mode {
-                    let entry_class = recv
-                        .as_tagged(heap)
-                        .as_heap_object()
-                        .and_then(|h| h.element_dictionary(heap))
-                        .map(|d| d.classify(heap, i));
-                    match entry_class {
-                        Some(EntryClass::Accessor) => {
-                            let pair = recv
-                                .as_tagged(heap)
-                                .as_heap_object()
-                                .and_then(|h| h.element_dictionary(heap))
-                                .and_then(|d| d.find(heap, i).map(|e| d.value_at(heap, e)))
-                                .and_then(|v| v.get_as::<AccessorPair>(heap));
-                            let Some(pair) = pair else {
-                                return roots.exception.get(heap).erase();
-                            };
-                            let setter = pair.set.get(heap);
-                            if setter == roots.undefined.get(heap) {
-                                return if mode.is_strict() {
-                                    raise_runtime(vm, heap, state, VmError::Type)
-                                } else {
-                                    value.as_tagged(heap).erase()
-                                };
-                            }
-                            let setter = scope.handle(setter);
-                            return match apply_store_outcome_body(
-                                vm,
-                                heap,
-                                state,
-                                roots,
-                                recv,
-                                StoreOutcome::CallSetter { setter },
-                                value,
-                                mode,
-                            ) {
-                                Ok(()) => value.as_tagged(heap).erase(),
-                                Err(()) => roots.exception.get(heap).erase(),
-                            };
-                        }
-                        Some(EntryClass::ReadOnly) => {
-                            return if mode.is_strict() {
-                                raise_runtime(vm, heap, state, VmError::Type)
-                            } else {
-                                value.as_tagged(heap).erase()
-                            };
-                        }
-                        Some(EntryClass::Data) => {
-                            let obj = scope
-                                .cast::<Object>(heap, recv.as_tagged(heap))
-                                .expect("array receiver is an object");
-                            if let Err(e) =
-                                Object::store_array_element(heap, &scope, &obj, i, &value)
-                            {
-                                return raise_runtime(vm, heap, state, e);
-                            }
-                            return value.as_tagged(heap).erase();
-                        }
-                        _ => {
-                            let Some(h) = recv.as_tagged(heap).as_heap_object() else {
-                                unreachable!("classified above")
-                            };
-                            let map = scope.handle(h.map(heap));
-                            if Prototype::indexed_store_chain_ok(heap, &scope, &recv, &map, i) {
-                                let obj = scope
-                                    .cast::<Object>(heap, recv.as_tagged(heap))
-                                    .expect("array receiver is an object");
-                                if let Err(e) =
-                                    Object::store_array_element(heap, &scope, &obj, i, &value)
-                                {
-                                    return raise_runtime(vm, heap, state, e);
-                                }
-                                return value.as_tagged(heap).erase();
-                            }
-                            Some(scope.handle(Tagged::<SlotName>::from(Smi::new(i as i64))))
-                        }
-                    }
-                } else {
-                    None
-                };
-                if let Some(dict_name) = dict_fallthrough {
-                    dict_name
-                } else {
-                    let mut direct = false;
-                    if let Some(hobj) = recv.as_tagged(heap).as_heap_object()
-                        && hobj.is_array(heap)
-                    {
-                        let map = hobj.map(heap);
-                        if map
-                            .published_validity_cell(heap)
-                            .is_some_and(|cell| cell.is_valid(heap))
-                        {
-                            direct = true;
-                        } else {
-                            let map = scope.handle(map);
-                            direct =
-                                Prototype::indexed_store_chain_ok(heap, &scope, &recv, &map, i)
-                                    || !recv.as_tagged(heap).chain_holds_index_name(heap, i);
-                        }
-                    }
-                    if !direct {
-                        scope.handle(Tagged::<SlotName>::from(Smi::new(i as i64)))
-                    } else {
-                        let obj = scope
-                            .cast::<Object>(heap, recv.as_tagged(heap))
-                            .expect("array receiver is an object");
-                        let grew = i >= obj.as_tagged(heap).length();
-                        if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
-                            return raise_runtime(vm, heap, state, e);
-                        }
-                        if let Some(fbv) = state.stack().frame_header(base).feedback(heap) {
-                            InlineCache::update_store_element(
-                                heap,
-                                &scope,
-                                Some(scope.handle(fbv)),
-                                fb,
-                                Some(recv),
-                                grew,
-                            );
-                        }
-                        return value.as_tagged(heap).erase();
-                    }
-                }
+        // Fresh array/list construction is the hot no-shadow case: a dense
+        // array element can be stored directly without walking the chain.
+        if semantics == StoreSemantics::WriteThrough
+            && let Some(i) = key.as_tagged(heap).as_index()
+            && let Some(obj) = recv.as_tagged(heap).as_heap_object()
+            && obj.is_array(heap)
+            && obj.map(heap).kind().is_dense_elements()
+        {
+            let obj = scope.handle(obj);
+            if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
+                return raise_runtime(vm, heap, state, e);
             }
-            Ok(Key::Name(key)) => scope.handle(key),
+            return value.as_tagged(heap).erase();
+        }
+        let walk = if semantics == StoreSemantics::Shadow {
+            Lookup::set::<false>(vm, heap, state, &scope, recv, recv, key.erase(), value)
+        } else {
+            Lookup::set::<true>(vm, heap, state, &scope, recv, recv, key.erase(), value)
+        };
+        let walk = match walk {
+            Ok(walk) => walk,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let outcome = match recv.as_tagged(heap).erase().store_lookup(
-            heap,
-            &scope,
-            name.as_tagged(heap),
-            value.as_tagged(heap),
-            semantics,
-            mode,
-        ) {
-            Ok(o) => o,
-            Err(e) => return raise_runtime(vm, heap, state, e),
-        };
-        match apply_store_outcome_body(vm, heap, state, roots, recv, outcome, value, mode) {
-            Ok(()) => value.as_tagged(heap).erase(),
+        match apply_set_walk_body(vm, heap, state, roots, recv, walk, value, mode) {
+            Ok(_) => value.as_tagged(heap).erase(),
             Err(()) => roots.exception.get(heap).erase(),
         }
     })

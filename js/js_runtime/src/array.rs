@@ -3,8 +3,8 @@
 
 use vm_core::HostCtx;
 use vm_core::{
-    Args, Convert, DETAILS_CONFIGURABLE, DenseString, Handle, Heap, Object, Prototype, Smi, Tagged,
-    ThreadState, VM, Value, VmError,
+    Args, Convert, DenseString, Handle, Heap, Object, Prototype, Smi, Tagged, ThreadState, VM,
+    Value, VmError,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -500,72 +500,9 @@ pub fn array_length_set<'a>(
             // spec: RangeError ("invalid array length")
             return raise_runtime(vm, heap, state, VmError::OutOfBounds);
         }
-        let new_len = new_len as usize;
-        if new_len > 32 * 1024 * 1024
-            && obj
-                .as_tagged(heap)
-                .as_ref()
-                .map(heap)
-                .as_ref()
-                .kind()
-                .is_dense_elements()
-        {
-            Object::normalize_elements(heap, &scope, &obj);
+        if let Err(err) = Object::set_array_length(heap, &scope, &obj, new_len as usize) {
+            return raise_runtime(vm, heap, state, err);
         }
-        if let Some(dict) = obj.as_tagged(heap).element_dictionary(heap) {
-            let old_len = obj.as_tagged(heap).length();
-            if new_len < old_len {
-                // non-configurable entries clamp the shrink
-                let mut effective = new_len;
-                let mut doomed: Vec<usize> = Vec::new();
-                dict.as_ref().for_each_entry(heap, |k, _, details| {
-                    if k >= new_len {
-                        if details & DETAILS_CONFIGURABLE == 0 {
-                            effective = effective.max(k + 1);
-                        } else {
-                            doomed.push(k);
-                        }
-                    }
-                });
-                for k in doomed {
-                    dict.as_ref().delete(heap, k);
-                }
-                Prototype::element_mutated(heap, obj.as_tagged(heap));
-                let obj_t = obj.as_tagged(heap);
-                obj_t
-                    .as_ref()
-                    .length
-                    .set(heap, obj_t.erase(), Smi::new(effective as i64));
-                return vm.known().undefined.get(heap).erase();
-            }
-            let obj_t = obj.as_tagged(heap);
-            obj_t
-                .as_ref()
-                .length
-                .set(heap, obj_t.erase(), Smi::new(new_len as i64));
-            return vm.known().undefined.get(heap).erase();
-        }
-        let old_len = obj.as_tagged(heap).length();
-        if new_len < old_len {
-            let hole = vm.known().the_hole.get(heap).erase();
-            if let Some(elements) = obj.as_tagged(heap).elements_array(heap) {
-                for i in new_len..old_len.min(elements.len()) {
-                    elements.as_ref().set(heap, i, hole);
-                }
-            }
-            // a later length grow re-exposes the punched holes
-            Object::promote_holey(heap, &scope, &obj);
-            Prototype::element_mutated(heap, obj.as_tagged(heap));
-        } else if new_len > old_len {
-            // the indices [old_len, new_len) are holes: the map must stop
-            // promising packed elements (and packed capacity covers length)
-            Object::promote_holey(heap, &scope, &obj);
-        }
-        let obj_t = obj.as_tagged(heap);
-        obj_t
-            .as_ref()
-            .length
-            .set(heap, obj_t.erase(), Smi::new(new_len as i64));
         vm.known().undefined.get(heap).erase()
     })
 }

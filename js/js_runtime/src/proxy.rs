@@ -3,7 +3,6 @@
 
 use vm_core::Coercion;
 use vm_core::HostCtx;
-use vm_core::Lookup;
 use vm_core::Object;
 use vm_core::PropertyDescriptor;
 use vm_core::error::Message;
@@ -93,7 +92,7 @@ pub fn proxy_revocable<'a>(
             vm,
             heap,
             state,
-            Lookup::get_property_on(vm, heap, state, proto, proto, name)
+            Object::get_property(vm, heap, state, proto, proto, name)
         ) {
             Coercion::Threw => {
                 return vm.known().exception.get(heap).erase();
