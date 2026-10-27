@@ -199,16 +199,14 @@ TEST262_ENGINES="match become" CI_TEST262=1 ./ci/github/ci.sh
 ```
 
 Then update `.github/test262-baseline` (`corpus_commit`, `min_pass`,
-`max_panic`). The README test262 badge updates itself from the next
-`test262-become` run.
+`max_panic`) and the README test262 count badge to the new intentional
+values.
 
 ## Badges
 
 The README CI badge tracks the `CI` workflow for `master` pushes. The
-test262 badge is a shields.io endpoint badge fed from the `badges` branch;
-`publish-test262-badge` parses the `test262-become` log after every master
-push and updates it, so it always shows the latest become pass count and
-percentage of the corpus.
+test262 badge shows the current pass count and percentage of the corpus; it
+is updated when the baseline is recalibrated.
 
 ## Performance runs
 
