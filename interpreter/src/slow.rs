@@ -862,9 +862,7 @@ pub fn slow_keyed_load(frame: Frame) {
                 return Acc::set(scope.handle(unit).as_tagged(heap).erase());
             }
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome_keyed(heap, key.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
         {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
@@ -875,6 +873,7 @@ pub fn slow_keyed_load(frame: Frame) {
                     Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
+            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         Acc::set(out.as_tagged(heap).erase())
@@ -928,9 +927,7 @@ pub fn slow_keyed_load_reg(frame: Frame) {
                 return Acc::set(scope.handle(unit).as_tagged(heap).erase());
             }
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome_keyed(heap, key.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
         {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
@@ -941,6 +938,7 @@ pub fn slow_keyed_load_reg(frame: Frame) {
                     Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
+            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         Acc::set(out.as_tagged(heap).erase())
@@ -984,9 +982,7 @@ pub fn slow_keyed_load_imm(frame: Frame) {
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome_keyed(heap, key.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
         {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
@@ -997,6 +993,7 @@ pub fn slow_keyed_load_imm(frame: Frame) {
                     Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
+            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         Acc::set(out.as_tagged(heap).erase())
@@ -1029,9 +1026,7 @@ pub fn slow_named_load(frame: Frame) {
                 Err(e) => Acc::set(raise_runtime(vm, heap, state, e)),
             };
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome(heap, name.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, name.erase())
         {
             Ok(LoadOutcome::Value(v)) => {
                 let v = scope.handle(v);
@@ -1060,6 +1055,7 @@ pub fn slow_named_load(frame: Frame) {
                     Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
                 }
             }
+            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
         Acc::set(out.as_tagged(heap).erase())

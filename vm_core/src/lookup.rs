@@ -3,8 +3,8 @@ use crate::reanchor;
 use crate::{
     AccessorPair, Coercion, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE,
     DETAILS_WRITABLE, DenseString, FixedArray, Float, GcSlot, Handle, HandleScope, Heap, HostCtx,
-    Map, NumberDictionary, Object, PartialDescriptor, PropertyDescriptor, SlotFlags, SlotName, Smi,
-    StringData, StringOwn, Symbol, Tagged, ThreadState, VM, Value, VmError,
+    Map, Object, PartialDescriptor, PropertyDescriptor, SlotFlags, SlotName, Smi, StringData,
+    StringOwn, Symbol, Tagged, ThreadState, VM, Value, VmError,
 };
 
 pub enum Lookup<'a> {
@@ -23,16 +23,15 @@ pub enum Lookup<'a> {
     NotFound,
 }
 
-/// A runtime property key: a smi element index or a name (interned string / symbol).
 pub enum Key<'a> {
     Element(usize),
     Name(Tagged<'a, SlotName>),
 }
 
-/// The result of a property load: a plain value or a getter that must be invoked.
 pub enum LoadOutcome<'a> {
     Value(Tagged<'a, Value>),
     Getter(Tagged<'a, Value>),
+    Threw,
 }
 
 impl<'a> Tagged<'a, Value> {
@@ -180,79 +179,6 @@ impl<'a> Tagged<'a, Value> {
         false
     }
 
-    pub fn load_outcome_keyed(
-        self,
-        heap: &'a Heap,
-        key: Tagged<'a, SlotName>,
-    ) -> Result<LoadOutcome<'a>, VmError> {
-        match key.erase().classify_key(heap)? {
-            Key::Element(i) => {
-                let smi_name: Tagged<'a, SlotName> = Tagged::from(Smi::new(i as i64));
-                if let Some(v) = self
-                    .as_heap_object()
-                    .and_then(|obj| obj.element_value(heap, i))
-                {
-                    return Ok(LoadOutcome::Value(v));
-                }
-                // accessor entries in a sparse self are own getters
-                if let Some(outcome) = self
-                    .as_heap_object()
-                    .and_then(|obj| obj.element_dictionary(heap))
-                    .and_then(|dict| dictionary_accessor_outcome(heap, dict, i))
-                {
-                    return Ok(outcome);
-                }
-                let mut hop = self;
-                loop {
-                    let Some(obj) = hop.as_heap_object() else {
-                        break;
-                    };
-                    let map = obj.map(heap);
-                    let proto = map.prototype.get(heap);
-                    // Self-style multi-parent chains and exotic hops take
-                    // the ordinary named walk
-                    if proto.get_as::<FixedArray>(heap).is_some() {
-                        break;
-                    }
-                    let known = heap.known();
-                    if !proto.is_strong_ptr()
-                        || proto == known.null.get(heap).erase()
-                        || proto == known.the_hole.get(heap).erase()
-                        || proto == known.undefined.get(heap).erase()
-                    {
-                        break;
-                    }
-                    let Some(next) = proto.get_as::<Object>(heap) else {
-                        break;
-                    };
-                    if next.map(heap).kind().is_proxy() {
-                        break;
-                    }
-                    if let Some(v) = next.element_value(heap, i) {
-                        return Ok(LoadOutcome::Value(v));
-                    }
-                    if let Some(outcome) = next
-                        .element_dictionary(heap)
-                        .and_then(|dict| dictionary_accessor_outcome(heap, dict, i))
-                    {
-                        return Ok(outcome);
-                    }
-                    let next_map = next.map(heap);
-                    if next_map
-                        .descriptors()
-                        .iter()
-                        .any(|d| d.name(heap).ptr_eq(smi_name))
-                    {
-                        return next.erase().load_outcome_on(heap, smi_name);
-                    }
-                    hop = next.erase();
-                }
-                self.load_outcome(heap, smi_name)
-            }
-            Key::Name(name) => self.load_outcome(heap, name),
-        }
-    }
-
     pub fn ordinary_own_descriptor<'s>(
         self,
         heap: &'a Heap,
@@ -396,6 +322,32 @@ impl<'a> Tagged<'a, Value> {
     }
 }
 
+impl<'a> Lookup<'a> {
+    /// ES `[[Get]]` over the prototype chain with per-holder semantics:
+    /// virtual own properties (array `length`, String wrapper length/index),
+    /// proxy `get` traps, and getters. `start` must be object-coercible;
+    /// the first `null`/`undefined` in the chain ends the walk.
+    pub fn load_outcome_full<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        start: Handle<'_, Value>,
+        receiver: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+    ) -> Result<LoadOutcome<'h>, VmError> {
+        if start.as_tagged(heap).is_nullish(heap) {
+            return Err(VmError::Type);
+        }
+        let walked = walk_get(vm, heap, state, scope, start, receiver, key)?;
+        Ok(match walked {
+            Walk::Value(v) => LoadOutcome::Value(v),
+            Walk::Getter(g) => LoadOutcome::Getter(g),
+            Walk::Threw => LoadOutcome::Threw,
+        })
+    }
+}
+
 impl Lookup<'_> {
     /// Super lookup with a pre-resolved prototype link (ES 15.4.2): the
     /// prototype is read before the key is coerced, so user `toString` cannot
@@ -462,26 +414,21 @@ impl Lookup<'_> {
     /// Same, with the lookup start (`holder`) split from the getter
     /// receiver — the proxy forward shape: lookup on the target,
     /// `this` = the proxy.
-    pub fn get_property_on<'a>(
-        vm: &'a VM,
-        heap: &'a mut Heap,
-        state: &'a ThreadState,
+    pub fn get_property_on<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
         holder: Handle<'_, Value>,
         receiver: Handle<'_, Value>,
         name: Handle<'_, Value>,
-    ) -> Result<Coercion<'a>, VmError> {
-        if Proxy::is_proxy(heap, holder.as_tagged(heap)) {
-            return Proxy::get(vm, heap, state, holder, receiver, name);
-        }
-        state.handle_scope(|scope| -> Result<Coercion<'a>, VmError> {
-            let loaded = holder
-                .as_tagged(heap)
-                .load_outcome_on(heap, name.as_tagged(heap).as_name())?;
-            match loaded {
+    ) -> Result<Coercion<'h>, VmError> {
+        state.handle_scope(|scope| -> Result<Coercion<'h>, VmError> {
+            match Lookup::load_outcome_full(vm, heap, state, &scope, holder, receiver, name)? {
                 LoadOutcome::Value(v) => {
                     let v = scope.handle(v);
                     Ok(Coercion::Value(v.as_tagged(heap)))
                 }
+                LoadOutcome::Threw => Ok(Coercion::Threw),
                 LoadOutcome::Getter(getter) => {
                     let getter = scope.handle(getter);
                     let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
@@ -489,7 +436,7 @@ impl Lookup<'_> {
                     reanchor!(
                         result,
                         heap,
-                        |heap_ref: &Heap, tagged: Tagged<'a, Value>| {
+                        |heap_ref: &Heap, tagged: Tagged<'h, Value>| {
                             if tagged == heap_ref.known().exception.get(heap_ref) {
                                 Ok(Coercion::Threw)
                             } else {
@@ -593,30 +540,177 @@ fn super_start_from_proto<'a>(heap: &'a Heap, proto: Option<Tagged<'a, Value>>) 
     SuperStart::Object(proto)
 }
 
+enum Walk<'a> {
+    Value(Tagged<'a, Value>),
+    Getter(Tagged<'a, Value>),
+    Threw,
+}
+
+/// One step of ES `[[Get]]`: consult the holder's own property (including
+/// the exotic virtual properties), then continue to its `[[Prototype]]`.
+/// Proxies dispatch their `get` trap with the original receiver.
+fn walk_get<'h>(
+    vm: &VM,
+    heap: &'h mut Heap,
+    state: &ThreadState,
+    scope: &HandleScope<'_>,
+    start: Handle<'_, Value>,
+    receiver: Handle<'_, Value>,
+    key: Handle<'_, Value>,
+) -> Result<Walk<'h>, VmError> {
+    // The common case is a single-parent chain: avoid a heap-allocated
+    // worklist unless a Self-style multi-parent link is actually reached.
+    let mut pending: Vec<Handle<'_, Value>> = Vec::new();
+    let mut current = Some(start);
+    let mut steps = 0usize;
+    loop {
+        let holder = match current.take() {
+            Some(holder) => holder,
+            None => match pending.pop() {
+                Some(holder) => holder,
+                None => break,
+            },
+        };
+        steps += 1;
+        if steps > 10_000 {
+            return Err(VmError::StackOverflow);
+        }
+        if holder.as_tagged(heap).is_nullish(heap)
+            || holder
+                .as_tagged(heap)
+                .ptr_eq(heap.known().the_hole.get(heap).erase())
+        {
+            continue;
+        }
+        if Proxy::is_proxy(heap, holder.as_tagged(heap)) {
+            return match Proxy::get(vm, heap, state, holder, receiver, key)? {
+                Coercion::Value(v) => {
+                    let v = scope.handle(v);
+                    Ok(Walk::Value(v.as_tagged(heap)))
+                }
+                Coercion::Threw => Ok(Walk::Threw),
+            };
+        }
+
+        // String exotic: `length` and in-range index are own properties of
+        // the wrapper (and of a String primitive's implicit wrapper).
+        let string_hit = {
+            let name = key.as_tagged(heap).as_name();
+            DenseString::from_receiver(heap, holder.as_tagged(heap))
+                .and_then(|s| s.own_key(heap, name))
+        };
+        match string_hit {
+            Some(StringOwn::Length(len)) => {
+                return Ok(Walk::Value(Smi::new(len as i64).into_tagged()));
+            }
+            Some(StringOwn::Index(i)) => {
+                let unit = {
+                    let s = DenseString::from_receiver(heap, holder.as_tagged(heap))
+                        .expect("string own key from a string receiver");
+                    s.code_unit(heap, i)
+                };
+                let value = DenseString::from_units(heap, scope, &[unit]);
+                return Ok(Walk::Value(value.as_tagged(heap).erase()));
+            }
+            None => {}
+        }
+
+        // Ordinary/exotic own property (dense/dictionary elements, array
+        // length, accessors, map descriptors).
+        let desc = {
+            let key_value = key.as_tagged(heap);
+            holder
+                .as_tagged(heap)
+                .ordinary_own_descriptor(heap, scope, key_value)
+        };
+        if let Some(desc) = desc {
+            return Ok(match desc {
+                PropertyDescriptor::Data { value, .. } => Walk::Value(value.as_tagged(heap)),
+                PropertyDescriptor::Accessor { get, .. } => {
+                    let getter = get.as_tagged(heap);
+                    if getter == heap.known().undefined.get(heap).erase() {
+                        Walk::Value(heap.known().undefined.get(heap).erase())
+                    } else {
+                        Walk::Getter(getter)
+                    }
+                }
+            });
+        }
+
+        // Self-style parent-name slot stored in the map's parent pairs.
+        let parent_name: Option<Handle<'_, Value>> = {
+            let name = key.as_tagged(heap).as_name();
+            let found = holder.as_tagged(heap).as_heap_object().and_then(|obj| {
+                obj.map(heap)
+                    .prototype
+                    .get(heap)
+                    .get_as::<FixedArray>(heap)
+                    .and_then(|pairs| {
+                        let name = name.erase();
+                        let mut i = 0;
+                        while i < pairs.len() {
+                            if pairs.at(heap, i).ptr_eq(name) {
+                                return Some(pairs.at(heap, i + 1));
+                            }
+                            i += 2;
+                        }
+                        None
+                    })
+            });
+            found.map(|v| scope.handle(v))
+        };
+        if let Some(v) = parent_name {
+            return Ok(Walk::Value(v.as_tagged(heap)));
+        }
+
+        let next: Option<Handle<'_, Value>> = {
+            let cur = holder.as_tagged(heap);
+            if let Some(proto) = cur.primitive_prototype(heap) {
+                Some(scope.handle(proto))
+            } else {
+                cur.as_heap_object()
+                    .map(|obj| scope.handle(obj.prototype(heap)))
+            }
+        };
+        let Some(next) = next else {
+            continue;
+        };
+        let stop = {
+            let next_value = next.as_tagged(heap);
+            let known = heap.known();
+            next_value.ptr_eq(known.null.get(heap).erase())
+                || next_value.ptr_eq(known.the_hole.get(heap).erase())
+                || next_value.ptr_eq(known.undefined.get(heap).erase())
+        };
+        if stop {
+            continue;
+        }
+        let parents: Option<Vec<Handle<'_, Value>>> = {
+            let next_value = next.as_tagged(heap);
+            next_value.get_as::<FixedArray>(heap).map(|pairs| {
+                let mut parents = Vec::new();
+                let mut i = 1;
+                while i < pairs.len() {
+                    parents.push(scope.handle(pairs.at(heap, i)));
+                    i += 2;
+                }
+                parents
+            })
+        };
+        if let Some(parents) = parents {
+            for parent in parents.into_iter().rev() {
+                pending.push(parent);
+            }
+        } else {
+            current = Some(next);
+        }
+    }
+    Ok(Walk::Value(heap.known().undefined.get(heap).erase()))
+}
+
 enum ChainQuery {
     Index(usize),
     AnyIndex,
-}
-
-/// The getter outcome for an accessor dictionary entry at `i`.
-fn dictionary_accessor_outcome<'a>(
-    heap: &'a Heap,
-    dict: Tagged<'a, NumberDictionary>,
-    i: usize,
-) -> Option<LoadOutcome<'a>> {
-    let entry = dict.find(heap, i)?;
-    if !dict.is_accessor_at(heap, entry) {
-        return None;
-    }
-    let getter = dict
-        .value_at(heap, entry)
-        .get_as::<AccessorPair>(heap)?
-        .get
-        .get(heap);
-    if getter == heap.known().undefined.get(heap) {
-        return Some(LoadOutcome::Value(heap.known().undefined.get(heap).erase()));
-    }
-    Some(LoadOutcome::Getter(getter))
 }
 
 impl<'a> Tagged<'a, Value> {

@@ -608,7 +608,7 @@ fn for_in_next_level<'s>(
             .ok()
             .and_then(|o| match o {
                 LoadOutcome::Value(v) => Some(v),
-                LoadOutcome::Getter(_) => None,
+                LoadOutcome::Getter(_) | LoadOutcome::Threw => None,
             })
         else {
             return Ok(None);
@@ -618,7 +618,7 @@ fn for_in_next_level<'s>(
             .ok()
             .and_then(|o| match o {
                 LoadOutcome::Value(v) => Some(v),
-                LoadOutcome::Getter(_) => None,
+                LoadOutcome::Getter(_) | LoadOutcome::Threw => None,
             });
         return Ok(proto.filter(|p| p.is_strong_ptr()).map(|p| scope.handle(p)));
     }
@@ -1357,6 +1357,7 @@ fn get_property_lenient<'a>(
         ) {
             LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
             LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
+            LoadOutcome::Threw => return vm.known().exception.get(heap).erase(),
         };
         if let Some(v) = value {
             return v.as_tagged(heap);
@@ -2188,6 +2189,7 @@ fn super_get_property<'a>(
         ) {
             LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
             LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
+            LoadOutcome::Threw => return vm.known().exception.get(heap).erase(),
         };
         if let Some(v) = outcome.0 {
             return v.as_tagged(heap);

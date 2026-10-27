@@ -6,8 +6,9 @@ use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
 use vm_core::{
-    Args, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap, Object, PropertyDescriptor,
-    Prototype, SlotName, Smi, StringOwn, Tagged, ThreadState, VM, Value, VmError, WellKnown,
+    Args, Convert, DenseString, Float, Handle, HandleScope, HandleSlice, Heap, Object,
+    PropertyDescriptor, Prototype, SlotName, Smi, StringOwn, Tagged, ThreadState, VM, Value,
+    VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -36,26 +37,57 @@ pub fn object_constructor<'a>(
         vm, heap, state, ..
     } = nctx;
     let arg = args.get_handle(heap, 1);
-    if is_construct {
-        if !arg.as_tagged(heap).is_primitive(heap) {
-            // `new Object(obj)` returns it unchanged (ES 20.1.1.1 step 3)
-            return arg.as_tagged(heap);
+    if !arg.as_tagged(heap).is_primitive(heap) {
+        // Object(obj) / new Object(obj) return the object unchanged
+        // (ES 20.1.1.1 step 3).
+        return arg.as_tagged(heap);
+    }
+    let nullish = arg.as_tagged(heap).is_nullish(heap);
+    state.handle_scope(|scope| {
+        // String/Number/Boolean primitives become their wrapper objects.
+        if !nullish && let Some(boxed) = box_primitive(vm, heap, &scope, arg) {
+            return boxed.as_tagged(heap).erase();
         }
-        // `new Object()` / primitive: allocate a fresh object
-        return state.handle_scope(|scope| {
-            heap.new_object(
-                &scope,
-                scope.handle(vm.known().object_initial_map.get(heap)),
-                HandleSlice::EMPTY,
-            )
-            .erase()
-        });
-    }
-    if arg.as_tagged(heap).is_primitive(heap) {
-        // TODO: box primitives (String/Symbol wrappers)
-        return raise_runtime(vm, heap, state, VmError::Type);
-    }
-    arg.as_tagged(heap)
+        // Symbols have no wrapper map in this VM yet; keep the old call
+        // behavior (TypeError) instead of silently returning an object.
+        if !is_construct && !nullish {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        // Object() / Object(undefined) / Object(null) / new Object(): a
+        // fresh ordinary object.
+        heap.new_object(
+            &scope,
+            scope.handle(vm.known().object_initial_map.get(heap)),
+            HandleSlice::EMPTY,
+        )
+        .erase()
+    })
+}
+
+/// ToObject for the primitive wrapper kinds this VM has maps for.
+fn box_primitive<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+    arg: Handle<'_, Value>,
+) -> Option<Handle<'s, Object>> {
+    let known = vm.known();
+    let map = {
+        let value = arg.as_tagged(heap);
+        if value.get_as::<DenseString>(heap).is_some() {
+            known.string_wrapper_map.get(heap)
+        } else if value.is_smi() || value.get_as::<Float>(heap).is_some() {
+            known.number_wrapper_map.get(heap)
+        } else if value == known.true_object.get(heap) || value == known.false_object.get(heap) {
+            known.boolean_wrapper_map.get(heap)
+        } else {
+            return None;
+        }
+    };
+    let map = scope.handle(map);
+    let value = scope.handle(arg.as_tagged(heap));
+    let object = heap.new_object(scope, map, scope.stage(&[value.as_tagged(heap)]));
+    Some(scope.handle(object))
 }
 
 pub fn object_get_prototype_of<'a>(

@@ -272,9 +272,7 @@ pub fn named_load<'a>(
                 Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome(heap, name.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, name.erase())
         {
             Ok(LoadOutcome::Value(v)) => {
                 let v = scope.handle(v);
@@ -298,6 +296,10 @@ pub fn named_load<'a>(
                     Ok(v) => scope.handle(v),
                     Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
+            }
+            Ok(LoadOutcome::Threw) => {
+                let heap = unsafe { ctx.heap_shared() };
+                scope.handle(vm.known().exception.get(heap).erase())
             }
             Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
@@ -360,9 +362,7 @@ pub fn keyed_load<'a>(
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome_keyed(heap, key.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
         {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
@@ -372,6 +372,10 @@ pub fn keyed_load<'a>(
                     Ok(v) => scope.handle(v),
                     Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
+            }
+            Ok(LoadOutcome::Threw) => {
+                let heap = unsafe { ctx.heap_shared() };
+                scope.handle(vm.known().exception.get(heap).erase())
             }
             Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };
@@ -418,9 +422,7 @@ pub fn keyed_load_imm<'a>(
                 Err(e) => raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
             };
         }
-        let out = match recv
-            .as_tagged(heap)
-            .load_outcome_keyed(heap, key.as_tagged(heap))
+        let out = match Lookup::load_outcome_full(vm, heap, state, &scope, recv, recv, key.erase())
         {
             Ok(LoadOutcome::Value(v)) => scope.handle(v),
             Ok(LoadOutcome::Getter(getter)) => {
@@ -430,6 +432,10 @@ pub fn keyed_load_imm<'a>(
                     Ok(v) => scope.handle(v),
                     Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
                 }
+            }
+            Ok(LoadOutcome::Threw) => {
+                let heap = unsafe { ctx.heap_shared() };
+                scope.handle(vm.known().exception.get(heap).erase())
             }
             Err(e) => return raise_runtime(vm, unsafe { ctx.heap_mut_shared() }, state, e),
         };

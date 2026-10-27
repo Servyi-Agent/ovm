@@ -316,6 +316,15 @@ fn walk<'s>(
     name: Tagged<'_, SlotName>,
 ) -> Option<Found<'s>> {
     let map = obj.map(heap);
+    // Exotic own properties depend on the holder (array length, String
+    // wrapper length/index), so a handler for the receiver cannot describe
+    // a chain that passes through one. Fall back to the slow walk.
+    if obj.array_length(heap, name).is_some()
+        || DenseString::from_receiver(heap, obj.erase())
+            .is_some_and(|s| s.own_key(heap, name).is_some())
+    {
+        return Some(Found::Uncacheable);
+    }
     // accessor entries in a sparse hop act like accessor descriptors
     if let Some(pair) = obj.dictionary_accessor(heap, name.as_index()) {
         return Some(Found::Accessor {
