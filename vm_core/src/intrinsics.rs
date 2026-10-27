@@ -1629,7 +1629,7 @@ fn define_own_property<'a>(
                 vm,
                 heap,
                 state,
-                Proxy::define_internal(vm, heap, state, &scope, receiver, key.erase(), partial,)
+                Proxy::define_own_property(vm, heap, state, &scope, receiver, key.erase(), partial,)
             ) {
                 Flow::Threw => vm.known().exception.get(heap).erase(),
                 Flow::Value(false) => raise_runtime(vm, heap, state, VmError::Type),

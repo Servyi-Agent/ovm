@@ -47,7 +47,8 @@ use object::{
     object_constructor, object_create, object_define_property, object_freeze,
     object_get_own_property_descriptor, object_get_own_property_names, object_get_prototype_of,
     object_has_own_property, object_is_extensible, object_prevent_extensions,
-    object_property_is_enumerable, object_seal, object_set_prototype_of, object_to_string,
+    object_property_is_enumerable, object_proto_get, object_proto_set, object_seal,
+    object_set_prototype_of, object_to_string,
 };
 use proxy::{REVOKE_PRELUDE, proxy_constructor, proxy_revocable, proxy_revoke};
 use string::{string_constructor, string_to_string, string_value_of};
@@ -132,6 +133,8 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         symbol: vm.register_runtime(symbol_constructor),
         object_has_own_property: vm.register_runtime(object_has_own_property),
         object_property_is_enumerable: vm.register_runtime(object_property_is_enumerable),
+        object_proto_get: vm.register_runtime(object_proto_get),
+        object_proto_set: vm.register_runtime(object_proto_set),
         object_get_own_property_names: vm.register_runtime(object_get_own_property_names),
         object_get_own_property_descriptor: vm.register_runtime(object_get_own_property_descriptor),
         object_define_property: vm.register_runtime(object_define_property),
@@ -211,6 +214,8 @@ pub struct BuiltinIndices {
     pub symbol: NativeIndex,
     pub object_has_own_property: NativeIndex,
     pub object_property_is_enumerable: NativeIndex,
+    pub object_proto_get: NativeIndex,
+    pub object_proto_set: NativeIndex,
     pub object_get_own_property_names: NativeIndex,
     pub object_get_own_property_descriptor: NativeIndex,
     pub object_define_property: NativeIndex,
@@ -595,6 +600,27 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             "propertyIsEnumerable",
             idx.object_property_is_enumerable,
         )?;
+        {
+            let get_fn = Object::native_function(thread.heap(), &scope, idx.object_proto_get)?;
+            let set_fn = Object::native_function(thread.heap(), &scope, idx.object_proto_set)?;
+            let get_fn = scope.handle(get_fn.as_tagged(thread.heap()).erase());
+            let set_fn = scope.handle(set_fn.as_tagged(thread.heap()).erase());
+            let proto_name = thread.intern(&scope, "__proto__");
+            // Safety: fresh interned word, rooted below before the define.
+            let proto_name = scope.handle(proto_name.as_tagged(thread.heap()));
+            Object::define_own_property(
+                thread.heap(),
+                &scope,
+                object_prototype,
+                proto_name,
+                PropertyDescriptor::Accessor {
+                    get: get_fn,
+                    set: set_fn,
+                    enumerable: false,
+                    configurable: true,
+                },
+            )?;
+        }
 
         // ---- Object / isNaN -----------------------------------------------------
         // %Object.prototype% already exists from bootstrap; link the

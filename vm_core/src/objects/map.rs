@@ -381,7 +381,6 @@ pub struct MapKind(u64);
 impl MapKind {
     pub const KIND_MASK: u64 = 0xff;
 
-    // byte 1: capability flags
     pub const EXTENDABLE: MapKind = MapKind(1 << 8);
     pub const CALLABLE: MapKind = MapKind(1 << 9);
     pub const CONSTRUCTOR: MapKind = MapKind(1 << 10);
@@ -392,12 +391,10 @@ impl MapKind {
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
 
-    // byte 2: elements storage kind
     pub const ELEMENTS_SHIFT: u32 = 16;
     pub const ELEMENTS_MASK: u64 = 0xff << Self::ELEMENTS_SHIFT;
-
-    // bit 24+: named-properties mode
     pub const PROPERTIES_DICTIONARY: MapKind = MapKind(1 << 24);
+    pub const IMMUTABLE_PROTO: MapKind = MapKind(1 << 25);
 
     pub const MAP: MapKind = MapKind(ObjectKind::Map as u64);
     pub const FIXED_ARRAY: MapKind = MapKind(ObjectKind::FixedArray as u64);
@@ -499,7 +496,7 @@ impl MapKind {
     }
 
     /// The indexed-elements storage kind.
-    #[inline]
+    #[inline(always)]
     pub const fn elements(self) -> ElementsKind {
         match ((self.0 & Self::ELEMENTS_MASK) >> Self::ELEMENTS_SHIFT) as u8 {
             0 => ElementsKind::Packed,
@@ -510,47 +507,58 @@ impl MapKind {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn with_elements(self, elements: ElementsKind) -> Self {
         Self((self.0 & !Self::ELEMENTS_MASK) | ((elements as u64) << Self::ELEMENTS_SHIFT))
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn is_holey(self) -> bool {
         self.elements().is_holey()
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn is_dictionary_elements(self) -> bool {
         self.elements() as u8 == ElementsKind::Dictionary as u8
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn is_dense_elements(self) -> bool {
         self.elements().is_dense()
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn is_properties_dictionary(self) -> bool {
         self.0 & Self::PROPERTIES_DICTIONARY.0 != 0
     }
 
+    #[inline(always)]
     pub const fn is_prototype(self) -> bool {
         self.0 & Self::PROTOTYPE.0 != 0
     }
 
+    /// Whether this map carries the immutable-prototype exotic bit.
+    #[inline(always)]
+    pub const fn is_immutable_prototype(self) -> bool {
+        self.0 & Self::IMMUTABLE_PROTO.0 != 0
+    }
+
+    #[inline(always)]
     pub const fn is_callable(self) -> bool {
         self.0 & Self::CALLABLE.0 != 0
     }
 
+    #[inline(always)]
     pub const fn is_native(self) -> bool {
         self.0 & Self::NATIVE.0 != 0
     }
 
+    #[inline(always)]
     pub const fn is_constructor(self) -> bool {
         self.0 & Self::CONSTRUCTOR.0 != 0
     }
 
+    #[inline(always)]
     pub const fn is_class_constructor(self) -> bool {
         self.0 & Self::CLASS_CONSTRUCTOR.0 != 0
     }

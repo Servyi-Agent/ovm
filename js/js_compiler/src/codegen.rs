@@ -3350,6 +3350,19 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let ObjectPropertyKind::ObjectProperty(p) = p else {
                 return self.err(o.span, "spread in object literals");
             };
+            // B.3.1 / ES 13.2.5.7: a non-computed `__proto__: value` sets
+            // the literal's [[Prototype]] when value is an object or null
+            // and is ignored otherwise; it never defines an own property.
+            if p.kind == PropertyKind::Init
+                && !p.computed
+                && !p.shorthand
+                && is_proto_literal_key(&p.key)
+            {
+                self.expr(&p.value)?;
+                self.b
+                    .call_runtime_staged(BuiltinFn::SetPrototype, &[RtArg::Reg(obj), RtArg::Acc]);
+                continue;
+            }
             // numeric literal keys ({ 1: x }) use the keyed path
             let key_reg = self.stage_key(&p.key, p.computed)?;
             let is_method = p.method || matches!(p.value, Expression::FunctionExpression(_));
@@ -3363,15 +3376,26 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                             if self.is_anon_function(&p.value) {
                                 self.emit_set_name_by_const(name_idx);
                             }
-                            let feedback = self.b.new_feedback();
-                            self.b.store_named_property(obj, name_idx, feedback);
+                            // literal properties are own data properties,
+                            // never stores through an inherited setter
+                            self.b.call_runtime_staged(
+                                BuiltinFn::DefineOwnProperty,
+                                &[
+                                    RtArg::Reg(obj),
+                                    RtArg::Const(name_idx),
+                                    RtArg::Acc,
+                                    RtArg::Smi(0),
+                                ],
+                            );
                         }
                         Some(k) => {
                             if self.is_anon_function(&p.value) {
                                 self.emit_set_name_by_reg(k, 0);
                             }
-                            let feedback = self.b.new_feedback();
-                            self.b.store_keyed_property(obj, k, feedback);
+                            self.b.call_runtime_staged(
+                                BuiltinFn::DefineOwnProperty,
+                                &[RtArg::Reg(obj), RtArg::Reg(k), RtArg::Acc, RtArg::Smi(0)],
+                            );
                         }
                     }
                 }
@@ -3381,14 +3405,21 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     self.expr(&p.value)?;
                     if let Some(k) = key_reg {
                         self.emit_set_name_by_reg(k, 0);
-                    }
-                    if let Some(k) = key_reg {
-                        let feedback = self.b.new_feedback();
-                        self.b.store_keyed_property(obj, k, feedback);
+                        self.b.call_runtime_staged(
+                            BuiltinFn::DefineOwnProperty,
+                            &[RtArg::Reg(obj), RtArg::Reg(k), RtArg::Acc, RtArg::Smi(0)],
+                        );
                     } else {
                         let name_idx = self.name_constant(&p.key)?;
-                        let feedback = self.b.new_feedback();
-                        self.b.store_named_property(obj, name_idx, feedback);
+                        self.b.call_runtime_staged(
+                            BuiltinFn::DefineOwnProperty,
+                            &[
+                                RtArg::Reg(obj),
+                                RtArg::Const(name_idx),
+                                RtArg::Acc,
+                                RtArg::Smi(0),
+                            ],
+                        );
                     }
                 }
                 PropertyKind::Get | PropertyKind::Set => {
@@ -3437,6 +3468,17 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         self.b.load(obj);
         self.b.legacy_drop_temp();
         Ok(())
+    }
+}
+
+/// B.3.1 / ES 13.2.5.7: a non-computed `__proto__` property name in an
+/// object initializer (bare identifier or string literal; shorthand and
+/// method definitions are ordinary properties).
+fn is_proto_literal_key(key: &PropertyKey<'_>) -> bool {
+    match key {
+        PropertyKey::StaticIdentifier(i) => i.name.as_bytes() == b"__proto__",
+        PropertyKey::StringLiteral(s) => s.value.as_bytes() == b"__proto__",
+        _ => false,
     }
 }
 

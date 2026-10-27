@@ -105,6 +105,13 @@ impl<'a> Tagged<'a, Value> {
             || self.get_as::<Symbol>(heap).is_some()
     }
 
+    /// Whether the value is `null` or `undefined` (the spec's nullish
+    /// predicate). No GC.
+    #[inline(always)]
+    pub fn is_nullish(self, heap: &Heap) -> bool {
+        self == heap.known().undefined.get(heap) || self == heap.known().null.get(heap)
+    }
+
     /// ES 7.1.13 ToObject for the primitive kinds that expose a distinct
     /// prototype: the prototype of a number/string/boolean primitive is the
     /// matching builtin prototype (symbols have no exposed prototype in this

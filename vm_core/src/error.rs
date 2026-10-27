@@ -57,6 +57,14 @@ pub enum Message {
     ProxyPreventExtensionsTrue,
     /// `proxy isExtensible trap must match the target's extensibility`
     ProxyExtensibilityMismatch,
+    /// `proxy getPrototypeOf trap must return an object or null`
+    ProxyGetPrototypeOfNotObject,
+    /// `proxy getPrototypeOf trap must match the target's prototype`
+    ProxyGetPrototypeOfMismatch,
+    /// `proxy setPrototypeOf trap may not change a non-extensible target's prototype`
+    ProxySetPrototypeOfMismatch,
+    /// `prototype is immutable`
+    ImmutablePrototype,
     /// `cannot perform '<trap>' on a proxy that has been revoked`
     ProxyRevokedGet,
     ProxyRevokedSet,
@@ -151,6 +159,16 @@ impl Message {
             Self::ProxyExtensibilityMismatch => {
                 "proxy isExtensible trap must match the target's extensibility"
             }
+            Self::ProxyGetPrototypeOfNotObject => {
+                "proxy getPrototypeOf trap must return an object or null"
+            }
+            Self::ProxyGetPrototypeOfMismatch => {
+                "proxy getPrototypeOf trap must match the target's prototype"
+            }
+            Self::ProxySetPrototypeOfMismatch => {
+                "proxy setPrototypeOf trap may not change a non-extensible target's prototype"
+            }
+            Self::ImmutablePrototype => "prototype is immutable",
             Self::ProxyRevokedGet => "cannot perform 'get' on a proxy that has been revoked",
             Self::ProxyRevokedSet => "cannot perform 'set' on a proxy that has been revoked",
             Self::ProxyRevokedHas => "cannot perform 'has' on a proxy that has been revoked",

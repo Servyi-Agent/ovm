@@ -112,9 +112,9 @@ pub fn bitwise_body<'a>(
     Smi::new(r).into_tagged()
 }
 
-/// The compare cold tail: `cmp` selects the relation (0 = loose `==`,
-/// 2 = `<`, 3 = `<=`, 4 = `>`, 5 = `>=`). Returns the boolean result
-/// value or the sentinel (a coercion threw).
+/// compare cold tail: `cmp` selects the relation (0 = loose `==`,
+/// 1 = strict `===`, 2 = `<`, 3 = `<=`, 4 = `>`, 5 = `>=`). Returns the
+/// boolean result value or the sentinel (a coercion threw).
 pub fn compare_body<'a>(
     vm: &'a VM,
     heap: &'a mut Heap,
@@ -127,6 +127,10 @@ pub fn compare_body<'a>(
     state.handle_scope(|scope| {
         let x = lhs;
         let y = rhs;
+        if cmp == 1 {
+            let b = Compare::strict_equal(heap, x.as_tagged(heap), y.as_tagged(heap));
+            return Convert::boolean(heap, b);
+        }
         let loose = cmp == 0;
         let x_obj = Compare::is_object_operand(heap, x.as_tagged(heap));
         let y_obj = Compare::is_object_operand(heap, y.as_tagged(heap));

@@ -13,144 +13,35 @@ use std::path::{Path, PathBuf};
 use dummy_heap::{DummyHeap, DummyHeapConfig};
 use vm::ScriptError;
 
+/// Features whose syntax/runtime is not implemented at all: flagged
+/// tests cannot run yet. Everything else — missing builtins included —
+/// should fail rather than disappear from the run.
 const UNSUPPORTED_FEATURES: &[&str] = &[
     "BigInt",
-    "Symbol",
     "Temporal",
     "regexp-modifiers",
-    // Reflect lands with the remaining proxy traps (proxy.rs)
-    "Reflect",
-    "Reflect.set",
-    "Reflect.construct",
-    // remaining class extensions beyond fields: static blocks, private
-    // methods/accessors, decorators
+    // class extensions beyond fields: static blocks, private methods,
+    // decorators
     "class-static-block",
     "class-private-methods",
     "class-static-methods-private",
     "class-decorators",
+    // ArrayBuffer/TypedArray machinery is entirely absent; these tests
+    // currently panic instead of failing
+    "resizable-arraybuffer",
 ];
-/// Tests exercising runtime objects the VM does not have yet.
-const UNSUPPORTED_PATTERNS: &[&str] = &["new Date"];
-/// Harness include files the VM cannot load yet (missing globals like
-/// Math, Array.prototype.push): every test including them is skipped.
-const UNSUPPORTED_INCLUDES: &[&str] = &["propertyHelper.js"];
-/// Tests under paths the VM cannot support yet: missing global namespaces,
-/// RegExp (literals and engine), `with` statements, modules/dynamic import.
+/// Tests under paths the VM cannot support yet: RegExp (no literal
+/// scanner or engine), `with` statements, modules/dynamic import, and
+/// cross-realm tests (the runner has no `$262.createRealm`).
 const UNSUPPORTED_PATHS: &[&str] = &[
-    // RegExp: no literal scanning, no engine
     "/built-ins/RegExp/",
     "/literals/regexp/",
     "regexp-literal",
-    // `with` statements
     "/statements/with/",
-    // modules
     "/dynamic-import/",
     "_FIXTURE",
-    // known-panic sparse indexOf/lastIndexOf builds: under the real GC
-    // they panic fast, but under the allocation-only test heap they are
-    // memory bombs (100 GB of Rust-side growth) — skip them outright
-    "15.4.4.14-5-12",
-    "15.4.4.14-5-16",
-    "15.4.4.15-5-12",
-    "15.4.4.15-5-16",
-    // the same sparse-boundary disease through defineProperty (2^32-2
-    // indices stored densely)
-    "15.2.3.6-1-3",
-    "15.2.3.6-1-4",
-    "15.2.3.6-4-183",
-    // missing global namespaces
-    "/built-ins/Temporal/",
-    "/built-ins/Reflect/",
-    "/built-ins/Promise/",
-    "/built-ins/Math/",
-    "/built-ins/JSON/",
-    "/built-ins/Map/",
-    "/built-ins/Set/",
-    "/built-ins/WeakMap/",
-    "/built-ins/WeakSet/",
-    // Proxy: implemented are get/set/has/deleteProperty/defineProperty/
-    // isExtensible/preventExtensions/revocable + the constructor; the
-    // remaining traps and cross-cutting behaviors stay skipped
-    "/built-ins/Proxy/apply/",
-    "/built-ins/Proxy/construct/",
-    "/built-ins/Proxy/ownKeys/",
-    "/built-ins/Proxy/getOwnPropertyDescriptor/",
-    "/built-ins/Proxy/getPrototypeOf/",
-    "/built-ins/Proxy/setPrototypeOf/",
-    "/built-ins/Proxy/enumerate/",
-    "/built-ins/Proxy/property-order.js",
-    "/built-ins/Proxy/proxy-newtarget.js",
-    "/built-ins/Proxy/get-fn-realm.js",
-    "/built-ins/Proxy/get-fn-realm-recursive.js",
-    // `has` trap through `with` statements (no `with` support yet)
-    "using-with",
-    "Proxy/has/call-with.js",
-    "Proxy/has/return-is-abrupt-with.js",
-    // cross-realm: the runner has no $262 realm factory
     "-realm.js",
     "-realm-",
-    // Object.create (not implemented; not part of the Proxy work)
-    "Proxy/has/trap-is-undefined.js",
-    "Proxy/get/trap-is-undefined-receiver.js",
-    "Proxy/get/trap-is-undefined-target-is-proxy.js",
-    "Proxy/set/trap-is-null-receiver.js",
-    "Proxy/defineProperty/trap-is-undefined.js",
-    "Proxy/defineProperty/desc-realm.js",
-    // Object.prototype.toString tags for functions (Phase C nicety)
-    "Proxy/revocable/builtin.js",
-    "Proxy/revocable/revocation-function-not-a-constructor.js",
-    // Object.keys / Array.prototype.indexOf (not implemented)
-    "Proxy/defineProperty/call-parameters.js",
-    "Proxy/revocable/revocation-function-property-order.js",
-    // regex literals in the test source (no regex scanner yet)
-    "Proxy/defineProperty/trap-is-null-target-is-proxy.js",
-    "Proxy/deleteProperty/trap-is-null-target-is-proxy.js",
-    "Proxy/isExtensible/trap-is-missing-target-is-proxy.js",
-    "Proxy/set/trap-is-missing-target-is-proxy.js",
-    "Proxy/revocable/tco-fn-realm.js",
-    // a proxy in the prototype chain: the chain walk must restart
-    // through the proxy's traps (not yet implemented)
-    "Proxy/has/call-in-prototype.js",
-    "Proxy/has/call-in-prototype-index.js",
-    "Proxy/has/call-object-create.js",
-    "Proxy/set/call-parameters-prototype.js",
-    "Proxy/set/call-parameters-prototype-dunder-proto.js",
-    "Proxy/set/call-parameters-prototype-index.js",
-    "/built-ins/ArrayBuffer/",
-    "/built-ins/SharedArrayBuffer/",
-    "/built-ins/DataView/",
-    "/built-ins/TypedArray",
-    "/built-ins/Atomics/",
-    "/built-ins/FinalizationRegistry/",
-    "/built-ins/WeakRef/",
-    "/built-ins/Iterator/",
-    // sparse/dictionary array elements (huge dense allocations)
-    "S15.4.5.2_A1_T1",
-    "S15.4.2.2_A2.1_T1",
-    "S15.4.5.2_A3_T4",
-    "property-cast-number",
-    "15.4.4.14-9-9",
-    "15.4.4.15-8-9",
-    "length-truncate-with-indexed",
-    // newly-parsing legacy array tests hitting the same dense-allocation
-    // limitation (new Array(4294967295)-style)
-    "S15.4_A1.1_T10",
-    "S12.6.3_A3",
-    // huge generated identifier files (5k-8k+ class fields / escapes):
-    // several exceed bytecode operand limits (baseline panics) and under
-    // GC-stress each full root rescan per interned name costs 20-60+ min
-    "/identifiers/start-unicode-",
-    // sparse test arrays: large/hole-y indices that should not be stored
-    // densely (index 999999/123456 and 2^32−1/2^32 cases)
-    "15.4.4.16-7-c-ii-2",
-    "15.4.4.17-7-c-ii-2",
-    "15.4.4.18-7-c-ii-1",
-    "15.4.4.19-8-c-ii-1",
-    "15.4.4.20-9-c-ii-1",
-    "15.4.4.14-10-1",
-    "15.4.4.15-9-1",
-    "length-truncate-nonconfigurable-sparse",
-    "parse-mega-huge-array",
 ];
 
 /// Paths that must be skipped even in audit mode: running them would
@@ -185,6 +76,20 @@ const HARD_SKIP_PATHS: &[&str] = &[
     "15.4.4.15-9-1",
     "length-truncate-nonconfigurable-sparse",
     "parse-mega-huge-array",
+    // SIGSEGV today (subclass-builtin / Promise machinery); hard-skip
+    // until the underlying bug is fixed
+    "Object/subclass-object-arg.js",
+    "Promise/prototype/finally/rejected-observable-then-calls-argument.js",
+    "subclass/builtin-objects/Date/regular-subclassing.js",
+    "subclass/builtin-objects/Error/message-property-assignment.js",
+    "subclass/builtin-objects/Function/instance-length.js",
+    "subclass/builtin-objects/Function/instance-name.js",
+    "subclass/builtin-objects/GeneratorFunction/instance-length.js",
+    "subclass/builtin-objects/GeneratorFunction/instance-name.js",
+    "subclass/builtin-objects/GeneratorFunction/instance-prototype.js",
+    "subclass/builtin-objects/NativeError/ReferenceError-message.js",
+    "subclass/builtin-objects/NativeError/TypeError-message.js",
+    "subclass/builtin-objects/String/length.js",
 ];
 
 #[derive(Default)]
@@ -262,6 +167,18 @@ const KNOWN_PANICS: &[&str] = &[
     "subclass/builtin-objects/Object/replacing-prototype.js",
     "subclass/builtin-objects/String/regular-subclassing.js",
     "subclass/builtin-objects/String/super-must-be-called.js",
+    // panic today (missing Intl / staging TypedArray machinery)
+    "intl402/DurationFormat/prototype/format/duration-out-of-range-3.js",
+    "intl402/NumberFormat/prototype/format/numbering-systems.js",
+    "intl402/RelativeTimeFormat/prototype/formatToParts/unit-plural.js",
+    "intl402/RelativeTimeFormat/prototype/formatToParts/value-tonumber.js",
+    "staging/sm/Array/toSpliced-dense.js",
+    "staging/sm/Array/with-dense.js",
+    "staging/sm/TypedArray/slice-bitwise-same.js",
+    "staging/sm/TypedArray/sort-negative-nan.js",
+    "staging/sm/TypedArray/sort_large_countingsort.js",
+    "staging/sm/TypedArray/sort_modifications.js",
+    "staging/sm/regress/regress-563221.js",
 ];
 
 fn frontmatter(src: &str) -> &str {
@@ -370,10 +287,6 @@ fn run_test_inner(
             stats.skipped_feature += 1;
             return;
         }
-        if UNSUPPORTED_PATTERNS.iter().any(|p| src.contains(p)) {
-            stats.skipped_feature += 1;
-            return;
-        }
     }
     let expect_parse_error =
         fm.contains("negative:") && (fm.contains("phase: parse") || fm.contains("phase: syntax"));
@@ -386,7 +299,6 @@ fn run_test_inner(
 
     // `includes:` harness files (sta.js-style helpers like propertyHelper)
     let mut includes = String::new();
-    let mut include_unsupported = false;
     if let Some(dir) = harness_dir
         && let Some(start) = fm.find("includes:")
     {
@@ -396,9 +308,6 @@ fn run_test_inner(
             for name in rest[..end].split(&[',', '[', '\n'][..]) {
                 let name = name.trim().trim_matches(|c| c == '\'' || c == '"');
                 if name.ends_with(".js") {
-                    if UNSUPPORTED_INCLUDES.contains(&name) {
-                        include_unsupported = true;
-                    }
                     let p = dir.join(name);
                     if let Ok(text) = std::fs::read_to_string(&p) {
                         includes.push_str(&text);
@@ -407,10 +316,6 @@ fn run_test_inner(
                 }
             }
         }
-    }
-    if include_unsupported && !audit {
-        stats.skipped_feature += 1;
-        return;
     }
 
     let code = if raw {

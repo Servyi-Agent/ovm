@@ -670,7 +670,13 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     let data = HandleData::new(known.the_hole.get(heap).erase());
     let scope = unsafe { HandleScope::from_raw(NonNull::from(&data)) };
 
-    let object_prototype_map = alloc_map(heap, &scope, MapKind::OBJECT.union(MapKind::EXTENDABLE));
+    let object_prototype_map = alloc_map(
+        heap,
+        &scope,
+        MapKind::OBJECT
+            .union(MapKind::EXTENDABLE)
+            .union(MapKind::IMMUTABLE_PROTO),
+    );
     let empty_slots = heap
         .allocate::<FixedArray>(HandleSlice::EMPTY)
         .as_handle(&scope);

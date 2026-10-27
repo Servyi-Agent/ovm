@@ -309,6 +309,124 @@ fn is_extensible_h(
 
 // ---- forwards (trap absent → run the operation on the target) ---------------
 
+fn get_prototype_of_h<'a>(
+    vm: &VM,
+    heap: &'a mut Heap,
+    state: &ThreadState,
+    scope: &HandleScope<'_>,
+    obj: &Handle<'_, Value>,
+) -> Result<Coercion<'a>, VmError> {
+    if !Proxy::is_proxy(heap, obj.as_tagged(heap)) {
+        let proto = obj
+            .as_tagged(heap)
+            .as_heap_object()
+            .expect("[[GetPrototypeOf]] receiver is an object")
+            .prototype(heap);
+        let proto = scope.handle(proto);
+        return Ok(Coercion::Value(proto.as_tagged(heap)));
+    }
+    let (target, handler) = enter_trap(scope, heap, obj, Trap::GetPrototypeOf)?;
+    match get_trap(vm, heap, state, scope, &handler, Trap::GetPrototypeOf)? {
+        TrapLookup::Threw => Ok(Coercion::Threw),
+        // GetMethod(handler, "getPrototypeOf") is undefined: forward
+        TrapLookup::None => get_prototype_of_h(vm, heap, state, scope, &target),
+        TrapLookup::Trap(t) => {
+            let result = call_trap(vm, heap, state, scope, &t, &[handler, target])?;
+            let result = match result {
+                Coercion::Threw => return Ok(Coercion::Threw),
+                Coercion::Value(v) => scope.handle(v),
+            };
+            // step 7: Object or null
+            let is_null = result
+                .as_tagged(heap)
+                .ptr_eq(heap.known().null.get(heap).erase());
+            if result.as_tagged(heap).is_primitive(heap) && !is_null {
+                return Err(VmError::Message(Message::ProxyGetPrototypeOfNotObject));
+            }
+            // steps 8-11: a non-extensible target pins the result
+            let Flow::Value(extensible) = is_extensible_h(vm, heap, state, scope, &target)? else {
+                return Ok(Coercion::Threw);
+            };
+            if !extensible {
+                let target_proto = match get_prototype_of_h(vm, heap, state, scope, &target)? {
+                    Coercion::Threw => return Ok(Coercion::Threw),
+                    Coercion::Value(v) => scope.handle(v),
+                };
+                let same = {
+                    let result = result.as_tagged(heap);
+                    let target_proto = target_proto.as_tagged(heap);
+                    Compare::same_value(heap, result, target_proto)
+                };
+                if !same {
+                    return Err(VmError::Message(Message::ProxyGetPrototypeOfMismatch));
+                }
+            }
+            Ok(Coercion::Value(result.as_tagged(heap)))
+        }
+    }
+}
+
+fn set_prototype_of_h(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    scope: &HandleScope<'_>,
+    obj: &Handle<'_, Value>,
+    proto: &Handle<'_, Value>,
+) -> Result<Flow<bool>, VmError> {
+    if !Proxy::is_proxy(heap, obj.as_tagged(heap)) {
+        let target = scope
+            .cast::<Object>(heap, obj.as_tagged(heap))
+            .ok_or(VmError::Type)?;
+        Object::set_prototype(heap, scope, target, *proto)?;
+        return Ok(Flow::Value(true));
+    }
+    let (target, handler) = enter_trap(scope, heap, obj, Trap::SetPrototypeOf)?;
+    match get_trap(vm, heap, state, scope, &handler, Trap::SetPrototypeOf)? {
+        TrapLookup::Threw => Ok(Flow::Threw),
+        TrapLookup::None => {
+            if Proxy::is_proxy(heap, target.as_tagged(heap)) {
+                set_prototype_of_h(vm, heap, state, scope, &target, proto)
+            } else {
+                let target_obj = scope
+                    .cast::<Object>(heap, target.as_tagged(heap))
+                    .ok_or(VmError::Type)?;
+                Object::set_prototype(heap, scope, target_obj, *proto)?;
+                Ok(Flow::Value(true))
+            }
+        }
+        TrapLookup::Trap(t) => {
+            let result = call_trap(vm, heap, state, scope, &t, &[handler, target, *proto])?;
+            let result = match result {
+                Coercion::Threw => return Ok(Flow::Threw),
+                Coercion::Value(v) => scope.handle(v),
+            };
+            if !result.as_tagged(heap).is_truthy(heap) {
+                return Ok(Flow::Value(false));
+            }
+            // steps 8-11: a non-extensible target pins its prototype
+            let Flow::Value(extensible) = is_extensible_h(vm, heap, state, scope, &target)? else {
+                return Ok(Flow::Threw);
+            };
+            if !extensible {
+                let target_proto = match get_prototype_of_h(vm, heap, state, scope, &target)? {
+                    Coercion::Threw => return Ok(Flow::Threw),
+                    Coercion::Value(v) => scope.handle(v),
+                };
+                let same = {
+                    let proto = proto.as_tagged(heap);
+                    let target_proto = target_proto.as_tagged(heap);
+                    Compare::same_value(heap, proto, target_proto)
+                };
+                if !same {
+                    return Err(VmError::Message(Message::ProxySetPrototypeOfMismatch));
+                }
+            }
+            Ok(Flow::Value(true))
+        }
+    }
+}
+
 /// CreateDataProperty-style full descriptor ({w,e,c} true) — the payload
 /// of OrdinarySet's receiver-define step.
 fn create_data_partial<'s>(
@@ -1267,23 +1385,21 @@ impl Proxy {
         p.handler.set(heap, host, null);
     }
 
-    pub fn internal_own_descriptor<'s>(
+    pub fn own_descriptor<'s>(
         vm: &VM,
         heap: &mut Heap,
         state: &ThreadState,
         scope: &'s HandleScope<'_>,
-        obj: Tagged<'_, Value>,
-        key: Tagged<'_, Value>,
+        obj: Handle<'_, Value>,
+        key: Handle<'_, Value>,
     ) -> Result<Flow<Option<PartialDescriptor<'s>>>, VmError> {
-        let obj = scope.handle(obj);
-        let key = scope.handle(key);
         own_descriptor_h(vm, heap, state, scope, &obj, &key)
     }
 
     /// [[IsExtensible]] through proxies, *without* the trap-must-match
     /// invariant (that check belongs to the `Object.isExtensible` entry
     /// point; other internal methods only read the value).
-    pub fn internal_is_extensible(
+    pub fn is_extensible(
         vm: &VM,
         heap: &mut Heap,
         state: &ThreadState,
@@ -1295,11 +1411,36 @@ impl Proxy {
         })
     }
 
+    /// `[[GetPrototypeOf]]` dispatch: proxies run their `getPrototypeOf`
+    /// trap (with full spec validation), ordinary objects read the map's
+    /// prototype.
+    pub fn get_prototype_of<'a>(
+        vm: &VM,
+        heap: &'a mut Heap,
+        state: &ThreadState,
+        obj: Handle<'_, Value>,
+    ) -> Result<Coercion<'a>, VmError> {
+        state.handle_scope(|scope| get_prototype_of_h(vm, heap, state, &scope, &obj))
+    }
+
+    /// `[[SetPrototypeOf]]` dispatch: proxies run their `setPrototypeOf`
+    /// trap (with full spec validation), ordinary objects change the map's
+    /// prototype. `false` means the internal method rejected the change.
+    pub fn set_prototype_of(
+        vm: &VM,
+        heap: &mut Heap,
+        state: &ThreadState,
+        obj: Handle<'_, Value>,
+        proto: Handle<'_, Value>,
+    ) -> Result<Flow<bool>, VmError> {
+        state.handle_scope(|scope| set_prototype_of_h(vm, heap, state, &scope, &obj, &proto))
+    }
+
     /// `[[DefineOwnProperty]]` dispatch: proxies run their `defineProperty`
     /// trap (with full spec validation), ordinary objects complete the
     /// partial against their current descriptor and define through the
     /// transition machinery.
-    pub fn define_internal<'s>(
+    pub fn define_own_property<'s>(
         vm: &VM,
         heap: &mut Heap,
         state: &ThreadState,
@@ -1424,7 +1565,7 @@ impl Proxy {
 
     /// `Object.isExtensible` (ES 20.1.2.14) including the proxy trap and
     /// its must-match-target invariant (ES 20.2.5.2 step 8).
-    pub fn is_extensible<'a>(
+    pub fn object_is_extensible<'a>(
         vm: &VM,
         heap: &'a mut Heap,
         state: &ThreadState,

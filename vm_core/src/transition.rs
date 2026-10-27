@@ -1183,10 +1183,11 @@ impl Object {
         receiver: Handle<Object>,
         proto: Handle<Value>,
     ) -> Result<(), VmError> {
-        let is_null = proto
-            .as_tagged(heap)
-            .ptr_eq(heap.known().null.get(heap).erase());
-        if !is_null && !{ proto.as_tagged(heap).is_strong_ptr() } {
+        let proto_word = proto.as_tagged(heap);
+        let known = heap.known();
+        let is_null = proto_word.ptr_eq(known.null.get(heap).erase());
+        let is_hole = proto_word.ptr_eq(known.the_hole.get(heap).erase());
+        if !is_null && !is_hole && (proto_word.is_primitive(heap) || !proto_word.is_strong_ptr()) {
             // silently ignore non-object prototypes (sloppy-mode semantics)
             return Ok(());
         }
@@ -1200,6 +1201,18 @@ impl Object {
                 .ptr_eq(proto.as_tagged(heap));
             if cond_9 {
                 return Ok(());
+            }
+        }
+        {
+            // ES 10.4.7: an immutable-prototype exotic object may only
+            // "set" its current prototype (SameValue → true above).
+            let immutable = receiver
+                .as_tagged(heap)
+                .map(heap)
+                .kind()
+                .is_immutable_prototype();
+            if immutable {
+                return Err(VmError::Message(crate::error::Message::ImmutablePrototype));
             }
         }
         {
