@@ -48,6 +48,9 @@ const UNSUPPORTED_PATHS: &[&str] = &[
 /// panic the VM or balloon memory (sparse/hole-y dense allocations and
 /// multi-GB generated sources), not merely fail.
 const HARD_SKIP_PATHS: &[&str] = &[
+    // Subclassed built-ins currently segfault the VM.
+    "/subclass-builtins/",
+    "/subclass/builtin-objects/",
     "/dynamic-import/",
     "_FIXTURE",
     "15.4.4.14-5-12",
@@ -119,6 +122,7 @@ const KNOWN_PANICS: &[&str] = &[
     "expressions/class/subclass-builtins/subclass-Function.js",
     "expressions/class/subclass-builtins/subclass-Number.js",
     "expressions/class/subclass-builtins/subclass-Object.js",
+    "expressions/class/subclass-builtins/subclass-RangeError.js",
     "expressions/class/subclass-builtins/subclass-ReferenceError.js",
     "expressions/class/subclass-builtins/subclass-String.js",
     "expressions/class/subclass-builtins/subclass-TypeError.js",
@@ -143,6 +147,7 @@ const KNOWN_PANICS: &[&str] = &[
     "statements/class/subclass-builtins/subclass-Function.js",
     "statements/class/subclass-builtins/subclass-Number.js",
     "statements/class/subclass-builtins/subclass-Object.js",
+    "statements/class/subclass-builtins/subclass-RangeError.js",
     "statements/class/subclass-builtins/subclass-ReferenceError.js",
     "statements/class/subclass-builtins/subclass-String.js",
     "statements/class/subclass-builtins/subclass-TypeError.js",

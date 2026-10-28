@@ -3,15 +3,15 @@
 
 use vm_core::HostCtx;
 use vm_core::{
-    Args, Convert, DenseString, Handle, Heap, Object, Prototype, Smi, Tagged, ThreadState, VM,
-    Value, VmError,
+    Args, Convert, DenseString, Float, Handle, HandleSlice, Heap, Object, Prototype, Smi, Tagged,
+    ThreadState, VM, Value, VmError,
 };
 use vm_core::{raise_runtime, rt_try};
 
 /// `Array(...)`: call and construct behave the same (ES 23.1.1.1). No
-/// arguments → `[]`; one non-negative Smi → that many holes (negative or
-/// non-integer numbers are a RangeError); otherwise the arguments are the
-/// elements.
+/// arguments → `[]`; one Number → a sparse hole-filled array of that
+/// length (a RangeError unless `ToUint32(len) == len`); otherwise the
+/// arguments are the elements.
 pub fn array_constructor<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -23,29 +23,41 @@ pub fn array_constructor<'a>(
     state.handle_scope(|scope| {
         let argv: Vec<Tagged<'_, Value>> = args.iter(heap).skip(1).collect();
         let single_len = match argv.as_slice() {
-            [v] => match Smi::decode(v.raw()) {
-                Some(s) if s.value() >= 0 => Some(usize::try_from(s.value()).unwrap_or(usize::MAX)),
-                // Array(-1): RangeError
-                Some(_) => return raise_runtime(vm, heap, state, VmError::OutOfBounds),
-                None => None,
-            },
+            [v] => {
+                let number = if let Some(smi) = Smi::decode(v.raw()) {
+                    Some(smi.value() as f64)
+                } else {
+                    v.get_as::<Float>(heap).map(|f| f.value.get())
+                };
+                match number {
+                    Some(n) => {
+                        let len = Convert::number_to_uint32(n);
+                        if len as f64 != n {
+                            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+                        }
+                        Some(len as usize)
+                    }
+                    None => None,
+                }
+            }
             _ => None,
         };
-        let hole = vm.known().the_hole.get(heap).erase();
-        let (values, _length) = match single_len {
-            Some(n) => (vec![hole; n], n),
+
+        let array = match single_len {
+            Some(n) => {
+                // `Array(n)` is a sparse hole-filled array: setting the
+                // length does not allocate the holes.
+                let array = heap.new_array(&scope, HandleSlice::EMPTY).as_handle(&scope);
+                if let Err(err) = Object::set_array_length(heap, &scope, &array, n) {
+                    return raise_runtime(vm, heap, state, err);
+                }
+                array
+            }
             None => {
-                let n = argv.len();
-                (argv, n)
+                let staged = scope.stage(&argv);
+                heap.new_array(&scope, staged).as_handle(&scope)
             }
         };
-
-        let staged = scope.stage(&values);
-        let array = heap.new_array(&scope, staged).as_handle(&scope);
-        if single_len.is_some() {
-            // `Array(n)` is a hole-filled array: retire the packed promise
-            Object::promote_holey(heap, &scope, &array);
-        }
         array.as_tagged(heap).erase()
     })
 }

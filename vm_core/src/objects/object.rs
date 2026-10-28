@@ -492,7 +492,7 @@ impl Object {
             let obj = receiver.as_tagged(heap);
             obj.elements
                 .set(heap, obj.erase(), elements.as_tagged(heap));
-            if is_array {
+            if is_array && new_len > logical_len {
                 obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
             }
             Prototype::element_mutated(heap, obj);
