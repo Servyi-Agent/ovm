@@ -32,6 +32,9 @@ const KIND_NON_EXISTENT: i64 = 8;
 /// Self-style parent-name slot: `data[0]` is the weak holder object; the
 /// payload is the pair element index holding the value.
 const KIND_PARENT: i64 = 9;
+/// Native accessor setter: payload is the setter's runtime index. The map
+/// check pins the descriptor, so the cached index cannot go stale.
+const KIND_NATIVE_SETTER: i64 = 10;
 
 /// Element-load payload flags.
 const ELEMENT_HOLEY: i64 = 1 << 0;
@@ -88,6 +91,7 @@ pub enum StoreHit<'a> {
     Done,
     /// invoke with (receiver, value)
     Setter(Tagged<'a, Value>),
+    NativeSetter(NativeIndex),
 }
 
 /// What the slow-path store decided.
@@ -104,7 +108,7 @@ pub enum StoreOutcomeKind {
 /// A built handler, fully rooted.
 enum Handler<'s> {
     /// A bare `(kind, payload)` directive: an own field, array length, a
-    /// cached miss, `Slow`, or an element handler.
+    /// native setter, a cached miss, `Slow`, or an element handler.
     Smi(Smi),
     /// A guarded handler (prototype field/accessor/setter/parent-name/miss).
     Data(Handle<'s, DataHandler>),
@@ -141,6 +145,7 @@ enum PlanKind {
 struct StorePlan<'s> {
     field: Option<usize>,
     setter: Option<Handle<'s, AccessorPair>>,
+    native_setter: Option<NativeIndex>,
     /// the setter is an own accessor (no guarded chain)
     setter_own: bool,
     receiver_map: Handle<'s, Map>,
@@ -150,6 +155,7 @@ enum StoreAction<'s> {
     Field(usize),
     Transition(Handle<'s, Map>),
     Setter(Handle<'s, Value>),
+    NativeSetter(NativeIndex),
     /// setter-less accessor: writes are silently ignored
     Noop,
 }
@@ -480,9 +486,6 @@ fn analyze_load<'s>(
         holder,
         own,
     };
-    if receiver.array_length(heap, name).is_some() {
-        return mk(PlanKind::ArrayLength, 0, None, None, true);
-    }
     // side-effect-free: no getters or traps run while building the plan
     let recv_handle = scope.handle(receiver.erase());
     let key_handle = scope.handle(name.erase());
@@ -505,6 +508,10 @@ fn analyze_load<'s>(
             let own = holder.as_tagged(heap).ptr_eq(receiver);
             mk(PlanKind::Field, offset, None, Some(holder), own)
         }
+        Hit::NativeAccessor { .. } if receiver.array_length(heap, name).is_some() => {
+            mk(PlanKind::ArrayLength, 0, None, None, true)
+        }
+        Hit::NativeAccessor { .. } => mk(PlanKind::Slow, 0, None, None, false),
         Hit::Accessor { holder, pair, .. } => {
             let holder = scope.handle(holder);
             if !cacheable(holder) {
@@ -526,8 +533,8 @@ fn analyze_load<'s>(
             }
             mk(PlanKind::ParentName, slot, None, Some(holder), false)
         }
-        // strings/elements/array-length/proxies stay on the slow path
-        Hit::StringOwn { .. } | Hit::Element { .. } | Hit::ArrayLength { .. } | Hit::Proxy(_) => {
+        // strings/elements/proxies stay on the slow path
+        Hit::StringOwn { .. } | Hit::Element { .. } | Hit::Proxy(_) => {
             mk(PlanKind::Slow, 0, None, None, false)
         }
         Hit::Miss => {
@@ -718,7 +725,8 @@ fn apply_indexed_string<'a>(
 }
 
 /// Store semantics over the shared walk: own writable data → field,
-/// accessor anywhere → setter, everything else → Slow.
+/// user accessor anywhere → setter, own native accessor → native setter,
+/// everything else → Slow.
 fn analyze_store<'s>(
     heap: &Heap,
     scope: &'s HandleScope<'_>,
@@ -728,6 +736,7 @@ fn analyze_store<'s>(
     let mut plan = StorePlan {
         field: None,
         setter: None,
+        native_setter: None,
         setter_own: false,
         receiver_map: scope.handle(receiver.map(heap)),
     };
@@ -744,6 +753,11 @@ fn analyze_store<'s>(
         Hit::Accessor { holder, pair, .. } => {
             plan.setter_own = holder.erase().ptr_eq(receiver.erase());
             plan.setter = Some(scope.handle(pair));
+        }
+        // Only own native accessors cache a setter; inherited writes define
+        // on the receiver and stay slow.
+        Hit::NativeAccessor { holder, info, .. } if holder.erase().ptr_eq(receiver.erase()) => {
+            plan.native_setter = info.setter();
         }
         _ => {}
     }
@@ -765,6 +779,10 @@ fn store_handler<'s>(
     }
     if let Some(offset) = plan.field {
         return Handler::Smi(kind_smi(KIND_FIELD, offset as i64));
+    }
+    if let Some(setter) = plan.native_setter {
+        debug_assert!(setter.0 < (1 << 55), "native handler payload overflow");
+        return Handler::Smi(kind_smi(KIND_NATIVE_SETTER, setter.0 as i64));
     }
     let Some(pair) = plan.setter else {
         return Handler::Smi(kind_smi(KIND_SLOW, 0));
@@ -1198,6 +1216,7 @@ impl InlineCache {
             let (kind, payload) = decode_handler_smi(handler)?;
             match kind {
                 KIND_FIELD => StoreAction::Field(payload as usize),
+                KIND_NATIVE_SETTER => StoreAction::NativeSetter(NativeIndex(payload as usize)),
                 _ => return None,
             }
         } else if handler.is_weak_ptr() {
@@ -1241,6 +1260,7 @@ impl InlineCache {
                     .then_some(StoreHit::Done)
             }
             StoreAction::Setter(setter) => Some(StoreHit::Setter(setter.as_tagged(heap))),
+            StoreAction::NativeSetter(index) => Some(StoreHit::NativeSetter(index)),
             StoreAction::Noop => Some(StoreHit::Done),
         }
     }

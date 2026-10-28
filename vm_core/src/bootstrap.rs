@@ -1,10 +1,11 @@
 use core::ptr::NonNull;
 
 use crate::{
-    CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit, ContextInit,
-    ContextObject, EdgeVisitable, FixedArray, GcSlot, Handle, HandleData, HandleScope, HandleSlice,
-    Heap, MODE_SLOPPY, Map, MapInit, MapKind, Object, ObjectInit, ScopeInfo, ScopeInfoInit,
-    SlotName, Smi, StringInterner, Symbol, Tagged, Value, Visitor,
+    AccessorInfo, AccessorInfoInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code,
+    CodeInit, ContextInit, ContextObject, EdgeVisitable, FixedArray, GcSlot, Handle, HandleData,
+    HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind, NativeIndex, Object,
+    ObjectInit, ScopeInfo, ScopeInfoInit, SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged,
+    Value, Visitor,
 };
 
 pub struct WellKnown {
@@ -29,6 +30,7 @@ pub struct WellKnown {
     pub dense_utf16_string_map: GcSlot<Map>,
     pub symbol_map: GcSlot<Map>,
     pub accessor_pair_map: GcSlot<Map>,
+    pub accessor_info_map: GcSlot<Map>,
     pub callable_map: GcSlot<Map>,
     pub handler_table_map: GcSlot<Map>,
     pub context_map: GcSlot<Map>,
@@ -253,6 +255,7 @@ impl WellKnown {
             dense_utf16_string_map: smi_slot::<Map>(),
             symbol_map: smi_slot::<Map>(),
             accessor_pair_map: smi_slot::<Map>(),
+            accessor_info_map: smi_slot::<Map>(),
             callable_map: smi_slot::<Map>(),
             handler_table_map: smi_slot::<Map>(),
             context_map: smi_slot::<Map>(),
@@ -337,6 +340,7 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.dense_utf16_string_map.as_raw());
         visitor.visit(self.symbol_map.as_raw());
         visitor.visit(self.accessor_pair_map.as_raw());
+        visitor.visit(self.accessor_info_map.as_raw());
         visitor.visit(self.callable_map.as_raw());
         visitor.visit(self.handler_table_map.as_raw());
         visitor.visit(self.context_map.as_raw());
@@ -566,6 +570,7 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     let dense_utf16_string_map = alloc_map(heap, &scope, MapKind::DENSE_STRING);
     let symbol_map = alloc_map(heap, &scope, MapKind::SYMBOL);
     let accessor_pair_map = alloc_map(heap, &scope, MapKind::ACCESSOR_PAIR);
+    let accessor_info_map = alloc_map(heap, &scope, MapKind::ACCESSOR_INFO);
     let callable_map = alloc_map(heap, &scope, MapKind::CALLABLE_INFO);
     let handler_table_map = alloc_map(heap, &scope, MapKind::HANDLER_TABLE);
     let context_map = alloc_map(heap, &scope, MapKind::CONTEXT);
@@ -629,6 +634,9 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     known
         .accessor_pair_map
         .init(accessor_pair_map.as_tagged(heap));
+    known
+        .accessor_info_map
+        .init(accessor_info_map.as_tagged(heap));
     known.callable_map.init(callable_map.as_tagged(heap));
     known
         .handler_table_map
@@ -690,12 +698,26 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         object_prototype,
     );
     let array_prototype = alloc_object(heap, &scope, array_prototype_map);
-    let js_array_map = alloc_parent_map(
-        heap,
-        &scope,
-        MapKind::ARRAY.union(MapKind::EXTENDABLE),
-        array_prototype,
-    );
+    let length_name = scope.handle(known.strings.length.get(heap));
+    let array_length_info = heap
+        .allocate::<AccessorInfo>(AccessorInfoInit {
+            getter: Some(NativeIndex(bytecode::BuiltinFn::ArrayLengthGet as usize)),
+            setter: Some(NativeIndex(bytecode::BuiltinFn::ArrayLengthSet as usize)),
+        })
+        .as_handle(&scope);
+    let array_length_descriptor: [(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>); 1] = [(
+        length_name,
+        SlotFlags::ACCESSOR.union(SlotFlags::WRITABLE),
+        scope.handle(array_length_info.as_tagged(heap).erase()),
+    )];
+    let js_array_map = heap
+        .allocate::<Map>(MapInit {
+            kind: MapKind::ARRAY.union(MapKind::EXTENDABLE),
+            value_slot_count: 0,
+            descriptors: &array_length_descriptor,
+            prototype: array_prototype.erase(),
+        })
+        .as_handle(&scope);
 
     let date_prototype_map = alloc_parent_map(
         heap,

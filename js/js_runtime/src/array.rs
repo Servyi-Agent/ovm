@@ -448,65 +448,6 @@ pub fn array_is_array<'a>(
     Convert::boolean(heap, is_array)
 }
 
-/// The array `length` accessor getter: reads the internal slot (the
-/// descriptor exists so the generic lookup finds `length`; the fast load
-/// path never reaches this).
-pub fn array_length_get<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state: _, ..
-    } = nctx;
-    let receiver = args.get_handle(heap, 0);
-    receiver
-        .as_tagged(heap)
-        .as_heap_object()
-        .map(|o| Smi::new(o.as_ref().length() as i64).into_tagged())
-        .unwrap_or_else(|| vm.known().undefined.get(heap).erase())
-}
-
-/// The array `length` accessor setter (ES 10.4.2.3 ArraySetLength):
-/// ToNumber, then the uint32 truncation must equal it exactly (else a
-/// RangeError — approximated by `OutOfBounds`); shrinking punches holes
-/// in the dropped elements.
-pub fn array_length_set<'a>(
-    nctx: HostCtx<'a>,
-    _new_target: Option<Handle<'_, Value>>,
-    args: Args,
-) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    state.handle_scope(|scope| {
-        let receiver = args.get_handle(heap, 0);
-        let value = args.get(heap, 1);
-        let Some(obj) = receiver.as_tagged(heap).as_heap_object() else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
-        if !obj.as_ref().is_array(heap) {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        }
-        let obj = scope.handle(obj);
-        let value = scope.handle(value);
-        let n = match Object::to_numeric(vm, heap, state, value) {
-            Ok(Some(n)) => n,
-            Ok(None) => return vm.known().exception.get(heap).erase(),
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let new_len = Convert::number_to_uint32(n);
-        if new_len as f64 != n {
-            // spec: RangeError ("invalid array length")
-            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
-        }
-        if let Err(err) = Object::set_array_length(heap, &scope, &obj, new_len as usize) {
-            return raise_runtime(vm, heap, state, err);
-        }
-        vm.known().undefined.get(heap).erase()
-    })
-}
-
 /// A `slice` boundary: absent/undefined → `default`, Smi passes straight
 /// through, otherwise ToNumber and truncate (NaN → 0). `Ok(None)` is a
 /// pending exception.

@@ -2,8 +2,8 @@ use core::alloc::Layout;
 
 use crate::{
     AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
-    HeapObject, MaybeWeak, MaybeWeakGcSlot, ObjectKind, OptionGcSlot, PrototypeInfo, Smi, Symbol,
-    Tagged, Value, Visitor, VmError, WeakFixedArray,
+    HeapObject, MaybeWeak, MaybeWeakGcSlot, NativeIndex, ObjectKind, OptionGcSlot, PrototypeInfo,
+    Smi, Symbol, Tagged, Value, Visitor, VmError, WeakFixedArray,
 };
 
 #[repr(C)]
@@ -404,6 +404,7 @@ impl MapKind {
     pub const FIXED_BYTE_ARRAY: MapKind = MapKind(ObjectKind::FixedByteArray as u64);
     pub const DENSE_STRING: MapKind = MapKind(ObjectKind::DenseString as u64);
     pub const ACCESSOR_PAIR: MapKind = MapKind(ObjectKind::AccessorPair as u64);
+    pub const ACCESSOR_INFO: MapKind = MapKind(ObjectKind::AccessorInfo as u64);
     pub const CALLABLE_INFO: MapKind = MapKind(ObjectKind::CallableInfo as u64);
     pub const FLOAT: MapKind = MapKind(ObjectKind::Float as u64);
     pub const SYMBOL: MapKind = MapKind(ObjectKind::Symbol as u64);
@@ -448,6 +449,7 @@ impl MapKind {
             Self::FIXED_BYTE_ARRAY => ObjectKind::FixedByteArray,
             Self::DENSE_STRING => ObjectKind::DenseString,
             Self::ACCESSOR_PAIR => ObjectKind::AccessorPair,
+            Self::ACCESSOR_INFO => ObjectKind::AccessorInfo,
             Self::CALLABLE_INFO => ObjectKind::CallableInfo,
             Self::FLOAT => ObjectKind::Float,
             Self::SYMBOL => ObjectKind::Symbol,
@@ -568,8 +570,9 @@ impl MapKind {
 }
 
 /// Descriptor flags. Data values live in the object's slots (the descriptor
-/// holds a Smi offset); accessors embed the `AccessorPair` in the descriptor.
-/// Writability is the WRITABLE attribute bit — there is no separate const kind.
+/// holds a Smi offset); accessors embed an `AccessorPair` or an `AccessorInfo`
+/// in the descriptor. Writability is the WRITABLE attribute bit — there is no
+/// separate const kind.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SlotFlags(u64);
 
@@ -749,5 +752,73 @@ impl EdgeVisitable for AccessorPair {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.get.as_raw());
         visitor.visit(self.set.as_raw());
+    }
+}
+
+/// A native accessor declaration backed by runtime-registry indices.
+#[repr(C)]
+pub struct AccessorInfo {
+    pub header: Header,
+    /// Native registry index of the getter; `-1` means absent.
+    pub getter: GcSlot<Smi>,
+    /// Native registry index of the setter; `-1` means absent.
+    pub setter: GcSlot<Smi>,
+}
+
+pub struct AccessorInfoInit {
+    pub getter: Option<NativeIndex>,
+    pub setter: Option<NativeIndex>,
+}
+
+impl AccessorInfo {
+    const ABSENT: i64 = -1;
+
+    fn encode(index: Option<NativeIndex>) -> Smi {
+        Smi::new(index.map_or(Self::ABSENT, |i| i.0 as i64))
+    }
+
+    fn decode(index: Smi) -> Option<NativeIndex> {
+        let value = index.value();
+        (value >= 0).then_some(NativeIndex(value as usize))
+    }
+
+    pub fn getter(&self) -> Option<NativeIndex> {
+        Self::decode(self.getter.to_smi())
+    }
+
+    pub fn setter(&self) -> Option<NativeIndex> {
+        Self::decode(self.setter.to_smi())
+    }
+}
+
+impl HeapObject for AccessorInfo {
+    const KIND: ObjectKind = ObjectKind::AccessorInfo;
+    type Init<'a> = AccessorInfoInit;
+
+    fn layout_for(_config: &Self::Init<'_>) -> Layout {
+        Layout::new::<Self>()
+    }
+
+    fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
+        let host = self.tagged(heap);
+        self.header
+            .map
+            .init(heap.known().accessor_info_map.get(heap));
+        self.getter.set(heap, host, Self::encode(config.getter));
+        self.setter.set(heap, host, Self::encode(config.setter));
+    }
+
+    fn header(&self) -> &Header {
+        &self.header
+    }
+
+    fn layout(&self) -> Layout {
+        Layout::new::<Self>()
+    }
+}
+
+impl EdgeVisitable for AccessorInfo {
+    fn visit_edges(&self, visitor: &mut dyn Visitor) {
+        visitor.visit(self.header.map.as_raw());
     }
 }

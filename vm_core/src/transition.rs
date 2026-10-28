@@ -1121,10 +1121,11 @@ fn validate_define<'a, 's>(
         if configurable || enumerable != cur_flags.is_enumerable() {
             return None;
         }
-        let cur_pair = cur_desc_value
-            .as_tagged(heap)
-            .get_as::<AccessorPair>(heap)
-            .expect("accessor descriptor must hold a pair");
+        // A native accessor (the array-length field) has no pair halves and
+        // is not redefinable as a user accessor; reject rather than panic.
+        let Some(cur_pair) = cur_desc_value.as_tagged(heap).get_as::<AccessorPair>(heap) else {
+            return None;
+        };
         if !Compare::same_value(heap, get.as_tagged(heap), cur_pair.get.get(heap))
             || !Compare::same_value(heap, set.as_tagged(heap), cur_pair.set.get(heap))
         {

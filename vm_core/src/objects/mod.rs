@@ -35,7 +35,8 @@ pub use feedback::{FeedbackVector, FeedbackVectorInit, new_feedback_vector};
 pub use float::Float;
 pub use helpers::WrapperKind;
 pub use map::{
-    AccessorPair, ElementsKind, Key, Map, MapInit, MapKind, SlotDescriptor, SlotFlags, SlotName,
+    AccessorInfo, AccessorInfoInit, AccessorPair, ElementsKind, Key, Map, MapInit, MapKind,
+    SlotDescriptor, SlotFlags, SlotName,
 };
 pub use object::{CallTarget, Object, ObjectInit, ObjectSlotsInit};
 pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};
@@ -139,6 +140,8 @@ pub enum ObjectKind {
     NumberDictionary = 23,
     /// Compiled code: the instruction bytes.
     Code = 24,
+    /// Native accessor backing: registry indices for a native getter/setter.
+    AccessorInfo = 25,
 }
 
 impl ObjectKind {
@@ -189,6 +192,7 @@ pub unsafe fn object_layout(addr: NonNull<()>) -> Layout {
             ObjectKind::DataHandler => (*addr.cast::<DataHandler>().as_ptr()).layout(),
             ObjectKind::NumberDictionary => (*addr.cast::<NumberDictionary>().as_ptr()).layout(),
             ObjectKind::Code => (*addr.cast::<Code>().as_ptr()).layout(),
+            ObjectKind::AccessorInfo => (*addr.cast::<AccessorInfo>().as_ptr()).layout(),
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -239,6 +243,9 @@ pub unsafe fn visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
                 (*addr.cast::<NumberDictionary>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::Code => (*addr.cast::<Code>().as_ptr()).visit_edges(visitor),
+            ObjectKind::AccessorInfo => {
+                (*addr.cast::<AccessorInfo>().as_ptr()).visit_edges(visitor)
+            }
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray

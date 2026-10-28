@@ -65,6 +65,8 @@ pub fn native_fn(id: bytecode::BuiltinFn) -> NativeFn {
         bytecode::BuiltinFn::ForceMinorGc => KetteTools::force_minor_gc,
         bytecode::BuiltinFn::ForceMajorGc => KetteTools::force_major_gc,
         bytecode::BuiltinFn::ShutdownVm => KetteTools::shutdown,
+        bytecode::BuiltinFn::ArrayLengthGet => array_length_get,
+        bytecode::BuiltinFn::ArrayLengthSet => array_length_set,
     }
 }
 
@@ -91,6 +93,59 @@ fn require_object_coercible<'a>(
     }
     // Safety: fresh rooted-slot word, no allocation since the read.
     unsafe { Tagged::from_value_unchecked(raw) }
+}
+
+/// Array `length` accessor getter: (holder) -> Smi.
+fn array_length_get<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state: _, ..
+    } = nctx;
+    let holder = args.get_handle(heap, 0);
+    holder
+        .as_tagged(heap)
+        .as_heap_object()
+        .map(|o| Smi::new(o.as_ref().length() as i64).into_tagged())
+        .unwrap_or_else(|| vm.known().undefined.get(heap).erase())
+}
+
+/// Array `length` accessor setter (ES 10.4.2.3): (holder, value) -> undefined.
+fn array_length_set<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    state.handle_scope(|scope| {
+        let holder = args.get_handle(heap, 0);
+        let value = args.get(heap, 1);
+        let Some(obj) = holder.as_tagged(heap).as_heap_object() else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        if !obj.as_ref().is_array(heap) {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let obj = scope.handle(obj);
+        let value = scope.handle(value);
+        let n = match Object::to_numeric(vm, heap, state, value) {
+            Ok(Some(n)) => n,
+            Ok(None) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let new_len = Convert::number_to_uint32(n);
+        if new_len as f64 != n {
+            return raise_runtime(vm, heap, state, VmError::OutOfBounds);
+        }
+        if let Err(err) = Object::set_array_length(heap, &scope, &obj, new_len as usize) {
+            return raise_runtime(vm, heap, state, err);
+        }
+        vm.known().undefined.get(heap).erase()
+    })
 }
 
 // ---- delete (ES 13.5.1) ----------------------------------------------------

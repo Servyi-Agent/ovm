@@ -169,13 +169,17 @@ pub enum BuiltinFn {
     /// world-stopped point), cancel their executions, and terminate the
     /// calling thread's execution through the uncatchable channel
     ShutdownVm,
+    /// (holder) -> Smi — array `length` accessor getter
+    ArrayLengthGet,
+    /// (holder, value) -> undefined — array `length` accessor setter
+    ArrayLengthSet,
 }
 
 impl BuiltinFn {
     /// All variants in discriminant order. The array length is the
     /// variant count (type-checked), and the VM registers its table in
     /// this order so registry indices equal discriminants.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 38] = [
         Self::GetIterator,
         Self::IteratorNext,
         Self::IteratorDone,
@@ -212,6 +216,8 @@ impl BuiltinFn {
         Self::ForceMinorGc,
         Self::ForceMajorGc,
         Self::ShutdownVm,
+        Self::ArrayLengthGet,
+        Self::ArrayLengthSet,
     ];
 
     pub const COUNT: u16 = Self::ALL.len() as u16;

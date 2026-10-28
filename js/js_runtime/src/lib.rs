@@ -20,8 +20,7 @@ pub mod symbol;
 
 use array::{
     array_constructor, array_is_array, array_iterator_next, array_iterator_symbol_iterator,
-    array_join, array_length_get, array_length_set, array_pop, array_push, array_slice, array_sort,
-    array_to_string, array_values,
+    array_join, array_pop, array_push, array_slice, array_sort, array_to_string, array_values,
 };
 use boolean::{boolean_constructor, boolean_to_string, boolean_value_of};
 use date::{
@@ -56,9 +55,8 @@ use string::{string_constructor, string_to_string, string_value_of};
 use symbol::symbol_constructor;
 
 use vm_core::{
-    AccessorPair, EdgeVisitable, Float, Handle, HandleSlice, Map, MapInit, MapKind, NativeIndex,
-    Object, PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Tagged, VM, Value, Visitor,
-    VmError,
+    EdgeVisitable, Float, Handle, HandleSlice, Map, MapInit, MapKind, NativeIndex, Object,
+    PropertyDescriptor, Runtime, SlotFlags, SlotName, Smi, Tagged, VM, Value, Visitor, VmError,
 };
 
 pub struct JSRuntime;
@@ -167,8 +165,6 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         console_log: vm.register_runtime(console_log),
         array_join: vm.register_runtime(array_join),
         array_to_string: vm.register_runtime(array_to_string),
-        array_length_get: vm.register_runtime(array_length_get),
-        array_length_set: vm.register_runtime(array_length_set),
         array_slice: vm.register_runtime(array_slice),
         array_sort: vm.register_runtime(array_sort),
     }
@@ -252,8 +248,6 @@ pub struct BuiltinIndices {
     pub console_log: NativeIndex,
     pub array_join: NativeIndex,
     pub array_to_string: NativeIndex,
-    pub array_length_get: NativeIndex,
-    pub array_length_set: NativeIndex,
     pub array_slice: NativeIndex,
     pub array_sort: NativeIndex,
 }
@@ -773,37 +767,6 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             "toString",
             idx.array_to_string,
         )?;
-
-        {
-            let get_fn = Object::native_function(thread.heap(), &scope, idx.array_length_get)?;
-            let set_fn = Object::native_function(thread.heap(), &scope, idx.array_length_set)?;
-            let get_fn = scope.handle(get_fn.as_tagged(thread.heap()).erase());
-            let set_fn = scope.handle(set_fn.as_tagged(thread.heap()).erase());
-            let pair = thread
-                .heap()
-                .allocate_handle::<AccessorPair>((get_fn, set_fn), &scope);
-            let length_name = wks_length;
-            let prototype = scope
-                .handle(unsafe { Tagged::<Value>::from_value_unchecked(array_prototype.raw()) });
-            let map = thread
-                .heap()
-                .allocate_token_enter_heap(Map::layout_for(1), |token, heap| {
-                    let descriptors: [(Handle<'_, SlotName>, SlotFlags, Handle<'_, Value>); 1] =
-                        [(
-                            length_name,
-                            SlotFlags::ACCESSOR,
-                            scope.handle(pair.as_tagged(heap).erase()),
-                        )];
-                    roots.create_handle(token.allocate::<Map>(MapInit {
-                        kind: MapKind::ARRAY.union(MapKind::EXTENDABLE),
-                        value_slot_count: 0,
-                        descriptors: &descriptors,
-                        prototype,
-                    }))
-                });
-            let heap = thread.heap();
-            known.js_array_map.init(map.as_tagged(heap));
-        }
 
         let zero = scope.handle(Smi::new(0));
         Object::define_own_property(

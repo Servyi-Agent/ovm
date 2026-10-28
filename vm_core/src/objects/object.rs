@@ -93,9 +93,9 @@ impl Object {
         self.map(heap).kind().is_array()
     }
 
-    /// The JSArray `length` internal slot, when `self` is an array named
-    /// `name`: it lives outside the map descriptors, so descriptor walks
-    /// must consult this first. `None` for any other name or non-array.
+    /// The JSArray `length` internal slot when `self` is an array named
+    /// `name`, for the IC's field-accessor check. `None` for any other name
+    /// or non-array.
     #[inline]
     pub fn array_length<'a>(
         &self,

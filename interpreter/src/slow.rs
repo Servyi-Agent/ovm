@@ -1215,6 +1215,20 @@ pub fn slow_store_named(frame: Frame) {
                         Err(e) => return raise_runtime(vm, heap, state, e),
                     }
                 }
+                StoreHit::NativeSetter(index) => {
+                    let args = scope
+                        .stage(&[recv.as_tagged(heap).erase(), value.as_tagged(heap)])
+                        .as_args();
+                    let result =
+                        scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
+                    // A native setter's result is ignored: assignment yields
+                    // the stored value unless the setter threw.
+                    if result.as_tagged(heap) == roots.exception.get(heap).erase() {
+                        result.as_tagged(heap)
+                    } else {
+                        value.as_tagged(heap).erase()
+                    }
+                }
             };
         }
         store_named_tail_body(

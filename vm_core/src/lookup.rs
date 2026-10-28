@@ -1,10 +1,11 @@
 use crate::errors::Errors;
 use crate::proxy::{Flow, Proxy};
 use crate::{
-    AccessorPair, Coercion, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE, DETAILS_ENUMERABLE,
-    DETAILS_WRITABLE, DenseString, FixedArray, Handle, HandleScope, Heap, HostCtx, Key,
-    LanguageMode, Object, PartialDescriptor, PropertyDescriptor, SetApplied, SlotFlags, SlotName,
-    Smi, StoreSemantics, StringOwn, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
+    AccessorInfo, AccessorPair, Coercion, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE,
+    DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString, FixedArray, Handle, HandleScope, Heap,
+    HostCtx, Key, LanguageMode, NativeIndex, Object, PartialDescriptor, PropertyDescriptor,
+    SetApplied, SlotFlags, SlotName, Smi, StoreSemantics, StringOwn, Tagged, ThreadState, VM,
+    Value, VmError, raise_runtime,
 };
 
 /// One resolved position of the walk: where the property lives and
@@ -19,10 +20,14 @@ pub enum Hit<'h> {
         value: Tagged<'h, Value>,
         flags: SlotFlags,
     },
-    /// Accessor: descriptor pair or element-dictionary entry.
     Accessor {
         holder: Tagged<'h, Object>,
         pair: Tagged<'h, AccessorPair>,
+        flags: SlotFlags,
+    },
+    NativeAccessor {
+        holder: Tagged<'h, Object>,
+        info: Tagged<'h, AccessorInfo>,
         flags: SlotFlags,
     },
     /// Indexed data element: dense backing or dictionary entry.
@@ -32,8 +37,6 @@ pub enum Hit<'h> {
         value: Tagged<'h, Value>,
         flags: SlotFlags,
     },
-    /// Array `length` pseudo-property (the header field).
-    ArrayLength { holder: Tagged<'h, Object> },
     /// Primitive-string own property: `length` or one char.
     StringOwn {
         holder: Tagged<'h, Value>,
@@ -206,22 +209,24 @@ impl<'s> Lookup<'s> {
             return None;
         }
 
-        if o.array_length(heap, name).is_some() {
-            return Some(Hit::ArrayLength { holder: o });
-        }
-
         for d in o.map(heap).descriptors() {
             if !d.name(heap).ptr_eq(name) {
                 continue;
             }
             if d.flags().is_accessor() {
-                return Some(Hit::Accessor {
+                let value = d.value.get(heap);
+                if let Some(pair) = value.get_as::<AccessorPair>(heap) {
+                    return Some(Hit::Accessor {
+                        holder: o,
+                        pair,
+                        flags: d.flags(),
+                    });
+                }
+                return Some(Hit::NativeAccessor {
                     holder: o,
-                    pair: d
-                        .value
-                        .get(heap)
-                        .get_as::<AccessorPair>(heap)
-                        .expect("accessor descriptor holds a pair"),
+                    info: value
+                        .get_as::<AccessorInfo>(heap)
+                        .expect("accessor descriptor holds a pair or accessor info"),
                     flags: d.flags(),
                 });
             }
@@ -350,9 +355,9 @@ impl Object {
     /// ES `[[Get]]`: may run getters and proxy `get` traps. On a miss,
     /// `throws_on_miss` raises a ReferenceError (contextual loads).
     pub fn get_property<'h>(
-        vm: &VM,
+        vm: &'h VM,
         heap: &'h mut Heap,
-        state: &ThreadState,
+        state: &'h ThreadState,
         holder: Handle<'_, Value>,
         receiver: Handle<'_, Value>,
         name: Handle<'_, Value>,
@@ -391,10 +396,6 @@ impl Object {
                     let value = scope.handle(value);
                     Ok(Coercion::Value(value.as_tagged(heap)))
                 }
-                Hit::ArrayLength { holder } => {
-                    let len = scope.handle(holder.length.get(heap).erase());
-                    Ok(Coercion::Value(len.as_tagged(heap)))
-                }
                 Hit::StringOwn { holder, own } => {
                     let value = match own {
                         StringOwn::Length(len) => scope.handle(Smi::new(len as i64).into_tagged()),
@@ -422,6 +423,11 @@ impl Object {
                         Ok(Coercion::Value(result.as_tagged(heap)))
                     }
                 }
+                Hit::NativeAccessor { holder, info, .. } => {
+                    let getter = info.getter();
+                    let holder = scope.handle(holder.erase());
+                    native_accessor_get(vm, heap, state, &scope, getter, holder)
+                }
             }
         })
     }
@@ -438,7 +444,9 @@ impl Object {
             Hit::Data { value, .. } | Hit::Element { value, .. } | Hit::Parent { value, .. } => {
                 value
             }
-            Hit::ArrayLength { holder } => holder.length.get(heap).erase(),
+            Hit::NativeAccessor { holder, .. } => holder
+                .array_length(heap, key.as_tagged(heap).as_name())
+                .unwrap_or_else(|| heap.known().undefined.get(heap).erase()),
             Hit::Accessor { .. } | Hit::Proxy(_) | Hit::StringOwn { .. } | Hit::Miss => {
                 heap.known().undefined.get(heap).erase()
             }
@@ -500,27 +508,14 @@ impl Object {
                             call_setter(vm, heap, state, &scope, receiver, value, setter)
                         }
                     }
-                    Hit::ArrayLength { holder } => {
+                    Hit::NativeAccessor { holder, info, .. } => {
                         if !holder.erase().ptr_eq(receiver.as_tagged(heap)) {
+                            // Native accessors present as data properties:
+                            // an inherited write defines on the receiver.
                             define_on_receiver(vm, heap, state, &scope, receiver, key, value)
                         } else {
-                            // `length` is written through the array map's own accessor descriptor
-                            let name = key.as_tagged(heap).as_name();
-                            let undefined = heap.known().undefined.get(heap).erase();
-                            let setter = holder
-                                .map(heap)
-                                .descriptors()
-                                .iter()
-                                .find(|d| d.name(heap).ptr_eq(name) && d.flags().is_accessor())
-                                .and_then(|d| d.value.get(heap).get_as::<AccessorPair>(heap))
-                                .map(|pair| pair.set.get(heap))
-                                .map(|setter| scope.handle(setter))
-                                .unwrap_or_else(|| scope.handle(undefined));
-                            if setter.as_tagged(heap) == undefined {
-                                Ok(Flow::Value(SetApplied::Rejected))
-                            } else {
-                                call_setter(vm, heap, state, &scope, receiver, value, setter)
-                            }
+                            let setter = info.setter();
+                            native_accessor_set(vm, heap, state, &scope, setter, receiver, value)
                         }
                     }
                     Hit::Data {
@@ -658,17 +653,21 @@ impl Object {
                 enumerable: flags.is_enumerable(),
                 configurable: flags.is_configurable(),
             }),
+            // Native accessors over an internal slot present as data.
+            // Only the array-length field accessor exists today.
+            Hit::NativeAccessor { holder, flags, .. } => holder
+                .array_length(heap, key.as_name())
+                .map(|value| PropertyDescriptor::Data {
+                    value: scope.handle(value),
+                    writable: flags.is_writable(),
+                    enumerable: flags.is_enumerable(),
+                    configurable: flags.is_configurable(),
+                }),
             Hit::Element { value, flags, .. } => Some(PropertyDescriptor::Data {
                 value: scope.handle(value),
                 writable: flags.is_writable(),
                 enumerable: flags.is_enumerable(),
                 configurable: flags.is_configurable(),
-            }),
-            Hit::ArrayLength { holder } => Some(PropertyDescriptor::Data {
-                value: scope.handle(holder.length.get(heap).erase()),
-                writable: true,
-                enumerable: false,
-                configurable: false,
             }),
             Hit::Parent { value, .. } => Some(PropertyDescriptor::Data {
                 value: scope.handle(value),
@@ -692,6 +691,49 @@ fn call_setter(
 ) -> Result<Flow<SetApplied>, VmError> {
     let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
     let result = scope.handle(HostCtx::enter(vm, heap, state, setter, args, None)?);
+    if result.as_tagged(heap) == heap.known().exception.get(heap) {
+        Ok(Flow::Threw)
+    } else {
+        Ok(Flow::Value(SetApplied::CallSetter))
+    }
+}
+
+fn native_accessor_get<'h>(
+    vm: &'h VM,
+    heap: &'h mut Heap,
+    state: &'h ThreadState,
+    scope: &HandleScope<'_>,
+    getter: Option<NativeIndex>,
+    holder: Handle<'_, Value>,
+) -> Result<Coercion<'h>, VmError> {
+    let Some(index) = getter else {
+        return Ok(Coercion::Value(heap.known().undefined.get(heap).erase()));
+    };
+    let args = scope.stage(&[holder.as_tagged(heap).erase()]).as_args();
+    let result = scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
+    if result.as_tagged(heap) == heap.known().exception.get(heap) {
+        Ok(Coercion::Threw)
+    } else {
+        Ok(Coercion::Value(result.as_tagged(heap)))
+    }
+}
+
+fn native_accessor_set<'h>(
+    vm: &'h VM,
+    heap: &'h mut Heap,
+    state: &'h ThreadState,
+    scope: &HandleScope<'_>,
+    setter: Option<NativeIndex>,
+    holder: Handle<'_, Value>,
+    value: Handle<'_, Value>,
+) -> Result<Flow<SetApplied>, VmError> {
+    let Some(index) = setter else {
+        return Ok(Flow::Value(SetApplied::Rejected));
+    };
+    let args = scope
+        .stage(&[holder.as_tagged(heap).erase(), value.as_tagged(heap)])
+        .as_args();
+    let result = scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
     if result.as_tagged(heap) == heap.known().exception.get(heap) {
         Ok(Flow::Threw)
     } else {
