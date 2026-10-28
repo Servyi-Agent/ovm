@@ -219,12 +219,10 @@ fn error_property<'a>(
     v: Tagged<'a, Value>,
     name: Tagged<'a, SlotName>,
 ) -> Option<String> {
-    let action = vm::Lookup::get(heap, scope, scope.handle(v), scope.handle(name.erase())).ok()?;
-    match action {
-        vm::LookupActionGet::Value(x) => x
-            .as_tagged(heap)
-            .get_as::<DenseString>(heap)
-            .map(|s| s.to_rust_string(heap)),
-        _ => None,
-    }
+    // error formatting must not run getters or traps
+    let value =
+        vm::Object::get_data_property(heap, scope, scope.handle(v), scope.handle(name.erase()));
+    value
+        .get_as::<DenseString>(heap)
+        .map(|s| s.to_rust_string(heap))
 }

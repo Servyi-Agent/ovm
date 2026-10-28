@@ -234,14 +234,17 @@ fn exception_name(thread: &mut vm::Thread) -> String {
         let Some(o) = ex.as_heap_object() else {
             return "exception".into();
         };
-        match o.lookup(heap, name_key.as_tagged(heap).into()) {
-            vm::Found::MapData { slot, .. } => slot
-                .get(heap)
-                .get_as::<vm::DenseString>(heap)
-                .map(|s| s.to_rust_string(heap))
-                .unwrap_or_else(|| "exception".into()),
-            _ => "exception".into(),
-        }
+        // exception categorization must not run getters
+        let value = vm::Object::get_data_property(
+            heap,
+            &scope,
+            scope.handle(o.erase()),
+            scope.handle(name_key.as_tagged(heap).erase()),
+        );
+        value
+            .get_as::<vm::DenseString>(heap)
+            .map(|s| s.to_rust_string(heap))
+            .unwrap_or_else(|| "exception".into())
     })
 }
 

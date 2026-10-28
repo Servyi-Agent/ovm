@@ -119,7 +119,7 @@ pub fn function_bind<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, proto, proto, name)
+            Object::get_property(vm, heap, state, proto, proto, name, false)
         ) {
             Coercion::Threw => {
                 return vm.known().exception.get(heap).erase();

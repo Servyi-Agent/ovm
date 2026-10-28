@@ -16,7 +16,7 @@ use handler_derive::{handler_become as handler, handler_table};
 
 use bytecode::Opcode;
 use vm_core::bootstrap::WellKnown;
-use vm_core::ic::{ElementHit, Hit, InlineCache, MonoProbe};
+use vm_core::ic::{ElementHit, InlineCache, LoadHit, MonoProbe};
 use vm_core::{
     Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
     FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs, ScopeInfo, Smi, Tagged,
@@ -266,7 +266,7 @@ fn op_load_global(frame: Frame) {
     let heap = frame.ctx().heap();
     let fb = frame.unsigned::<1>();
     let global = roots.global_object.get(heap).erase();
-    if let Some(Hit::Value(v)) =
+    if let Some(LoadHit::Value(v)) =
         InlineCache::try_load(heap, frame.ctx().feedback_ref(heap), fb, global)
     {
         frame.set_acc(v);
@@ -291,7 +291,7 @@ fn op_load_named_property(frame: Frame) {
             next!()
         }
         MonoProbe::Handler(obj, handler) => {
-            if let Some(Hit::Value(v)) = InlineCache::apply_mono(heap, obj, handler) {
+            if let Some(LoadHit::Value(v)) = InlineCache::apply_mono(heap, obj, handler) {
                 frame.set_acc(v);
                 next!()
             }
@@ -302,7 +302,8 @@ fn op_load_named_property(frame: Frame) {
             pairs,
             start,
         } => {
-            if let Some(Hit::Value(v)) = InlineCache::try_load_resume(heap, obj, map, pairs, start)
+            if let Some(LoadHit::Value(v)) =
+                InlineCache::try_load_resume(heap, obj, map, pairs, start)
             {
                 frame.set_acc(v);
                 next!()

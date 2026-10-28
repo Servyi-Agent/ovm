@@ -1,9 +1,9 @@
 use core::alloc::Layout;
 
 use crate::{
-    AccessorPair, AllocToken, Compare, ElementsKind, FixedArray, Handle, HandleScope, Heap, Key,
-    Map, MapInit, MapKind, MaybeWeak, Object, Prototype, SlotFlags, SlotName, Smi, Symbol, Tagged,
-    Value, VmError, WeakFixedArray, WeakFixedArrayInit,
+    AccessorPair, AllocToken, Compare, DETAILS_CONFIGURABLE, ElementsKind, FixedArray, Handle,
+    HandleScope, Heap, Key, Map, MapInit, MapKind, MaybeWeak, Message, Object, Prototype,
+    SlotFlags, SlotName, Smi, Symbol, Tagged, Value, VmError, WeakFixedArray, WeakFixedArrayInit,
 };
 
 /// Store semantics:
@@ -753,6 +753,10 @@ impl Object {
         name: Handle<SlotName>,
         desc: PropertyDescriptor<'_>,
     ) -> Result<bool, VmError> {
+        // elements are the only home of canonical indices
+        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
+            return Self::define_element(heap, scope, receiver, i, desc);
+        }
         debug_assert!(
             !receiver
                 .as_tagged(heap)
@@ -766,14 +770,12 @@ impl Object {
         if !cond_7 {
             return Ok(false);
         }
-        // an integer-named own property can shadow an element hole
-        if name.as_tagged(heap).to_i64().is_some() && receiver.as_tagged(heap).is_array(heap) {
-            Object::promote_holey(heap, scope, &receiver);
-        }
         Transition::define(heap, scope, receiver, name, desc, Change::Append);
         Ok(true)
     }
 
+    /// Parent pairs are name-only: canonical indices have exactly one
+    /// home, the elements store.
     pub fn add_parent(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
@@ -783,6 +785,10 @@ impl Object {
     ) -> Result<(), VmError> {
         if !receiver.as_tagged(heap).is_extendable(heap) {
             return Err(VmError::NotExtensible);
+        }
+        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
+            return Self::define_element(heap, scope, receiver, i, PropertyDescriptor::data(value))
+                .map(|_| ());
         }
         let mut pairs: Vec<Handle<'_, Value>> = Vec::new();
         {
@@ -807,6 +813,15 @@ impl Object {
         name: Handle<SlotName>,
         desc: PropertyDescriptor<'_>,
     ) -> Result<bool, VmError> {
+        if let Ok(Key::Element(i)) = name.as_tagged(heap).erase().classify_key(heap) {
+            if let Some(current) =
+                Self::element_own_descriptor(heap, scope, receiver.as_tagged(heap), i)
+                && !element_define_valid(heap, &current, &desc)
+            {
+                return Ok(false);
+            }
+            return Self::define_element(heap, scope, receiver, i, desc);
+        }
         let current = receiver
             .as_tagged(heap)
             .map(heap)
@@ -830,10 +845,6 @@ impl Object {
         }) else {
             return Ok(false);
         };
-        // an integer-named own property can shadow an element hole
-        if name.as_tagged(heap).to_i64().is_some() && receiver.as_tagged(heap).is_array(heap) {
-            Object::promote_holey(heap, scope, &receiver);
-        }
         Self::apply_define(heap, scope, receiver, name, index, action);
         Ok(true)
     }
@@ -852,27 +863,29 @@ impl Object {
             match key {
                 Key::Element(i) => {
                     let obj = receiver.as_tagged(heap);
-                    if obj.is_array(heap) {
-                        if let Some(dict) = obj.element_dictionary(heap) {
-                            dict.delete(heap, i);
-                            Prototype::element_mutated(heap, obj);
-                            break 'name None;
-                        }
-                        // indices at/past `length` were never own properties
-                        if i < obj.length()
-                            && obj.map(heap).kind().is_dense_elements()
-                            && let Some(elements) = obj.elements_array(heap)
-                            && i < elements.len()
+                    if let Some(dict) = obj.element_dictionary(heap) {
+                        // non-configurable entries reject the delete (ES 10.5.2.10)
+                        if let Some(entry) = dict.find(heap, i)
+                            && dict.details_at(heap, entry) & DETAILS_CONFIGURABLE == 0
                         {
-                            elements.set(heap, i, heap.known().the_hole.get(heap).erase());
-                            Object::promote_holey(heap, scope, &receiver);
-                            Prototype::element_mutated(heap, receiver.as_tagged(heap));
+                            return Ok(false);
                         }
+                        dict.delete(heap, i);
+                        Prototype::element_mutated(heap, obj);
                         break 'name None;
                     }
-                    // other receivers hold numeric keys as named descriptors
-                    let smi_name: Tagged<'_, SlotName> = Tagged::from(Smi::new(i as i64));
-                    Some(scope.handle(smi_name))
+                    // indices beyond the visible range were never own
+                    // properties (arrays: `length`; others: capacity)
+                    if i < obj.max_element_index(heap)
+                        && obj.map(heap).kind().is_dense_elements()
+                        && let Some(elements) = obj.elements_array(heap)
+                        && i < elements.len()
+                    {
+                        elements.set(heap, i, heap.known().the_hole.get(heap).erase());
+                        Object::promote_holey(heap, scope, &receiver);
+                        Prototype::element_mutated(heap, receiver.as_tagged(heap));
+                    }
+                    break 'name None;
                 }
                 Key::Name(name) => Some(scope.handle(name)),
             }
@@ -902,7 +915,66 @@ impl Object {
         Transition::remove_property(heap, scope, receiver, name);
         Ok(true)
     }
+}
 
+/// ES 3.c of ValidateAndApplyPropertyDescriptor, element edition: a
+/// non-configurable existing element only accepts a compatible
+/// redefinition (same kind and attributes; same value when
+/// non-writable; identical pair halves).
+fn element_define_valid(
+    heap: &Heap,
+    current: &PropertyDescriptor<'_>,
+    desc: &PropertyDescriptor<'_>,
+) -> bool {
+    use PropertyDescriptor as D;
+    let configurable = |d: &D| match d {
+        D::Data { configurable, .. } | D::Accessor { configurable, .. } => *configurable,
+    };
+    if configurable(current) {
+        return true;
+    }
+    match (current, desc) {
+        (
+            D::Data {
+                value: cv,
+                writable: cw,
+                enumerable: ce,
+                ..
+            },
+            D::Data {
+                value: nv,
+                writable: nw,
+                enumerable: ne,
+                ..
+            },
+        ) => {
+            cw == nw
+                && ce == ne
+                && (*cw || Compare::same_value(heap, cv.as_tagged(heap), nv.as_tagged(heap)))
+        }
+        (
+            D::Accessor {
+                get: cg,
+                set: cs,
+                enumerable: ce,
+                ..
+            },
+            D::Accessor {
+                get: ng,
+                set: ns,
+                enumerable: ne,
+                ..
+            },
+        ) => {
+            ce == ne
+                && cg.as_tagged(heap).ptr_eq(ng.as_tagged(heap))
+                && cs.as_tagged(heap).ptr_eq(ns.as_tagged(heap))
+        }
+        _ => false,
+    }
+}
+
+impl Object {
     fn apply_define(
         heap: &mut Heap,
         scope: &HandleScope<'_>,
@@ -964,7 +1036,7 @@ impl Object {
                 .kind()
                 .is_immutable_prototype();
             if immutable {
-                return Err(VmError::Message(crate::error::Message::ImmutablePrototype));
+                return Err(VmError::Message(Message::ImmutablePrototype));
             }
         }
         {

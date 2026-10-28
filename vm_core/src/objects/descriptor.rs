@@ -73,7 +73,7 @@ fn descriptor_field<'h, 's>(
     attrs: Handle<'_, Value>,
     name: Handle<'_, Value>,
 ) -> Result<Option<Option<Handle<'s, Value>>>, VmError> {
-    match Object::get_property(vm, heap, state, attrs, attrs, name)? {
+    match Object::get_property(vm, heap, state, attrs, attrs, name, false)? {
         Coercion::Threw => Ok(None),
         Coercion::Value(v) => {
             let v = scope.handle(v);

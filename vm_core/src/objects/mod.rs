@@ -35,7 +35,7 @@ pub use feedback::{FeedbackVector, FeedbackVectorInit, new_feedback_vector};
 pub use float::Float;
 pub use helpers::WrapperKind;
 pub use map::{
-    AccessorPair, ElementsKind, Map, MapInit, MapKind, SlotDescriptor, SlotFlags, SlotName,
+    AccessorPair, ElementsKind, Key, Map, MapInit, MapKind, SlotDescriptor, SlotFlags, SlotName,
 };
 pub use object::{CallTarget, Object, ObjectInit, ObjectSlotsInit};
 pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};

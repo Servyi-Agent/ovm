@@ -1,12 +1,11 @@
 use core::alloc::Layout;
 
-use crate::proxy::{Flow, Proxy};
 use crate::{
-    CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_CONFIGURABLE, DETAILS_DATA,
-    DenseString, EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot,
-    Handle, HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Lookup,
-    LookupActionGet, LookupActionHas, LookupActionSet, Map, NativeIndex, NumberDictionary,
-    NumberDictionaryInit, ObjectKind, PartialDescriptor, PropertyDescriptor, Prototype,
+    AccessorPair, CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_ACCESSOR,
+    DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DenseString,
+    EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot, Handle,
+    HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Key, Map, NativeIndex,
+    NumberDictionary, NumberDictionaryInit, ObjectKind, PropertyDescriptor, Prototype,
     SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
     VmError,
 };
@@ -154,7 +153,9 @@ impl Object {
     #[inline(always)]
     pub fn elements_array<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, FixedArray>> {
         let kind = self.map(heap).kind();
-        if kind.is_array() && !kind.is_dense_elements() {
+        // JSReceiver layout guard: non-receiver heap objects (strings,
+        // pairs, ...) do not have this layout
+        if !kind.is_js_receiver() || !kind.is_dense_elements() {
             // dictionary-backed: not a FixedArray
             return None;
         }
@@ -162,12 +163,12 @@ impl Object {
         elements.is_strong_ptr().then_some(elements)
     }
 
-    /// The sparse-elements backing store, when this array is in
-    /// dictionary mode.
+    /// The sparse-elements backing store, when the receiver is in
+    /// dictionary-elements mode.
     #[inline]
     pub fn element_dictionary<'a>(&self, heap: &'a Heap) -> Option<Tagged<'a, NumberDictionary>> {
         let kind = self.map(heap).kind();
-        if !kind.is_array() || !kind.is_dictionary_elements() {
+        if !kind.is_js_receiver() || !kind.is_dictionary_elements() {
             return None;
         }
         let elements = self.elements(heap);
@@ -197,15 +198,69 @@ impl Object {
             .set(heap, obj.erase(), target.as_tagged(heap));
     }
 
+    /// Self-style parent-name slot in this object's parent pairs.
+    pub fn parent_name<'a>(
+        &self,
+        heap: &'a Heap,
+        name: Tagged<'a, SlotName>,
+    ) -> Option<(usize, Tagged<'a, Value>)> {
+        let pairs = self
+            .map(heap)
+            .prototype
+            .get(heap)
+            .get_as::<FixedArray>(heap)?;
+        let name = name.erase();
+        let mut i = 0;
+        while i < pairs.len() {
+            if pairs.at(heap, i).ptr_eq(name) {
+                return Some((i + 1, pairs.at(heap, i + 1)));
+            }
+            i += 2;
+        }
+        None
+    }
+
+    /// Arrays bound element visibility by the `length` field; every
+    /// other receiver by the elements capacity.
+    #[inline]
+    pub fn max_element_index(&self, heap: &Heap) -> usize {
+        if self.is_array(heap) {
+            self.length()
+        } else {
+            self.elements(heap).len()
+        }
+    }
+
+    /// Own element indices in ascending order: dense hits in index
+    /// order, dictionary entries collected and sorted.
+    pub fn element_keys(&self, heap: &Heap) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Some(dict) = self.element_dictionary(heap) {
+            dict.for_each_entry(heap, |k, _, _| out.push(k));
+            out.sort_unstable();
+        } else if let Some(elements) = self.elements_array(heap) {
+            let hole = heap.known().the_hole.get(heap).erase();
+            let bound = self.max_element_index(heap).min(elements.len());
+            for i in 0..bound {
+                if elements.at(heap, i) != hole {
+                    out.push(i);
+                }
+            }
+        }
+        out
+    }
+
     #[inline(always)]
     pub fn element_value_dense<'a>(&self, heap: &'a Heap, i: usize) -> Option<Tagged<'a, Value>> {
         let kind = self.map(heap).kind();
-        if !kind.is_array() || !kind.is_dense_elements() || i >= self.length() {
+        // JSReceiver layout guard (see `elements_array`)
+        if !kind.is_js_receiver() || !kind.is_dense_elements() {
             return None;
         }
         let elements = self.elements(heap);
         if kind.is_holey() {
-            // `length` can exceed the backing store: those indices are holes
+            // `length`/capacity can exceed the backing store: those
+            // indices are holes
             if i >= elements.len() {
                 return None;
             }
@@ -215,7 +270,16 @@ impl Object {
             }
             Some(v)
         } else {
-            // packed: capacity covers `length`, and no slot is a hole
+            // packed: arrays promise capacity covers `length`, so one
+            // bounds check suffices; other receivers are bounded by
+            // capacity alone
+            if self.is_array(heap) {
+                if i >= self.length() {
+                    return None;
+                }
+            } else if i >= elements.len() {
+                return None;
+            }
             Some(elements.at(heap, i))
         }
     }
@@ -225,9 +289,9 @@ impl Object {
         if let Some(v) = self.element_value_dense(heap, i) {
             return Some(v);
         }
-
-        let kind = self.map(heap).kind();
-        if !kind.is_array() || i >= self.length() {
+        // dictionary probe: arrays are additionally bounded by `length`;
+        // every other receiver is bounded by the dictionary itself
+        if self.is_array(heap) && i >= self.length() {
             return None;
         }
         let dict = self.element_dictionary(heap)?;
@@ -364,21 +428,22 @@ impl Object {
     ) -> Result<(), VmError> {
         let new_len = i.checked_add(1).ok_or(VmError::OutOfBounds)?;
 
-        let (grows, old_len, dictionary) = {
+        let (grows, logical_len, dictionary, is_array) = {
             let obj = receiver.as_tagged(heap);
-            if !obj.is_array(heap) {
-                return Err(VmError::Type);
-            }
             let dictionary = obj.element_dictionary(heap).is_some();
             let capacity = obj.elements_array(heap).map(|e| e.len()).unwrap_or(0);
-            (i >= capacity, obj.length(), dictionary)
+            // arrays track a logical length; other receivers end at
+            // their elements capacity
+            let is_array = obj.is_array(heap);
+            let logical = if is_array { obj.length() } else { capacity };
+            (i >= capacity, logical, dictionary, is_array)
         };
 
         if dictionary {
             return Self::store_dictionary_element(heap, scope, receiver, i, value);
         }
 
-        if i > old_len {
+        if i > logical_len {
             Self::promote_holey(heap, scope, receiver);
         }
 
@@ -407,7 +472,7 @@ impl Object {
                 Self::normalize_elements(heap, scope, receiver);
                 return Self::store_dictionary_element(heap, scope, receiver, i, value);
             }
-            let keep = old_len.min(
+            let keep = logical_len.min(
                 receiver
                     .as_tagged(heap)
                     .elements_array(heap)
@@ -427,15 +492,17 @@ impl Object {
             let obj = receiver.as_tagged(heap);
             obj.elements
                 .set(heap, obj.erase(), elements.as_tagged(heap));
-            obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
+            if is_array {
+                obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
+            }
             Prototype::element_mutated(heap, obj);
         } else {
             let obj = receiver.as_tagged(heap);
             let elements = obj.elements_array(heap).ok_or(VmError::Type)?;
             elements.set(heap, i, value.as_tagged(heap));
-            // a store inside the physical capacity but past the logical
-            // length still extends the array
-            if i >= obj.length() {
+            // a store inside the physical capacity but past an array's
+            // logical length still extends the array
+            if is_array && i >= obj.length() {
                 obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
             }
             Prototype::element_mutated(heap, obj);
@@ -454,10 +521,11 @@ impl Object {
         value: &Handle<'_, Value>,
     ) -> Result<(), VmError> {
         let new_len = i.checked_add(1).ok_or(VmError::OutOfBounds)?;
-        let (dict, length) = {
+        let (dict, length, is_array) = {
             let obj = receiver.as_tagged(heap);
             let dict = obj.element_dictionary(heap).ok_or(VmError::Type)?;
-            (scope.handle(dict), obj.length())
+            let is_array = obj.is_array(heap);
+            (scope.handle(dict), obj.length(), is_array)
         };
         match dict.as_tagged(heap).classify(heap, i) {
             EntryClass::ReadOnly | EntryClass::Accessor => return Ok(()),
@@ -465,7 +533,12 @@ impl Object {
         }
         if matches!(dict.as_tagged(heap).classify(heap, i), EntryClass::Absent) {
             let cap_words = dict.as_tagged(heap).capacity() * NumberDictionary::ENTRY_SIZE;
-            let needed = new_len.max(length);
+            // only arrays have a logical length to preserve when densifying
+            let needed = if is_array {
+                new_len.max(length)
+            } else {
+                new_len
+            };
             if !dict.as_tagged(heap).requires_slow_elements()
                 && needed <= cap_words * 2
                 && needed < (1 << 26)
@@ -489,11 +562,144 @@ impl Object {
                 as_elements_word(table.as_tagged(heap))
             });
         }
-        if i >= length {
+        if is_array && i >= length {
             obj.length.set(heap, obj.erase(), Smi::new(new_len as i64));
         }
         Prototype::element_mutated(heap, obj);
         Ok(())
+    }
+
+    /// The current own descriptor of an element, if present (dense hits
+    /// are plain `w,e,c` data; dictionary entries carry their details).
+    pub fn element_own_descriptor<'s>(
+        heap: &Heap,
+        scope: &'s HandleScope<'_>,
+        receiver: Tagged<'_, Object>,
+        i: usize,
+    ) -> Option<PropertyDescriptor<'s>> {
+        if let Some(v) = receiver.element_value_dense(heap, i) {
+            return Some(PropertyDescriptor::Data {
+                value: scope.handle(v),
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            });
+        }
+        let dict = receiver.element_dictionary(heap)?;
+        let entry = dict.find(heap, i)?;
+        let details = dict.details_at(heap, entry);
+        let flags = |bit: i64| details & bit != 0;
+        if dict.is_accessor_at(heap, entry) {
+            let pair = dict
+                .value_at(heap, entry)
+                .get_as::<AccessorPair>(heap)
+                .expect("accessor dictionary entry holds a pair");
+            return Some(PropertyDescriptor::Accessor {
+                get: scope.handle(pair.get.get(heap)),
+                set: scope.handle(pair.set.get(heap)),
+                enumerable: flags(DETAILS_ENUMERABLE),
+                configurable: flags(DETAILS_CONFIGURABLE),
+            });
+        }
+        Some(PropertyDescriptor::Data {
+            value: scope.handle(dict.value_at(heap, entry)),
+            writable: flags(DETAILS_WRITABLE),
+            enumerable: flags(DETAILS_ENUMERABLE),
+            configurable: flags(DETAILS_CONFIGURABLE),
+        })
+    }
+
+    /// `[[DefineOwnProperty]]` for a canonical index. Plain
+    /// `w,e,c` data defines use the dense store; accessors and
+    /// non-default attributes become dictionary entries carrying their
+    /// details. `desc` must already be completed against the current
+    /// element descriptor (see [`Self::element_own_descriptor`]).
+    pub fn define_element(
+        heap: &mut Heap,
+        scope: &HandleScope<'_>,
+        receiver: Handle<Object>,
+        i: usize,
+        desc: PropertyDescriptor<'_>,
+    ) -> Result<bool, VmError> {
+        let is_array = receiver.as_tagged(heap).is_array(heap);
+        if let PropertyDescriptor::Data {
+            value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        } = desc
+        {
+            Self::store_array_element(heap, scope, &receiver, i, &value)?;
+            return Ok(true);
+        }
+        if receiver
+            .as_tagged(heap)
+            .map(heap)
+            .kind()
+            .is_dense_elements()
+        {
+            Self::normalize_elements(heap, scope, &receiver);
+        }
+        let dict = scope.handle(
+            receiver
+                .as_tagged(heap)
+                .element_dictionary(heap)
+                .ok_or(VmError::Type)?,
+        );
+        let (value_word, details, accessor) = match desc {
+            PropertyDescriptor::Data {
+                value,
+                writable,
+                enumerable,
+                configurable,
+            } => (
+                value.as_tagged(heap).raw(),
+                DETAILS_WRITABLE * writable as i64
+                    | DETAILS_ENUMERABLE * enumerable as i64
+                    | DETAILS_CONFIGURABLE * configurable as i64,
+                false,
+            ),
+            PropertyDescriptor::Accessor {
+                get,
+                set,
+                enumerable,
+                configurable,
+            } => {
+                let pair = heap.allocate_handle::<AccessorPair>((get, set), scope);
+                (
+                    pair.as_tagged(heap).raw(),
+                    DETAILS_ACCESSOR
+                        | DETAILS_ENUMERABLE * enumerable as i64
+                        | DETAILS_CONFIGURABLE * configurable as i64,
+                    true,
+                )
+            }
+        };
+        let table = NumberDictionary::insert(
+            heap,
+            scope,
+            &dict,
+            i,
+            // Safety: fresh word, no allocation since the read.
+            unsafe { Tagged::from_value_unchecked(value_word) },
+            details,
+        );
+        if accessor {
+            table.as_tagged(heap).require_slow(heap);
+        }
+        let obj = receiver.as_tagged(heap);
+        let host = obj.erase();
+        obj.elements.set(
+            heap,
+            host,
+            // Safety: dictionary mode was established above.
+            unsafe { Tagged::from_value_unchecked(table.as_tagged(heap).erase().raw()) },
+        );
+        if is_array && i >= obj.length() {
+            obj.length.set(heap, host, Smi::new((i + 1) as i64));
+        }
+        Prototype::element_mutated(heap, obj);
+        Ok(true)
     }
 
     /// ES 10.4.2.3 ArraySetLength after the caller has performed
@@ -871,6 +1077,7 @@ impl Object {
                 value,
                 value,
                 scope.handle(heap.known().to_primitive_symbol.get(heap).erase()),
+                false,
             )? {
                 Coercion::Threw => return Ok(Coercion::Threw),
                 Coercion::Value(v) => scope.handle(v),
@@ -917,7 +1124,8 @@ impl Object {
                 }
             };
             for name in method_names {
-                let method = match Object::get_property(vm, heap, state, value, value, name)? {
+                let method = match Object::get_property(vm, heap, state, value, value, name, false)?
+                {
                     Coercion::Threw => return Ok(Coercion::Threw),
                     Coercion::Value(v) => scope.handle(v),
                 };
@@ -937,171 +1145,6 @@ impl Object {
             }
             Err(VmError::Type)
         })
-    }
-
-    /// ES `[[Get]]` value driver: lookup on `holder`, getter `this` =
-    /// `receiver` (the proxy-forward shape), then invoke an ordinary
-    /// accessor. The lookup itself never runs getters.
-    /// Apply a `Lookup::set` action. Proxy traps and setters are invoked
-    /// here; the lookup itself only selected the action.
-    pub fn apply_set_action<'h>(
-        vm: &VM,
-        heap: &'h mut Heap,
-        state: &ThreadState,
-        scope: &HandleScope<'_>,
-        receiver: Handle<'_, Value>,
-        value: Handle<'_, Value>,
-        action: LookupActionSet<'_>,
-    ) -> Result<Flow<SetApplied>, VmError> {
-        let receiver = scope.handle(receiver.as_tagged(heap).erase());
-        let value = scope.handle(value.as_tagged(heap).erase());
-        match action {
-            LookupActionSet::Done => Ok(Flow::Value(SetApplied::Done)),
-            LookupActionSet::Rejected => Ok(Flow::Value(SetApplied::Rejected)),
-            LookupActionSet::CallSetter(setter) => {
-                let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
-                let result = scope.handle(HostCtx::enter(vm, heap, state, setter, args, None)?);
-                if result.as_tagged(heap) == heap.known().exception.get(heap) {
-                    Ok(Flow::Threw)
-                } else {
-                    Ok(Flow::Value(SetApplied::CallSetter))
-                }
-            }
-            LookupActionSet::Proxy { proxy, key } => {
-                match Proxy::set(vm, heap, state, proxy, key, value, receiver)? {
-                    Coercion::Value(v) => {
-                        let v = scope.handle(v);
-                        if v.as_tagged(heap).is_truthy(heap) {
-                            Ok(Flow::Value(SetApplied::Done))
-                        } else {
-                            Ok(Flow::Value(SetApplied::Rejected))
-                        }
-                    }
-                    Coercion::Threw => Ok(Flow::Threw),
-                }
-            }
-            LookupActionSet::StoreElement { holder, index } => {
-                Object::store_array_element(heap, scope, &holder, index, &value)?;
-                Ok(Flow::Value(SetApplied::Done))
-            }
-            LookupActionSet::WriteSlot { holder, offset } => {
-                let host = holder.as_tagged(heap);
-                host.slot(heap, offset)
-                    .set(heap, host.erase(), value.as_tagged(heap));
-                Ok(Flow::Value(SetApplied::Done))
-            }
-            LookupActionSet::WriteParent { holder, index } => {
-                let pairs = holder
-                    .as_tagged(heap)
-                    .map(heap)
-                    .prototype
-                    .get(heap)
-                    .get_as::<FixedArray>(heap)
-                    .expect("parent holder has a parent list");
-                pairs
-                    .as_ref()
-                    .element_slot(index)
-                    .set(heap, pairs.erase(), value.as_tagged(heap));
-                Ok(Flow::Value(SetApplied::Done))
-            }
-            LookupActionSet::Define { receiver, key } => {
-                let current = Proxy::own_descriptor(vm, heap, state, scope, receiver, key)?;
-                let partial = match current {
-                    Flow::Threw => return Ok(Flow::Threw),
-                    Flow::Value(Some(d))
-                        if d.is_accessor_descriptor()
-                            || (d.is_data_descriptor() && d.writable == Some(false)) =>
-                    {
-                        return Ok(Flow::Value(SetApplied::Rejected));
-                    }
-                    Flow::Value(Some(_)) => PartialDescriptor::value(value),
-                    Flow::Value(None) => PartialDescriptor::new_data(value),
-                };
-                match Proxy::define_own_property(vm, heap, state, scope, receiver, key, partial)? {
-                    Flow::Threw => Ok(Flow::Threw),
-                    Flow::Value(true) => Ok(Flow::Value(SetApplied::Transition)),
-                    Flow::Value(false) => Ok(Flow::Value(SetApplied::Rejected)),
-                }
-            }
-        }
-    }
-
-    pub fn get_property<'h>(
-        vm: &VM,
-        heap: &'h mut Heap,
-        state: &ThreadState,
-        holder: Handle<'_, Value>,
-        receiver: Handle<'_, Value>,
-        name: Handle<'_, Value>,
-    ) -> Result<Coercion<'h>, VmError> {
-        state.handle_scope(|scope| -> Result<Coercion<'h>, VmError> {
-            let action = Lookup::get(heap, &scope, holder, name)?;
-            Self::apply_get_action(vm, heap, state, &scope, receiver, name, action)
-        })
-    }
-
-    /// Execute a rooted get action. This is the runtime boundary; the
-    /// lookup core never invokes getters, proxy traps, or string allocation.
-    pub fn apply_get_action<'h>(
-        vm: &VM,
-        heap: &'h mut Heap,
-        state: &ThreadState,
-        scope: &HandleScope<'_>,
-        receiver: Handle<'_, Value>,
-        key: Handle<'_, Value>,
-        action: LookupActionGet<'_>,
-    ) -> Result<Coercion<'h>, VmError> {
-        match action {
-            LookupActionGet::Value(v) => Ok(Coercion::Value(v.as_tagged(heap))),
-            LookupActionGet::Getter(getter) => {
-                let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
-                let result = HostCtx::enter(vm, heap, state, getter, args, None)?;
-                let result = scope.handle(result);
-                if result.as_tagged(heap) == heap.known().exception.get(heap) {
-                    Ok(Coercion::Threw)
-                } else {
-                    Ok(Coercion::Value(result.as_tagged(heap)))
-                }
-            }
-            LookupActionGet::Proxy(proxy) => Proxy::get(vm, heap, state, proxy, receiver, key),
-            LookupActionGet::StringChar(unit) => {
-                let value = DenseString::from_units(heap, scope, &[unit]);
-                Ok(Coercion::Value(value.as_tagged(heap).erase()))
-            }
-            LookupActionGet::Missing => {
-                Ok(Coercion::Value(heap.known().undefined.get(heap).erase()))
-            }
-        }
-    }
-
-    pub fn has_property<'h>(
-        vm: &VM,
-        heap: &'h mut Heap,
-        state: &ThreadState,
-        scope: &HandleScope<'_>,
-        start: Handle<'_, Value>,
-        key: Handle<'_, Value>,
-    ) -> Result<Coercion<'h>, VmError> {
-        let action = Lookup::has(heap, scope, start, key)?;
-        Self::apply_has_action(vm, heap, state, scope, key, action)
-    }
-
-    pub fn apply_has_action<'h>(
-        vm: &VM,
-        heap: &'h mut Heap,
-        state: &ThreadState,
-        scope: &HandleScope<'_>,
-        key: Handle<'_, Value>,
-        action: LookupActionHas<'_>,
-    ) -> Result<Coercion<'h>, VmError> {
-        match action {
-            LookupActionHas::Value(found) => Ok(Coercion::Value(Convert::boolean(heap, found))),
-            LookupActionHas::Proxy(proxy) => {
-                let result = Proxy::has(vm, heap, state, proxy, key)?;
-                let _ = scope;
-                Ok(result)
-            }
-        }
     }
 
     pub fn to_numeric(
@@ -1167,13 +1210,10 @@ impl Object {
         state: &ThreadState,
         v: Handle<'_, Value>,
     ) -> Result<Option<Tagged<'a, SlotName>>, VmError> {
-        // Smis are pointer-free: valid at any lifetime, no rooting needed.
-        // Only a canonical array index keeps the Smi spelling; negative
-        // and out-of-range numbers stringify (ES 6.1.7.1, ToPropertyKey).
-        if let Some(smi) = Smi::decode(v.as_tagged(heap).raw())
-            && (0..u32::MAX as i64).contains(&smi.value())
-        {
-            return Ok(Some(Tagged::from(smi)));
+        // canonical indices keep the Smi spelling; Smis are
+        // pointer-free, valid at any lifetime, no rooting needed
+        if let Ok(Key::Element(i)) = v.as_tagged(heap).classify_key(heap) {
+            return Ok(Some(Tagged::from(Smi::new(i as i64))));
         }
         state.handle_scope(|scope| {
             let cond_5 = v.as_tagged(heap).get_as::<Symbol>(heap).is_some();
@@ -1203,11 +1243,9 @@ impl Object {
             };
             let word = interned.as_tagged(heap);
             // canonical index strings name the same property as their
-            // numeric form (ES 6.1.7): canonicalize to the Smi spelling
-            // exactly once here, so every downstream bits-compare is sound
-            if let Some(i) = word.data(heap).canonical_index()
-                && i < u32::MAX as usize
-            {
+            // numeric form: canonicalize to the Smi spelling exactly
+            // once, so every downstream bits-compare is sound
+            if let Ok(Key::Element(i)) = word.erase().classify_key(heap) {
                 return Ok(Some(Tagged::from(Smi::new(i as i64))));
             }
             // fresh anchored re-read of the rooted interned word
@@ -1258,6 +1296,7 @@ impl Object {
                 callable,
                 callable,
                 scope.handle(heap.known().strings.prototype.get(heap).erase()),
+                false,
             )? {
                 Coercion::Threw => return Ok(None),
                 Coercion::Value(v) => scope.handle(v),
@@ -1308,7 +1347,8 @@ impl Object {
     ) -> Result<Option<Tagged<'a, Value>>, VmError> {
         state.handle_scope(|scope| {
             let proto_name = scope.handle(heap.known().strings.prototype.get(heap).erase());
-            let proto = Object::get_property(vm, heap, state, new_target, new_target, proto_name)?;
+            let proto =
+                Object::get_property(vm, heap, state, new_target, new_target, proto_name, false)?;
             let proto = match proto {
                 Coercion::Threw => return Ok(None),
                 Coercion::Value(v) => scope.handle(v),

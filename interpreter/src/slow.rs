@@ -8,9 +8,9 @@ use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
 use vm_core::proxy::Proxy;
 use vm_core::{
     AccessorPair, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass,
-    Errors, FixedArray, Found, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Lookup,
-    LookupActionGet, LookupActionSet, Object, PropertyDescriptor, Prototype, SetApplied, SlotName,
-    Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
+    Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Object,
+    PropertyDescriptor, Prototype, SetApplied, SlotName, Smi, StoreSemantics, Tagged, ThreadState,
+    VM, Value, VmError, raise_runtime,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -213,43 +213,20 @@ pub fn incdec_body<'a>(
     })
 }
 
-/// Apply the result of `Lookup::set`. The shared `Object::apply_set_action`
-/// invokes setters/proxy defines; this wrapper adds strict-mode mapping
-/// and the IC outcome kind.
-#[inline(never)]
-pub fn apply_set_action_body(
-    vm: &VM,
-    heap: &mut Heap,
-    state: &ThreadState,
-    receiver: Handle<'_, Value>,
-    walk: LookupActionSet<'_>,
-    value: Handle<'_, Value>,
-    mode: LanguageMode,
-) -> Result<StoreOutcomeKind, ()> {
-    state.handle_scope(|scope| {
-        match Object::apply_set_action(vm, heap, state, &scope, receiver, value, walk) {
-            Ok(vm_core::proxy::Flow::Threw) => Err(()),
-            Ok(vm_core::proxy::Flow::Value(SetApplied::Rejected)) if mode.is_strict() => {
-                raise_runtime(vm, heap, state, VmError::Type);
-                Err(())
-            }
-            Ok(vm_core::proxy::Flow::Value(SetApplied::Rejected)) => Ok(StoreOutcomeKind::Done),
-            Ok(vm_core::proxy::Flow::Value(SetApplied::Done)) => Ok(StoreOutcomeKind::Done),
-            Ok(vm_core::proxy::Flow::Value(SetApplied::Transition)) => {
-                Ok(StoreOutcomeKind::Transition)
-            }
-            Ok(vm_core::proxy::Flow::Value(SetApplied::CallSetter)) => {
-                Ok(StoreOutcomeKind::CallSetter)
-            }
-            Err(e) => {
-                raise_runtime(vm, heap, state, e);
-                Err(())
-            }
-        }
-    })
+/// Map a `[[Set]]` outcome to the IC outcome kind. Strict-mode
+/// rejections raise inside `Object::set_property`, so `Flow::Threw`
+/// means a pending exception.
+fn set_outcome_kind(applied: vm_core::proxy::Flow<SetApplied>) -> Result<StoreOutcomeKind, ()> {
+    match applied {
+        vm_core::proxy::Flow::Threw => Err(()),
+        vm_core::proxy::Flow::Value(SetApplied::Rejected) => Ok(StoreOutcomeKind::Done),
+        vm_core::proxy::Flow::Value(SetApplied::Done) => Ok(StoreOutcomeKind::Done),
+        vm_core::proxy::Flow::Value(SetApplied::Transition) => Ok(StoreOutcomeKind::Transition),
+        vm_core::proxy::Flow::Value(SetApplied::CallSetter) => Ok(StoreOutcomeKind::CallSetter),
+    }
 }
 
-/// The named-store tail: generic `Lookup::set`, outcome application,
+/// The named-store tail: generic `[[Set]]` (setters, traps, defines),
 /// then the IC fill (a transition is cached against the map the store
 /// produced; a setter ran before the fill).
 pub fn store_named_tail_body<'a>(
@@ -265,6 +242,27 @@ pub fn store_named_tail_body<'a>(
     semantics: StoreSemantics,
     mode: LanguageMode,
 ) -> Tagged<'a, Value> {
+    store_named_tail(
+        vm, heap, state, roots, base, recv, name, value, fb_slot, semantics, false, mode,
+    )
+}
+
+/// [`store_named_tail_body`] with the contextual-store flag (strict
+/// undeclared globals raise `ReferenceError` inside).
+pub fn store_named_tail<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    roots: RootsArg<'_>,
+    base: usize,
+    recv: Handle<'_, Value>,
+    name: Handle<'_, SlotName>,
+    value: Handle<'_, Value>,
+    fb_slot: Option<usize>,
+    semantics: StoreSemantics,
+    contextual: bool,
+    mode: LanguageMode,
+) -> Tagged<'a, Value> {
     state.handle_scope(|scope| {
         // the receiver's map before the store: the state key when the
         // outcome transitions it
@@ -273,16 +271,22 @@ pub fn store_named_tail_body<'a>(
             .as_heap_object()
             .map(|o| scope.handle(o.map(heap)));
         let key = scope.handle(name.as_tagged(heap).erase());
-        let walk = if semantics == StoreSemantics::Shadow {
-            Lookup::set::<false>(heap, &scope, recv, recv, key)
-        } else {
-            Lookup::set::<true>(heap, &scope, recv, recv, key)
-        };
-        let walk = match walk {
-            Ok(walk) => walk,
+        let applied = match Object::set_property(
+            vm,
+            heap,
+            state,
+            recv,
+            recv,
+            key.erase(),
+            value,
+            semantics,
+            contextual,
+            mode,
+        ) {
+            Ok(applied) => applied,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let kind = match apply_set_action_body(vm, heap, state, recv, walk, value, mode) {
+        let kind = match set_outcome_kind(applied) {
             Ok(kind) => kind,
             Err(()) => return roots.exception.get(heap).erase(),
         };
@@ -814,7 +818,7 @@ fn load_keyed_body<'a>(
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
-        let out = match Object::get_property(vm, heap, state, recv, recv, key) {
+        let out = match Object::get_property(vm, heap, state, recv, recv, key, false) {
             Ok(Coercion::Value(v)) => scope.handle(v),
             Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return raise_runtime(vm, heap, state, e),
@@ -905,18 +909,14 @@ pub fn slow_named_load(frame: Frame) {
                 .callable(heap, base)
                 .constant_slot_name(heap, name_idx),
         );
-        let action = match Lookup::get(heap, &scope, recv, name.erase()) {
-            Ok(action) => action,
+        let out = match Object::get_property(vm, heap, state, recv, recv, name.erase(), false) {
+            Ok(result) => match result {
+                Coercion::Value(v) => scope.handle(v),
+                Coercion::Threw => scope.handle(roots.exception.get(heap).erase()),
+            },
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
-        let is_getter = matches!(&action, LookupActionGet::Getter(_));
-        let out =
-            match Object::apply_get_action(vm, heap, state, &scope, recv, name.erase(), action) {
-                Ok(Coercion::Value(v)) => scope.handle(v),
-                Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
-                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-            };
-        if !is_getter {
+        {
             InlineCache::update_load(
                 heap,
                 &scope,
@@ -962,40 +962,22 @@ pub fn global_load_body<'a>(
         );
         let global_handle = scope.handle(global);
         let global_value = scope.handle(global_handle.as_tagged(heap).erase());
-        let action = match Lookup::get(heap, &scope, global_value, name.erase()) {
-            Ok(action) => action,
-            Err(e) => return raise_runtime(vm, heap, state, e),
-        };
-        if matches!(action, LookupActionGet::Missing) && !throws {
-            return roots.undefined.get(heap).erase();
-        }
-        if matches!(action, LookupActionGet::Missing) {
-            let text = name
-                .as_tagged(heap)
-                .erase()
-                .get_as::<DenseString>(heap)
-                .map(|s| s.to_rust_string(heap))
-                .unwrap_or_default();
-            let ex = Errors::not_defined(vm, heap, state, &text)
-                .expect("error materialization must not fail");
-            state.set_pending_exception(ex);
-            return roots.exception.get(heap).erase();
-        }
-        let is_getter = matches!(&action, LookupActionGet::Getter(_));
-        let out = match Object::apply_get_action(
+        let out = match Object::get_property(
             vm,
             heap,
             state,
-            &scope,
+            global_value,
             global_value,
             name.erase(),
-            action,
+            throws,
         ) {
-            Ok(Coercion::Value(v)) => scope.handle(v),
-            Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
+            Ok(result) => match result {
+                Coercion::Value(v) => scope.handle(v),
+                Coercion::Threw => scope.handle(roots.exception.get(heap).erase()),
+            },
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        if !is_getter {
+        {
             InlineCache::update_load(
                 heap,
                 &scope,
@@ -1095,16 +1077,22 @@ pub fn keyed_store_body<'a>(
             }
             return value.as_tagged(heap).erase();
         }
-        let walk = if semantics == StoreSemantics::Shadow {
-            Lookup::set::<false>(heap, &scope, recv, recv, key.erase())
-        } else {
-            Lookup::set::<true>(heap, &scope, recv, recv, key.erase())
-        };
-        let walk = match walk {
-            Ok(walk) => walk,
+        let applied = match Object::set_property(
+            vm,
+            heap,
+            state,
+            recv,
+            recv,
+            key.erase(),
+            value,
+            semantics,
+            false,
+            mode,
+        ) {
+            Ok(applied) => applied,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        match apply_set_action_body(vm, heap, state, recv, walk, value, mode) {
+        match set_outcome_kind(applied) {
             Ok(_) => value.as_tagged(heap).erase(),
             Err(()) => roots.exception.get(heap).erase(),
         }
@@ -1268,15 +1256,9 @@ pub fn slow_store_global(frame: Frame) {
                 .as_name(),
         );
         let global = scope.handle(roots.global_object.get(heap).erase());
-        if mode.is_strict()
-            && matches!(
-                global.as_tagged(heap).lookup(heap, name.as_tagged(heap)),
-                Found::Missing
-            )
-        {
-            return raise_runtime(vm, heap, state, VmError::Reference);
-        }
-        store_named_tail_body(
+        // contextual store: a strict undeclared global raises
+        // ReferenceError inside `Object::set_property`
+        store_named_tail(
             vm,
             heap,
             state,
@@ -1287,6 +1269,7 @@ pub fn slow_store_global(frame: Frame) {
             value,
             None,
             StoreSemantics::WriteThrough,
+            true,
             mode,
         )
     });

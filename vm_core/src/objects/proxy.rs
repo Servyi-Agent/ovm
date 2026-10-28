@@ -3,11 +3,10 @@ use core::alloc::Layout;
 use crate::Coercion;
 use crate::error::Message;
 use crate::{
-    AccessorPair, Args, Compare, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE,
-    DETAILS_ENUMERABLE, DETAILS_WRITABLE, EdgeVisitable, GcSlot, Handle, HandleScope, HandleSlice,
-    Header, Heap, HeapObject, HostCtx, Key, Lookup, LookupActionSet, Map, NumberDictionary, Object,
-    ObjectKind, PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi,
-    Tagged, ThreadState, Transition, VM, Value, Visitor, VmError,
+    Args, Compare, Convert, EdgeVisitable, GcSlot, Handle, HandleScope, HandleSlice, Header, Heap,
+    HeapObject, HostCtx, LanguageMode, Map, Object, ObjectKind, PartialDescriptor,
+    PropertyDescriptor, Prototype, SetApplied, SlotName, StoreSemantics, Tagged, ThreadState,
+    Transition, VM, Value, Visitor, VmError,
 };
 
 pub struct Proxy;
@@ -148,7 +147,7 @@ fn get_trap<'s>(
     trap: Trap,
 ) -> Result<TrapLookup<'s>, VmError> {
     let name = scope.handle(trap.name(heap).erase());
-    match Object::get_property(vm, heap, state, *handler, *handler, name)? {
+    match Object::get_property(vm, heap, state, *handler, *handler, name, false)? {
         Coercion::Threw => Ok(TrapLookup::Threw),
         Coercion::Value(v) => {
             let v = scope.handle(v);
@@ -229,9 +228,8 @@ fn own_descriptor_h<'s>(
 ) -> Result<Flow<Option<PartialDescriptor<'s>>>, VmError> {
     let cond_11 = Proxy::is_proxy(heap, obj.as_tagged(heap));
     if !cond_11 {
-        let desc = obj
-            .as_tagged(heap)
-            .ordinary_own_descriptor(heap, scope, key.as_tagged(heap));
+        let desc =
+            Object::ordinary_own_descriptor(heap, scope, obj.as_tagged(heap), key.as_tagged(heap));
         return Ok(Flow::Value(desc.as_ref().map(PartialDescriptor::from)));
     }
     let (target, handler) = parts(heap, obj.as_tagged(heap)).expect("checked proxy above");
@@ -538,109 +536,11 @@ fn define_internal_h<'s>(
             // descriptor machinery below.
         }
     }
-    // dense array elements: element defines land in the backing
-    // store, not as descriptors
-    let element = 'element: {
-        let on_array = obj
-            .as_tagged(heap)
-            .as_heap_object()
-            .is_some_and(|o| o.is_array(heap));
-        if !on_array {
-            break 'element None;
-        }
-        match name.as_tagged(heap).classify_key(heap) {
-            Ok(Key::Element(i)) => Some(i),
-            _ => None,
-        }
-    };
-    if let Some(i) = element {
-        let completed = partial.complete_against(undefined, None);
-        // plain data defines with default attributes land in the backing
-        // store; accessors and non-default attributes at index keys
-        // become dictionary entries carrying their details
-        if let PropertyDescriptor::Data {
-            value,
-            writable: true,
-            enumerable: true,
-            configurable: true,
-        } = completed
-        {
-            let array = scope
-                .cast::<Object>(heap, obj.as_tagged(heap))
-                .expect("array checked above");
-            Object::store_array_element(heap, scope, &array, i, &value)?;
-            return Ok(Flow::Value(true));
-        }
-        let array = scope
-            .cast::<Object>(heap, obj.as_tagged(heap))
-            .expect("array checked above");
-        if array.as_tagged(heap).map(heap).kind().is_dense_elements() {
-            Object::normalize_elements(heap, scope, &array);
-        }
-        let dict = scope.handle(
-            array
-                .as_tagged(heap)
-                .element_dictionary(heap)
-                .ok_or(VmError::Type)?,
-        );
-        let (value_word, details, accessor) = match completed {
-            PropertyDescriptor::Data {
-                value,
-                writable,
-                enumerable,
-                configurable,
-            } => (
-                value.as_tagged(heap).raw(),
-                DETAILS_WRITABLE * writable as i64
-                    | DETAILS_ENUMERABLE * enumerable as i64
-                    | DETAILS_CONFIGURABLE * configurable as i64,
-                false,
-            ),
-            PropertyDescriptor::Accessor {
-                get,
-                set,
-                enumerable,
-                configurable,
-            } => {
-                let pair = heap.allocate_handle::<AccessorPair>((get, set), scope);
-                (
-                    pair.as_tagged(heap).raw(),
-                    DETAILS_ACCESSOR
-                        | DETAILS_ENUMERABLE * enumerable as i64
-                        | DETAILS_CONFIGURABLE * configurable as i64,
-                    true,
-                )
-            }
-        };
-        let table = NumberDictionary::insert(
-            heap,
-            scope,
-            &dict,
-            i,
-            // Safety: fresh word, no allocation since the read.
-            unsafe { Tagged::from_value_unchecked(value_word) },
-            details,
-        );
-        if accessor {
-            table.as_tagged(heap).require_slow(heap);
-        }
-        let array_ref = array.as_tagged(heap);
-        let host = array_ref.erase();
-        array_ref.elements.set(
-            heap,
-            host,
-            // Safety: dictionary mode was established above.
-            unsafe { Tagged::from_value_unchecked(table.as_tagged(heap).erase().raw()) },
-        );
-        if i >= array_ref.length() {
-            array_ref.length.set(heap, host, Smi::new((i + 1) as i64));
-        }
-        Prototype::element_mutated(heap, array_ref);
-        return Ok(Flow::Value(true));
-    }
-    let current = obj
-        .as_tagged(heap)
-        .ordinary_own_descriptor(heap, scope, name.as_tagged(heap));
+    // Element defines route through the ordinary [[DefineOwnProperty]]:
+    // `Object::define_own_property` sends canonical indices to the
+    // elements store (dense or dictionary with details).
+    let current =
+        Object::ordinary_own_descriptor(heap, scope, obj.as_tagged(heap), name.as_tagged(heap));
     let full = partial.complete_against(undefined, current.as_ref());
     let obj_ref = scope
         .cast::<Object>(heap, obj.as_tagged(heap))
@@ -667,26 +567,6 @@ fn materialize_trap_key<'s>(
     }
 }
 
-/// Apply the result of `Lookup::set` for a proxy whose own
-/// `set` trap is absent. This is proxy forwarding, not the ordinary lookup
-/// core: defining on the receiver may itself run a proxy define trap.
-fn apply_set_action<'a, 's>(
-    vm: &VM,
-    heap: &'a mut Heap,
-    state: &ThreadState,
-    scope: &'s HandleScope<'_>,
-    receiver: &Handle<'_, Value>,
-    value: &Handle<'_, Value>,
-    action: LookupActionSet<'s>,
-) -> Result<Coercion<'a>, VmError> {
-    let result = Object::apply_set_action(vm, heap, state, scope, *receiver, *value, action)?;
-    match result {
-        Flow::Threw => Ok(Coercion::Threw),
-        Flow::Value(SetApplied::Rejected) => Ok(Coercion::Value(Convert::boolean(heap, false))),
-        Flow::Value(_) => Ok(Coercion::Value(Convert::boolean(heap, true))),
-    }
-}
-
 // ---- the internal methods (ES 20.2.5.x) ------------------------------------
 
 fn get_h<'a>(
@@ -705,7 +585,7 @@ fn get_h<'a>(
             // forward: lookup on the target, getter `this` = the
             // original receiver (a proxy target re-enters its own
             // `get` trap with the same receiver)
-            let forwarded = Object::get_property(vm, heap, state, target, *receiver, *name)?;
+            let forwarded = Object::get_property(vm, heap, state, target, *receiver, *name, false)?;
             match forwarded {
                 Coercion::Threw => Ok(Coercion::Threw),
                 Coercion::Value(v) => {
@@ -775,8 +655,27 @@ fn set_h<'a, 's>(
     match get_trap(vm, heap, state, scope, &handler, Trap::Set)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
         TrapLookup::None => {
-            let walk = Lookup::set::<false>(heap, scope, target, *receiver, *name)?;
-            apply_set_action(vm, heap, state, scope, receiver, value, walk)
+            // forward: the ordinary [[Set]] on the target (setters and
+            // nested traps run); rejection reports as false without
+            // raising (ES 20.2.5.10)
+            match Object::set_property(
+                vm,
+                heap,
+                state,
+                target,
+                *receiver,
+                *name,
+                *value,
+                StoreSemantics::Shadow,
+                false,
+                LanguageMode::Sloppy,
+            )? {
+                Flow::Threw => Ok(Coercion::Threw),
+                Flow::Value(SetApplied::Rejected) => {
+                    Ok(Coercion::Value(Convert::boolean(heap, false)))
+                }
+                Flow::Value(_) => Ok(Coercion::Value(Convert::boolean(heap, true))),
+            }
         }
         TrapLookup::Trap(t) => {
             let trap_name = materialize_trap_key(heap, scope, name)?;
@@ -839,7 +738,7 @@ fn has_h<'a>(
     let (target, handler) = enter_trap(scope, heap, proxy, Trap::Has)?;
     match get_trap(vm, heap, state, scope, &handler, Trap::Has)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
-        TrapLookup::None => Object::has_property(vm, heap, state, scope, target, *name),
+        TrapLookup::None => Object::has_property(vm, heap, state, target, *name),
         TrapLookup::Trap(t) => {
             let trap_name = materialize_trap_key(heap, scope, name)?;
             let result = call_trap(vm, heap, state, scope, &t, &[handler, target, trap_name])?;

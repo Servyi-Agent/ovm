@@ -1,4 +1,3 @@
-use crate::lookup::Found as LookupFound;
 use crate::{
     AccessorPair, CallTarget, CallableInfoObject, Cell, ContextObject, DataHandler,
     DataHandlerInit, DenseString, FeedbackVector, FixedArray, FunctionKind, Handle, HandleScope,
@@ -69,7 +68,7 @@ pub enum MonoProbe<'a> {
 }
 
 /// Result of a load hit.
-pub enum Hit<'a> {
+pub enum LoadHit<'a> {
     Value(Tagged<'a, Value>),
     /// invoke with the receiver as `this`
     Getter(Tagged<'a, Value>),
@@ -484,35 +483,31 @@ fn analyze_load<'s>(
     if receiver.array_length(heap, name).is_some() {
         return mk(PlanKind::ArrayLength, 0, None, None, true);
     }
-    let found =
-        match crate::lookup::find_in_chain::<false>(heap, receiver.erase(), name.erase(), None) {
-            Ok(found) => found,
-            Err(_) => return mk(PlanKind::Slow, 0, None, None, false),
-        };
-    match found {
-        LookupFound::MapData { holder, offset, .. } => {
+    // side-effect-free: no getters or traps run while building the plan
+    let recv_handle = scope.handle(receiver.erase());
+    let key_handle = scope.handle(name.erase());
+    let hit = Lookup::new(heap, scope, recv_handle, key_handle, false).next(heap, scope);
+    use crate::lookup::{Hit, Lookup};
+    let cacheable = |holder: Handle<'s, Object>| -> bool {
+        holder
+            .as_tagged(heap)
+            .map(heap)
+            .kind()
+            .kind()
+            .is_js_receiver()
+    };
+    match hit {
+        Hit::Data { holder, offset, .. } => {
             let holder = scope.handle(holder);
-            if !holder
-                .as_tagged(heap)
-                .map(heap)
-                .kind()
-                .kind()
-                .is_js_receiver()
-            {
+            if !cacheable(holder) {
                 return mk(PlanKind::Slow, 0, None, None, false);
             }
             let own = holder.as_tagged(heap).ptr_eq(receiver);
             mk(PlanKind::Field, offset, None, Some(holder), own)
         }
-        LookupFound::Accessor { holder, pair, .. } => {
+        Hit::Accessor { holder, pair, .. } => {
             let holder = scope.handle(holder);
-            if !holder
-                .as_tagged(heap)
-                .map(heap)
-                .kind()
-                .kind()
-                .is_js_receiver()
-            {
+            if !cacheable(holder) {
                 return mk(PlanKind::Slow, 0, None, None, false);
             }
             let own = holder.as_tagged(heap).ptr_eq(receiver);
@@ -524,29 +519,18 @@ fn analyze_load<'s>(
                 own,
             )
         }
-        LookupFound::Parent {
-            holder,
-            index,
-            value: _,
-            ..
-        } => {
+        Hit::Parent { holder, slot, .. } => {
             let holder = scope.handle(holder);
-            if !holder
-                .as_tagged(heap)
-                .map(heap)
-                .kind()
-                .kind()
-                .is_js_receiver()
-            {
+            if !cacheable(holder) {
                 return mk(PlanKind::Slow, 0, None, None, false);
             }
-            mk(PlanKind::ParentName, index, None, Some(holder), false)
+            mk(PlanKind::ParentName, slot, None, Some(holder), false)
         }
-        LookupFound::String { .. }
-        | LookupFound::Element { .. }
-        | LookupFound::ArrayLength { .. }
-        | LookupFound::Proxy(_) => mk(PlanKind::Slow, 0, None, None, false),
-        LookupFound::Missing => {
+        // strings/elements/array-length/proxies stay on the slow path
+        Hit::StringOwn { .. } | Hit::Element { .. } | Hit::ArrayLength { .. } | Hit::Proxy(_) => {
+            mk(PlanKind::Slow, 0, None, None, false)
+        }
+        Hit::Miss => {
             let own = !has_parents(heap, receiver_map.as_tagged(heap));
             mk(PlanKind::NonExistent, 0, None, None, own)
         }
@@ -563,12 +547,12 @@ fn check_prototype_validity_cell(heap: &Heap, handler: Tagged<'_, DataHandler>) 
     }
 }
 
-fn getter_hit<'a>(heap: &'a Heap, pair: Tagged<'a, AccessorPair>) -> Hit<'a> {
+fn getter_hit<'a>(heap: &'a Heap, pair: Tagged<'a, AccessorPair>) -> LoadHit<'a> {
     let getter = pair.get.get(heap);
     if getter == heap.known().undefined.get(heap) {
-        Hit::Value(heap.known().undefined.get(heap).erase())
+        LoadHit::Value(heap.known().undefined.get(heap).erase())
     } else {
-        Hit::Getter(getter)
+        LoadHit::Getter(getter)
     }
 }
 
@@ -586,18 +570,18 @@ fn apply_parent_handler<'a>(
     heap: &'a Heap,
     handler: Tagged<'a, DataHandler>,
     payload: i64,
-) -> Option<Hit<'a>> {
+) -> Option<LoadHit<'a>> {
     let holder = handler_holder(heap, handler)?;
     let pairs = holder
         .map(heap)
         .prototype
         .get(heap)
         .get_as::<FixedArray>(heap)?;
-    Some(Hit::Value(pairs.at(heap, payload as usize)))
+    Some(LoadHit::Value(pairs.at(heap, payload as usize)))
 }
 
 #[inline(always)]
-fn apply_data_handler<'a>(heap: &'a Heap, handler: Tagged<'a, DataHandler>) -> Option<Hit<'a>> {
+fn apply_data_handler<'a>(heap: &'a Heap, handler: Tagged<'a, DataHandler>) -> Option<LoadHit<'a>> {
     if !check_prototype_validity_cell(heap, handler) {
         return None;
     }
@@ -605,7 +589,9 @@ fn apply_data_handler<'a>(heap: &'a Heap, handler: Tagged<'a, DataHandler>) -> O
     match kind {
         KIND_FIELD => {
             let holder = handler_holder(heap, handler)?;
-            Some(Hit::Value(holder.slot(heap, payload as usize).get(heap)))
+            Some(LoadHit::Value(
+                holder.slot(heap, payload as usize).get(heap),
+            ))
         }
         KIND_ACCESSOR => {
             let pair = handler
@@ -615,7 +601,7 @@ fn apply_data_handler<'a>(heap: &'a Heap, handler: Tagged<'a, DataHandler>) -> O
             Some(getter_hit(heap, pair))
         }
         KIND_PARENT => apply_parent_handler(heap, handler, payload),
-        KIND_NON_EXISTENT => Some(Hit::NotFound),
+        KIND_NON_EXISTENT => Some(LoadHit::NotFound),
         _ => None,
     }
 }
@@ -625,13 +611,15 @@ fn apply_fast<'a>(
     heap: &'a Heap,
     receiver: Tagged<'a, Object>,
     handler: Tagged<'a, MaybeWeak<Value>>,
-) -> Option<Hit<'a>> {
+) -> Option<LoadHit<'a>> {
     if !handler.is_ptr() {
         let (kind, payload) = decode_handler_smi(handler)?;
         return match kind {
-            KIND_FIELD => Some(Hit::Value(receiver.slot(heap, payload as usize).get(heap))),
-            KIND_ARRAY_LENGTH => Some(Hit::Value(receiver.length.get(heap).erase())),
-            KIND_NON_EXISTENT => Some(Hit::NotFound),
+            KIND_FIELD => Some(LoadHit::Value(
+                receiver.slot(heap, payload as usize).get(heap),
+            )),
+            KIND_ARRAY_LENGTH => Some(LoadHit::Value(receiver.length.get(heap).erase())),
+            KIND_NON_EXISTENT => Some(LoadHit::NotFound),
             _ => None,
         };
     }
@@ -652,7 +640,7 @@ fn mono_result<'a>(
     handler: Tagged<'a, MaybeWeak<Value>>,
 ) -> MonoProbe<'a> {
     match apply_fast(heap, obj, handler) {
-        Some(Hit::Value(v)) => MonoProbe::Value(v),
+        Some(LoadHit::Value(v)) => MonoProbe::Value(v),
         _ => MonoProbe::Handler(obj, handler),
     }
 }
@@ -662,7 +650,7 @@ fn apply_load_handler<'a>(
     heap: &'a Heap,
     receiver: Tagged<'a, Object>,
     handler: Tagged<'a, MaybeWeak<Value>>,
-) -> Option<Hit<'a>> {
+) -> Option<LoadHit<'a>> {
     // A weak word is an own accessor stored as a whole pair; everything else
     // (bare Smi or strong DataHandler) is handled by the fast path.
     if handler.is_weak_ptr() {
@@ -743,17 +731,18 @@ fn analyze_store<'s>(
         setter_own: false,
         receiver_map: scope.handle(receiver.map(heap)),
     };
-    let found =
-        match crate::lookup::find_in_chain::<false>(heap, receiver.erase(), name.erase(), None) {
-            Ok(found) => found,
-            Err(_) => return plan,
-        };
-    match found {
-        LookupFound::MapData { holder, offset, .. } if holder.ptr_eq(receiver) => {
+    let hit = {
+        let recv_handle = scope.handle(receiver.erase());
+        let key_handle = scope.handle(name.erase());
+        Lookup::new(heap, scope, recv_handle, key_handle, false).next(heap, scope)
+    };
+    use crate::lookup::{Hit, Lookup};
+    match hit {
+        Hit::Data { holder, offset, .. } if holder.erase().ptr_eq(receiver.erase()) => {
             plan.field = Some(offset)
         }
-        LookupFound::Accessor { pair, holder, .. } => {
-            plan.setter_own = holder.ptr_eq(receiver);
+        Hit::Accessor { holder, pair, .. } => {
+            plan.setter_own = holder.erase().ptr_eq(receiver.erase());
             plan.setter = Some(scope.handle(pair));
         }
         _ => {}
@@ -871,7 +860,7 @@ impl InlineCache {
         heap: &'a Heap,
         obj: Tagged<'a, Object>,
         handler: Tagged<'a, MaybeWeak<Value>>,
-    ) -> Option<Hit<'a>> {
+    ) -> Option<LoadHit<'a>> {
         apply_load_handler(heap, obj, handler)
     }
 
@@ -882,7 +871,7 @@ impl InlineCache {
         map: Tagged<'a, Map>,
         pairs: Tagged<'a, WeakFixedArray>,
         start: usize,
-    ) -> Option<Hit<'a>> {
+    ) -> Option<LoadHit<'a>> {
         let len = pairs.len();
         let mut i = start;
         while i + 1 < len {
@@ -901,7 +890,7 @@ impl InlineCache {
         vector: Option<Tagged<'a, FeedbackVector>>,
         slot: usize,
         receiver: Tagged<'a, Value>,
-    ) -> Option<Hit<'a>> {
+    ) -> Option<LoadHit<'a>> {
         let vector = vector?;
         let obj = ic_receiver(receiver, heap)?;
         vector.site(slot)?;

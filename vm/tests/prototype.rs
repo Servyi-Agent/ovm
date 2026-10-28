@@ -1,5 +1,5 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
-use vm::ic::{Hit, InlineCache};
+use vm::ic::{InlineCache, LoadHit};
 use vm::{
     FixedArray, HandleSlice, Heap, Object, PropertyDescriptor, SlotName, Smi, Tagged, Thread, VM,
     Value, new_feedback_vector,
@@ -127,7 +127,7 @@ fn multi_parent_name_load_returns_the_parent() {
                 unsafe { anchored(heap, home) }.erase(),
             );
             assert!(
-                matches!(hit, Some(Hit::Value(v)) if v.raw() == p1),
+                matches!(hit, Some(LoadHit::Value(v)) if v.raw() == p1),
                 "the parent-name slot must return the first parent object"
             );
         }
@@ -172,7 +172,7 @@ fn multi_parent_cached_miss_invalidates_when_parent_gains_property() {
                 0,
                 unsafe { anchored(heap, home) }.erase(),
             );
-            assert!(matches!(hit, Some(Hit::NotFound)), "the miss is cached");
+            assert!(matches!(hit, Some(LoadHit::NotFound)), "the miss is cached");
         }
 
         {
@@ -249,7 +249,7 @@ fn multi_parent_ic_invalidates_on_parent_shape_change() {
                 unsafe { anchored(heap, home) }.erase(),
             );
             assert!(
-                matches!(hit, Some(Hit::Value(v)) if v.raw() == smi(42)),
+                matches!(hit, Some(LoadHit::Value(v)) if v.raw() == smi(42)),
                 "cached load must resolve through the second parent"
             );
         }
@@ -315,7 +315,7 @@ fn multi_parent_ic_invalidates_on_parent_shape_change() {
                 unsafe { anchored(heap, home) }.erase(),
             );
             assert!(
-                matches!(hit, Some(Hit::Value(v)) if v.raw() == smi(7)),
+                matches!(hit, Some(LoadHit::Value(v)) if v.raw() == smi(7)),
                 "the re-recorded handler must see the shadowing value"
             );
         }

@@ -268,25 +268,15 @@ pub fn own_property_keys(heap: &Heap, roots: &WellKnown, target: Tagged<'_, Valu
         }
         keys.push(roots.strings.length.raw());
     }
-    let Some(obj) = target.as_heap_object() else {
-        return keys;
-    };
-
-    if obj.as_ref().is_array(heap) {
-        let len = obj.as_ref().length().min(
-            obj.as_ref()
-                .elements_array(heap)
-                .map(|e| e.len())
-                .unwrap_or(0),
-        );
-        for i in 0..len {
-            if obj.as_ref().element_value(heap, i).is_some() {
-                keys.push(Smi::new(i as i64).encode());
-            }
+    // element indices ascending, then named descriptors in insertion
+    // order (ES OrdinaryOwnPropertyKeys)
+    if let Some(obj) = target.as_heap_object() {
+        for i in obj.element_keys(heap) {
+            keys.push(Smi::new(i as i64).encode());
         }
-    }
-    for d in obj.as_ref().map(heap).descriptors() {
-        keys.push(d.name(heap).raw());
+        for d in obj.map(heap).descriptors() {
+            keys.push(d.name(heap).raw());
+        }
     }
     keys
 }
@@ -328,9 +318,10 @@ fn own_property(
         );
     }
     Ok(
-        match receiver.as_tagged(heap).ordinary_own_descriptor(
+        match Object::ordinary_own_descriptor(
             heap,
             scope,
+            receiver.as_tagged(heap),
             key_value.as_tagged(heap),
         ) {
             Some(PropertyDescriptor::Data { enumerable, .. })
@@ -501,7 +492,7 @@ pub fn object_get_own_property_descriptor<'a>(
             // String exotic: ToObject exposes `length` and index own props
             DenseString::own_descriptor(heap, &scope, target_v, key_v)
         } else {
-            target_v.ordinary_own_descriptor(heap, &scope, key_v)
+            Object::ordinary_own_descriptor(heap, &scope, target_v, key_v)
         };
         // root the oddball singletons once for the descriptor fields
         let true_v = scope.handle(vm.known().true_object.get(heap).erase());

@@ -6,6 +6,11 @@ never use unsafe unless explicetely allowed, if you think unsafe is solving a pr
 purpesfully violating this by passing around plain `Value` or `Word` and using `unsafe` destroys this proof and may kill values across gc-safepoints if the heap moves the value.
 
 # Code Conventions
+## Visibility
+Never use `pub(crate)` — always plain `pub`. If something should not be
+re-exported at the crate root, simply do not re-export it; the module
+path already scopes it.
+
 ## Method vs namespace function
 
 Can the function trigger a GC (does it need `&mut Heap`, or take `Handle`s because it allocates)?

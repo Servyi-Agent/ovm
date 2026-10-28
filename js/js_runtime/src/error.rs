@@ -97,7 +97,7 @@ pub fn error_to_string<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, receiver, receiver, name_key.erase())
+            Object::get_property(vm, heap, state, receiver, receiver, name_key.erase(), false)
         ) {
             Coercion::Value(v) => scope.handle(v),
             Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),
@@ -107,7 +107,15 @@ pub fn error_to_string<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, receiver, receiver, message_key.erase(),)
+            Object::get_property(
+                vm,
+                heap,
+                state,
+                receiver,
+                receiver,
+                message_key.erase(),
+                false
+            )
         ) {
             Coercion::Value(v) => scope.handle(v),
             Coercion::Threw => scope.handle(vm.known().exception.get(heap).erase()),

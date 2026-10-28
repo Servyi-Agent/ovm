@@ -38,7 +38,7 @@ pub use bootstrap::{
 };
 pub use compare::Compare;
 pub use convert::{Coercion, Convert, Hint};
-pub use error::VmError;
+pub use error::{Message, VmError};
 pub use errors::Errors;
 pub use handle::{
     EscapableHandleScope, Handle, HandleData, HandleScope, HandleSet, HandleSlice, RootHandles,
@@ -50,9 +50,7 @@ pub use heap::{
 pub use interner::StringInterner;
 pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
 pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
-pub use lookup::{
-    Found, Key, Lookup, LookupActionGet, LookupActionHas, LookupActionSet, find_in_chain,
-};
+
 pub use native::{HostCtx, NativeFn, NativeIndex, NativeRegistry, raise_runtime};
 pub use objects::{
     AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit,
@@ -60,11 +58,11 @@ pub use objects::{
     DETAILS_ENUMERABLE, DETAILS_WRITABLE, DataHandler, DataHandlerInit, DenseString, ElementsKind,
     Encoding, EntryClass, FeedbackVector, FeedbackVectorInit, FixedArray, FixedByteArray, Float,
     FunctionKind, HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit, Header,
-    HeapObject, Map, MapInit, MapKind, NumberDictionary, NumberDictionaryInit, Object, ObjectInit,
-    ObjectKind, ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit, ProxyObject,
-    ScopeInfo, ScopeInfoInit, SlotDescriptor, SlotFlags, SlotName, StringData, StringOwn, Symbol,
-    WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8, new_feedback_vector, object_kind,
-    object_layout, string_content_hash, visit_object,
+    HeapObject, Key, Map, MapInit, MapKind, NumberDictionary, NumberDictionaryInit, Object,
+    ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit,
+    ProxyObject, ScopeInfo, ScopeInfoInit, SlotDescriptor, SlotFlags, SlotName, StringData,
+    StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8,
+    new_feedback_vector, object_kind, object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};

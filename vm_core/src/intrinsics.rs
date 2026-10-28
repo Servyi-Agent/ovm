@@ -4,10 +4,9 @@
 //! its ES section), not JS-visible library functions.
 
 use crate::{
-    AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Found, Handle,
-    HandleSlice, Heap, Key, LanguageMode, Lookup, LookupActionGet, Object, ObjectSlotsInit,
-    PropertyDescriptor, SetApplied, SlotName, Smi, StoreSemantics, StringData, StringOwn, Symbol,
-    Tagged, Value, VmError, WellKnown,
+    AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Handle,
+    HandleSlice, Heap, Key, LanguageMode, Object, ObjectSlotsInit, PropertyDescriptor, SlotName,
+    Smi, StoreSemantics, StringData, StringOwn, Symbol, Tagged, Value, VmError, WellKnown,
 };
 
 use crate::Float;
@@ -341,14 +340,17 @@ fn for_in_initial_level<'a, 's>(
     };
     let global = scope.handle(global.erase());
     let ctor_key = scope.handle(ctor_handle.erase());
-    let ctor = match Lookup::get(heap, scope, global, ctor_key).ok()? {
-        LookupActionGet::Value(v) if v.as_tagged(heap).is_strong_ptr() => v.as_tagged(heap),
-        _ => return None,
-    };
+    let ctor = Object::get_data_property(heap, scope, global, ctor_key);
+    if !ctor.is_strong_ptr() {
+        return None;
+    }
+    let ctor = scope.handle(ctor);
     let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
-    match Lookup::get(heap, scope, scope.handle(ctor), proto_key).ok()? {
-        LookupActionGet::Value(p) if p.as_tagged(heap).is_strong_ptr() => Some(p.as_tagged(heap)),
-        _ => None,
+    let proto = Object::get_data_property(heap, scope, ctor, proto_key);
+    if proto.is_strong_ptr() {
+        Some(proto)
+    } else {
+        None
     }
 }
 
@@ -378,53 +380,18 @@ fn for_in_level_keys<'s>(
             break 'keys (indices, names);
         };
         let obj = obj;
-        // array elements: non-hole indices ascending
-        if obj.is_array(heap) {
-            if let Some(dict) = obj.element_dictionary(heap) {
-                // sparse: collect the live keys, then sort
-                let mut keys: Vec<i64> = Vec::new();
-                dict.for_each_entry(heap, |k, _, _| keys.push(k as i64));
-                keys.sort_unstable();
-                indices.extend(keys);
-            } else {
-                let len = obj
-                    .length()
-                    .min(obj.elements_array(heap).map(|e| e.len()).unwrap_or(0));
-                for i in 0..len {
-                    if obj.element_value(heap, i).is_some() {
-                        indices.push(i as i64);
-                    }
-                }
-            }
-        }
+        // elements ascending (dense hits in index order; dictionary
+        // entries collected and sorted) — every receiver, not just arrays
+        indices.extend(obj.element_keys(heap).iter().map(|i| *i as i64));
 
         for d in obj.map(heap).descriptors() {
             let name = d.name(heap);
-
-            if let Some(index) = name.as_index() {
-                indices.push(index as i64);
-                continue;
-            }
-            if name.erase().raw().is_smi() {
-                // out-of-range Smi names keep insertion order
-                names.push(scope.handle(name.erase()));
-                continue;
-            }
+            // exclusive homes: descriptors never hold indices; symbols
+            // are never yielded, everything else keeps insertion order
             if name.erase().get_as::<Symbol>(heap).is_some() {
-                continue; // symbols are never yielded
+                continue;
             }
-            // canonical index strings classify as index keys (a store
-            // through them creates a Smi-named descriptor, but object
-            // literals and defines can still reach here)
-            let index = name
-                .erase()
-                .get_as::<DenseString>(heap)
-                .and_then(|s| s.data(heap).canonical_index())
-                .filter(|i| *i < u32::MAX as usize);
-            match index {
-                Some(i) => indices.push(i as i64),
-                None => names.push(scope.handle(name.erase())),
-            }
+            names.push(scope.handle(name.erase()));
         }
         (indices, names)
     };
@@ -605,26 +572,17 @@ fn for_in_next_level<'s>(
         // lookups; no user code can run)
         let global = scope.handle(roots.global_object.get(heap).erase());
         let ctor_key = scope.handle(roots.strings.string.get(heap).erase());
-        let Some(string_ctor) =
-            Lookup::get(heap, scope, global, ctor_key)
-                .ok()
-                .and_then(|action| match action {
-                    LookupActionGet::Value(v) => Some(v),
-                    _ => None,
-                })
-        else {
+        let string_ctor = Object::get_data_property(heap, scope, global, ctor_key);
+        if !string_ctor.is_strong_ptr() {
             return Ok(None);
-        };
+        }
+        let string_ctor = scope.handle(string_ctor);
         let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
-        let proto = Lookup::get(heap, scope, string_ctor, proto_key)
-            .ok()
-            .and_then(|action| match action {
-                LookupActionGet::Value(v) => Some(v),
-                _ => None,
-            });
+        let proto = Object::get_data_property(heap, scope, string_ctor, proto_key);
         return Ok(proto
-            .filter(|p| p.as_tagged(heap).is_strong_ptr())
-            .map(|p| scope.handle(p.as_tagged(heap).erase())));
+            .is_strong_ptr()
+            .then(|| scope.handle(proto))
+            .filter(|p| p.as_tagged(heap).is_strong_ptr()));
     }
     let Some(obj) = level.as_heap_object() else {
         return Ok(None);
@@ -703,7 +661,7 @@ fn get_iterator<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, obj, obj, symbol)
+            Object::get_property(vm, heap, state, obj, obj, symbol, false)
         );
         let method = match method {
             Coercion::Threw => {
@@ -742,7 +700,7 @@ fn iterator_next<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, iter, iter, next_name)
+            Object::get_property(vm, heap, state, iter, iter, next_name, false)
         );
         let next = match next {
             Coercion::Threw => {
@@ -786,7 +744,7 @@ fn iterator_done<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, result, result, done_name)
+            Object::get_property(vm, heap, state, result, result, done_name, false)
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
@@ -812,7 +770,7 @@ fn iterator_value<'a>(
             vm,
             heap,
             state,
-            Object::get_property(vm, heap, state, result, result, value_name)
+            Object::get_property(vm, heap, state, result, result, value_name, false)
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
@@ -855,7 +813,7 @@ fn has_property<'a>(
             vm,
             heap,
             state,
-            Object::has_property(vm, heap, state, &scope, obj, key_value)
+            Object::has_property(vm, heap, state, obj, key_value)
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
@@ -927,16 +885,8 @@ fn copy_data_properties<'a>(
             let Some(obj) = source.as_tagged(heap).as_heap_object() else {
                 return target.as_tagged(heap);
             };
-            let obj = obj;
-            if obj.is_array(heap) {
-                let len = obj
-                    .length()
-                    .min(obj.elements_array(heap).map(|e| e.len()).unwrap_or(0));
-                for i in 0..len {
-                    if obj.element_value(heap, i).is_some() {
-                        keys.push(scope.handle(Smi::new(i as i64)));
-                    }
-                }
+            for i in obj.element_keys(heap) {
+                keys.push(scope.handle(Smi::new(i as i64)));
             }
             for d in obj.map(heap).descriptors() {
                 if d.flags().is_enumerable() {
@@ -966,19 +916,20 @@ fn copy_data_properties<'a>(
                     vm,
                     heap,
                     state,
-                    Object::get_property(vm, heap, state, source, source, key)
+                    Object::get_property(vm, heap, state, source, source, key, false)
                 ) {
                     Coercion::Threw => return vm.known().exception.get(heap).erase(),
                     Coercion::Value(v) => scope.handle(v),
                 }
             };
             // CreateDataProperty: skipped when already present
-            let exists = !matches!(
-                target
-                    .as_tagged(heap)
-                    .lookup(heap, key.as_tagged(heap).as_name()),
-                Found::Missing
-            );
+            let exists = Object::ordinary_own_descriptor(
+                heap,
+                &scope,
+                target.as_tagged(heap),
+                key.as_tagged(heap),
+            )
+            .is_some();
             if exists {
                 continue;
             }
@@ -1306,12 +1257,7 @@ fn get_property_lenient<'a>(
         vm, heap, state, ..
     } = nctx;
     state.handle_scope(|scope| {
-        let action = match Lookup::get(heap, &scope, receiver, name) {
-            Ok(action) => action,
-            Err(err) => return raise_runtime(vm, heap, state, err),
-        };
-        let result = match Object::apply_get_action(vm, heap, state, &scope, receiver, name, action)
-        {
+        let result = match Object::get_property(vm, heap, state, receiver, receiver, name, false) {
             Ok(result) => result,
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
@@ -1383,14 +1329,15 @@ fn set_function_name<'a>(
         let name_key = scope.handle(vm.known().strings.name.get(heap));
         // the closure's own placeholder is never writable nor an accessor,
         // so only explicit member defines match here
-        let explicit = match fn_obj
-            .as_tagged(heap)
-            .lookup(heap, name_key.as_tagged(heap))
-        {
-            Found::MapData { flags, .. } => flags.is_writable(),
-            Found::Accessor { .. } => true,
-            Found::Missing => false,
-            _ => false,
+        let explicit = match Object::ordinary_own_descriptor(
+            heap,
+            &scope,
+            fn_obj.as_tagged(heap).erase(),
+            name_key.as_tagged(heap).erase(),
+        ) {
+            Some(PropertyDescriptor::Data { writable, .. }) => writable,
+            Some(PropertyDescriptor::Accessor { .. }) => true,
+            None => false,
         };
         let defined = if explicit {
             true
@@ -1455,55 +1402,23 @@ fn install_accessor<'a>(
         if target.as_tagged(heap).is_primitive(heap) {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
-        let name = match rt_try!(
+        // completion merges with the current other half
+        let partial = PartialDescriptor {
+            get: is_getter.then_some(closure),
+            set: (!is_getter).then_some(closure),
+            enumerable: Some(enumerable),
+            configurable: Some(true),
+            ..PartialDescriptor::default()
+        };
+        let defined = match rt_try!(
             vm,
             heap,
             state,
-            key.as_tagged(heap).erase().classify_key(heap)
+            Proxy::define_own_property(vm, heap, state, &scope, target, key.erase(), partial)
         ) {
-            Key::Element(i) => Tagged::from(Smi::new(i as i64)),
-            Key::Name(name) => name,
+            Flow::Value(defined) => defined,
+            Flow::Threw => return vm.known().exception.get(heap).erase(),
         };
-        // existing own accessor half, if any (own descriptors only)
-        let mut get = vm.known().undefined.get(heap).erase();
-        let mut set = get;
-        if let Some(obj) = target.as_tagged(heap).as_heap_object() {
-            for d in obj.map(heap).descriptors() {
-                if d.name(heap).ptr_eq(name) && d.flags().is_accessor() {
-                    let pair = d
-                        .value
-                        .get(heap)
-                        .get_as::<AccessorPair>(heap)
-                        .expect("accessor descriptor holds a pair");
-                    get = pair.get.get(heap);
-                    set = pair.set.get(heap);
-                    break;
-                }
-            }
-        }
-        let closure_word = closure.as_tagged(heap);
-        if is_getter {
-            get = closure_word;
-        } else {
-            set = closure_word;
-        }
-        // the name must outlive this non-allocating region: root it
-        let name = scope.handle(name);
-        let desc = PropertyDescriptor::Accessor {
-            get: scope.handle(get),
-            set: scope.handle(set),
-            enumerable,
-            configurable: true,
-        };
-        let target_obj = scope
-            .cast::<Object>(heap, target.as_tagged(heap))
-            .expect("checked object above");
-        let defined = rt_try!(
-            vm,
-            heap,
-            state,
-            Object::define_own_property(heap, &scope, target_obj, name, desc)
-        );
         if !defined {
             return raise_runtime(vm, heap, state, VmError::Type);
         }
@@ -2019,13 +1934,20 @@ fn store_dynamic_name<'a>(
                 let global = scope.handle(vm.known().global_object.get(heap).erase());
                 let threw = state.handle_scope(|scope| -> Result<bool, VmError> {
                     let key = scope.handle(name.as_tagged(heap).erase());
-                    let walk = Lookup::set::<true>(heap, &scope, global, global, key)?;
-                    match Object::apply_set_action(vm, heap, state, &scope, global, value, walk)? {
-                        crate::proxy::Flow::Threw => Ok(true),
-                        crate::proxy::Flow::Value(SetApplied::Rejected) if mode.is_strict() => {
-                            Err(VmError::Type)
-                        }
-                        crate::proxy::Flow::Value(_) => Ok(false),
+                    match Object::set_property(
+                        vm,
+                        heap,
+                        state,
+                        global,
+                        global,
+                        key,
+                        value,
+                        StoreSemantics::WriteThrough,
+                        true,
+                        mode,
+                    )? {
+                        Flow::Threw => Ok(true),
+                        Flow::Value(_) => Ok(false),
                     }
                 });
                 let threw = rt_try!(vm, heap, state, threw);
@@ -2137,8 +2059,7 @@ fn super_get_property<'a>(
         };
         let start = scope.handle(proto);
         let key = scope.handle(name.erase());
-        let action = rt_try!(vm, heap, state, Lookup::get(heap, &scope, start, key));
-        let result = match Object::apply_get_action(vm, heap, state, &scope, recv, key, action) {
+        let result = match Object::get_property(vm, heap, state, start, recv, key, false) {
             Ok(result) => result,
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
@@ -2197,47 +2118,30 @@ fn super_set_property<'a>(
             .as_tagged(heap)
             .as_heap_object()
             .map(|o| o.prototype(heap));
-        let name = match rt_try!(
-            vm,
-            heap,
-            state,
-            key.as_tagged(heap).erase().classify_key(heap)
-        ) {
-            Key::Element(i) => Tagged::from(Smi::new(i as i64)),
-            Key::Name(name) => name,
-        };
         let start = match proto {
             Some(proto) => scope.handle(proto),
             None => recv,
-        };
-        let key = scope.handle(name.erase());
-        let walk = if semantics == StoreSemantics::WriteThrough {
-            rt_try!(
-                vm,
-                heap,
-                state,
-                Lookup::set::<true>(heap, &scope, start, recv, key)
-            )
-        } else {
-            rt_try!(
-                vm,
-                heap,
-                state,
-                Lookup::set::<false>(heap, &scope, start, recv, key)
-            )
         };
         let applied = rt_try!(
             vm,
             heap,
             state,
-            Object::apply_set_action(vm, heap, state, &scope, recv, value, walk)
+            Object::set_property(
+                vm,
+                heap,
+                state,
+                start,
+                recv,
+                key.erase(),
+                value,
+                semantics,
+                false,
+                LanguageMode::Strict
+            )
         );
         match applied {
-            crate::proxy::Flow::Threw => return vm.known().exception.get(heap).erase(),
-            crate::proxy::Flow::Value(SetApplied::Rejected) => {
-                return raise_runtime(vm, heap, state, VmError::Type);
-            }
-            crate::proxy::Flow::Value(_) => {}
+            Flow::Threw => return vm.known().exception.get(heap).erase(),
+            Flow::Value(_) => {}
         }
         value.as_tagged(heap)
     })

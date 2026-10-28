@@ -3,7 +3,7 @@ use core::alloc::Layout;
 use crate::{
     AtomicOptionGcSlot, Cell, Compare, DenseString, EdgeVisitable, GcSlot, Handle, Header, Heap,
     HeapObject, MaybeWeak, MaybeWeakGcSlot, ObjectKind, OptionGcSlot, PrototypeInfo, Smi, Symbol,
-    Tagged, Value, Visitor, WeakFixedArray,
+    Tagged, Value, Visitor, VmError, WeakFixedArray,
 };
 
 #[repr(C)]
@@ -334,8 +334,9 @@ impl EdgeVisitable for Map {
 }
 
 /// The storage kind of an object's indexed elements: what the `elements`
-/// slot points at and how element accesses dispatch. Only meaningful on
-/// `Array` maps; all other kinds leave it at `Packed`.
+/// slot points at and how element accesses dispatch. Meaningful on every
+/// receiver map; ordinary objects leave it at `Packed` until they gain
+/// elements.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum ElementsKind {
@@ -631,6 +632,39 @@ impl SlotDescriptor {
 }
 
 /// A property name: a string (the interner's canonical instance, by
+/// Classified property key: canonical array index or name.
+pub enum Key<'a> {
+    Element(usize),
+    Name(Tagged<'a, SlotName>),
+}
+
+impl<'a> Tagged<'a, Value> {
+    /// Classify an already-coerced property key; out-of-range Smis are
+    /// a caller bug (stringified at `to_property_key`).
+    pub fn classify_key(self, heap: &'a Heap) -> Result<Key<'a>, VmError> {
+        if let Some(v) = self.to_i64() {
+            if (0..u32::MAX as i64).contains(&v) {
+                return usize::try_from(v)
+                    .map(Key::Element)
+                    .map_err(|_| VmError::OutOfBounds);
+            }
+            return Err(VmError::Type);
+        }
+        if let Some(s) = self.get_as::<DenseString>(heap) {
+            if let Some(i) = s.data(heap).canonical_index()
+                && i < u32::MAX as usize
+            {
+                return Ok(Key::Element(i));
+            }
+            return Ok(Key::Name(s.into()));
+        }
+        if let Some(s) = self.get_as::<Symbol>(heap) {
+            return Ok(Key::Name(s.into()));
+        }
+        Err(VmError::Type)
+    }
+}
+
 /// convention — names compare by pointer), a symbol, or a smi index.
 #[repr(transparent)]
 pub struct SlotName(Value);
