@@ -5,9 +5,9 @@ use crate::error::Message;
 use crate::{
     AccessorPair, Args, Compare, Convert, DETAILS_ACCESSOR, DETAILS_CONFIGURABLE,
     DETAILS_ENUMERABLE, DETAILS_WRITABLE, EdgeVisitable, GcSlot, Handle, HandleScope, HandleSlice,
-    Header, Heap, HeapObject, HostCtx, Key, Lookup, Map, NumberDictionary, Object, ObjectKind,
-    PartialDescriptor, PropertyDescriptor, Prototype, SetWalk, SlotName, Smi, Tagged, ThreadState,
-    Transition, VM, Value, Visitor, VmError,
+    Header, Heap, HeapObject, HostCtx, Key, Lookup, LookupActionSet, Map, NumberDictionary, Object,
+    ObjectKind, PartialDescriptor, PropertyDescriptor, Prototype, SetApplied, SlotName, Smi,
+    Tagged, ThreadState, Transition, VM, Value, Visitor, VmError,
 };
 
 pub struct Proxy;
@@ -264,7 +264,7 @@ fn own_descriptor_h<'s>(
             if is_undefined {
                 return Ok(Flow::Value(None));
             }
-            match Lookup::to_property_descriptor(vm, heap, state, scope, result)? {
+            match Object::to_property_descriptor(vm, heap, state, scope, result)? {
                 Some(partial) => Ok(Flow::Value(Some(partial))),
                 None => Ok(Flow::Threw),
             }
@@ -670,50 +670,20 @@ fn materialize_trap_key<'s>(
 /// Apply the result of `Lookup::set` for a proxy whose own
 /// `set` trap is absent. This is proxy forwarding, not the ordinary lookup
 /// core: defining on the receiver may itself run a proxy define trap.
-fn apply_set_walk<'a, 's>(
+fn apply_set_action<'a, 's>(
     vm: &VM,
     heap: &'a mut Heap,
     state: &ThreadState,
     scope: &'s HandleScope<'_>,
     receiver: &Handle<'_, Value>,
     value: &Handle<'_, Value>,
-    walk: SetWalk<'s>,
+    action: LookupActionSet<'s>,
 ) -> Result<Coercion<'a>, VmError> {
-    let receiver = scope.handle(receiver.as_tagged(heap).erase());
-    let value = scope.handle(value.as_tagged(heap).erase());
-    match walk {
-        SetWalk::Done => Ok(Coercion::Value(Convert::boolean(heap, true))),
-        SetWalk::Rejected => Ok(Coercion::Value(Convert::boolean(heap, false))),
-        SetWalk::Threw => Ok(Coercion::Threw),
-        SetWalk::CallSetter(setter) => {
-            let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
-            let result = scope.handle(HostCtx::enter(vm, &mut *heap, state, setter, args, None)?);
-            let exception = heap.known().exception.get(heap);
-            if result.as_tagged(heap) == exception {
-                Ok(Coercion::Threw)
-            } else {
-                Ok(Coercion::Value(Convert::boolean(heap, true)))
-            }
-        }
-        SetWalk::Define { receiver, key } => {
-            // OrdinarySet consults Receiver.[[GetOwnProperty]] before the
-            // define: an existing property preserves its attributes, while
-            // a fresh one uses the full writable/enumerable/configurable
-            // data descriptor.
-            let partial = if matches!(
-                Proxy::own_descriptor(vm, heap, state, scope, receiver, key)?,
-                Flow::Value(Some(_))
-            ) {
-                PartialDescriptor::value(value)
-            } else {
-                PartialDescriptor::new_data(value)
-            };
-            let flow = Proxy::define_own_property(vm, heap, state, scope, receiver, key, partial)?;
-            match flow {
-                Flow::Threw => Ok(Coercion::Threw),
-                Flow::Value(b) => Ok(Coercion::Value(Convert::boolean(heap, b))),
-            }
-        }
+    let result = Object::apply_set_action(vm, heap, state, scope, *receiver, *value, action)?;
+    match result {
+        Flow::Threw => Ok(Coercion::Threw),
+        Flow::Value(SetApplied::Rejected) => Ok(Coercion::Value(Convert::boolean(heap, false))),
+        Flow::Value(_) => Ok(Coercion::Value(Convert::boolean(heap, true))),
     }
 }
 
@@ -805,9 +775,8 @@ fn set_h<'a, 's>(
     match get_trap(vm, heap, state, scope, &handler, Trap::Set)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
         TrapLookup::None => {
-            let walk =
-                Lookup::set::<false>(vm, heap, state, scope, target, *receiver, *name, *value)?;
-            apply_set_walk(vm, heap, state, scope, receiver, value, walk)
+            let walk = Lookup::set::<false>(heap, scope, target, *receiver, *name)?;
+            apply_set_action(vm, heap, state, scope, receiver, value, walk)
         }
         TrapLookup::Trap(t) => {
             let trap_name = materialize_trap_key(heap, scope, name)?;
@@ -870,7 +839,7 @@ fn has_h<'a>(
     let (target, handler) = enter_trap(scope, heap, proxy, Trap::Has)?;
     match get_trap(vm, heap, state, scope, &handler, Trap::Has)? {
         TrapLookup::Threw => Ok(Coercion::Threw),
-        TrapLookup::None => Lookup::has(vm, heap, state, scope, target, *name),
+        TrapLookup::None => Object::has_property(vm, heap, state, scope, target, *name),
         TrapLookup::Trap(t) => {
             let trap_name = materialize_trap_key(heap, scope, name)?;
             let result = call_trap(vm, heap, state, scope, &t, &[handler, target, trap_name])?;

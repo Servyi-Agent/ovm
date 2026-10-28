@@ -485,3 +485,25 @@ pub fn decode_wtf8(bytes: &[u8]) -> Option<Vec<u16>> {
     }
     Some(units)
 }
+
+impl StringData<'_> {
+    /// Canonical array-index form: decimal digits, no leading zero, no
+    /// overflow past `u32::MAX`-worthy lengths.
+    pub fn canonical_index(&self) -> Option<usize> {
+        if self.is_empty() || self.len() > 10 {
+            return None;
+        }
+        if self.code_unit(0) == b'0' as u16 {
+            return (self.len() == 1).then_some(0);
+        }
+        let mut n: usize = 0;
+        for i in 0..self.len() {
+            let c = self.code_unit(i);
+            if !(b'0' as u16..=b'9' as u16).contains(&c) {
+                return None;
+            }
+            n = n.checked_mul(10)?.checked_add((c - b'0' as u16) as usize)?;
+        }
+        Some(n)
+    }
+}

@@ -1,14 +1,14 @@
 use core::alloc::Layout;
 
 use crate::proxy::{Flow, Proxy};
-use crate::reanchor;
 use crate::{
     CallableInfoObject, Coercion, ContextObject, Convert, DETAILS_CONFIGURABLE, DETAILS_DATA,
     DenseString, EdgeVisitable, ElementsKind, EntryClass, FixedArray, Float, FunctionKind, GcSlot,
-    Handle, HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, LoadOutcome, Lookup,
-    Map, NativeIndex, NumberDictionary, NumberDictionaryInit, ObjectKind, PartialDescriptor,
-    PropertyDescriptor, Prototype, SetWalk, SiblingChange, SlotName, Smi, Symbol, Tagged,
-    ThreadState, Transition, VM, Value, Visitor, VmError,
+    Handle, HandleScope, HandleSlice, Header, Heap, HeapObject, Hint, HostCtx, Lookup,
+    LookupActionGet, LookupActionHas, LookupActionSet, Map, NativeIndex, NumberDictionary,
+    NumberDictionaryInit, ObjectKind, PartialDescriptor, PropertyDescriptor, Prototype,
+    SiblingChange, SlotName, Smi, Symbol, Tagged, ThreadState, Transition, VM, Value, Visitor,
+    VmError,
 };
 
 /// What a set action did, for callers that only need to update caches.
@@ -944,22 +944,21 @@ impl Object {
     /// accessor. The lookup itself never runs getters.
     /// Apply a `Lookup::set` action. Proxy traps and setters are invoked
     /// here; the lookup itself only selected the action.
-    pub fn apply_set_walk<'h>(
+    pub fn apply_set_action<'h>(
         vm: &VM,
         heap: &'h mut Heap,
         state: &ThreadState,
         scope: &HandleScope<'_>,
         receiver: Handle<'_, Value>,
         value: Handle<'_, Value>,
-        walk: SetWalk<'_>,
+        action: LookupActionSet<'_>,
     ) -> Result<Flow<SetApplied>, VmError> {
         let receiver = scope.handle(receiver.as_tagged(heap).erase());
         let value = scope.handle(value.as_tagged(heap).erase());
-        match walk {
-            SetWalk::Done => Ok(Flow::Value(SetApplied::Done)),
-            SetWalk::Rejected => Ok(Flow::Value(SetApplied::Rejected)),
-            SetWalk::Threw => Ok(Flow::Threw),
-            SetWalk::CallSetter(setter) => {
+        match action {
+            LookupActionSet::Done => Ok(Flow::Value(SetApplied::Done)),
+            LookupActionSet::Rejected => Ok(Flow::Value(SetApplied::Rejected)),
+            LookupActionSet::CallSetter(setter) => {
                 let args = scope.stage(&[receiver.as_tagged(heap).erase(), value.as_tagged(heap)]);
                 let result = scope.handle(HostCtx::enter(vm, heap, state, setter, args, None)?);
                 if result.as_tagged(heap) == heap.known().exception.get(heap) {
@@ -968,7 +967,44 @@ impl Object {
                     Ok(Flow::Value(SetApplied::CallSetter))
                 }
             }
-            SetWalk::Define { receiver, key } => {
+            LookupActionSet::Proxy { proxy, key } => {
+                match Proxy::set(vm, heap, state, proxy, key, value, receiver)? {
+                    Coercion::Value(v) => {
+                        let v = scope.handle(v);
+                        if v.as_tagged(heap).is_truthy(heap) {
+                            Ok(Flow::Value(SetApplied::Done))
+                        } else {
+                            Ok(Flow::Value(SetApplied::Rejected))
+                        }
+                    }
+                    Coercion::Threw => Ok(Flow::Threw),
+                }
+            }
+            LookupActionSet::StoreElement { holder, index } => {
+                Object::store_array_element(heap, scope, &holder, index, &value)?;
+                Ok(Flow::Value(SetApplied::Done))
+            }
+            LookupActionSet::WriteSlot { holder, offset } => {
+                let host = holder.as_tagged(heap);
+                host.slot(heap, offset)
+                    .set(heap, host.erase(), value.as_tagged(heap));
+                Ok(Flow::Value(SetApplied::Done))
+            }
+            LookupActionSet::WriteParent { holder, index } => {
+                let pairs = holder
+                    .as_tagged(heap)
+                    .map(heap)
+                    .prototype
+                    .get(heap)
+                    .get_as::<FixedArray>(heap)
+                    .expect("parent holder has a parent list");
+                pairs
+                    .as_ref()
+                    .element_slot(index)
+                    .set(heap, pairs.erase(), value.as_tagged(heap));
+                Ok(Flow::Value(SetApplied::Done))
+            }
+            LookupActionSet::Define { receiver, key } => {
                 let current = Proxy::own_descriptor(vm, heap, state, scope, receiver, key)?;
                 let partial = match current {
                     Flow::Threw => return Ok(Flow::Threw),
@@ -999,30 +1035,73 @@ impl Object {
         name: Handle<'_, Value>,
     ) -> Result<Coercion<'h>, VmError> {
         state.handle_scope(|scope| -> Result<Coercion<'h>, VmError> {
-            match Lookup::get(vm, heap, state, &scope, holder, receiver, name)? {
-                LoadOutcome::Value(v) => {
-                    let v = scope.handle(v);
-                    Ok(Coercion::Value(v.as_tagged(heap)))
-                }
-                LoadOutcome::Threw => Ok(Coercion::Threw),
-                LoadOutcome::Getter(getter) => {
-                    let getter = scope.handle(getter);
-                    let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
-                    let result = HostCtx::enter(vm, heap, state, getter, args, None)?;
-                    reanchor!(
-                        result,
-                        heap,
-                        |heap_ref: &Heap, tagged: Tagged<'h, Value>| {
-                            if tagged == heap_ref.known().exception.get(heap_ref) {
-                                Ok(Coercion::Threw)
-                            } else {
-                                Ok(Coercion::Value(tagged))
-                            }
-                        }
-                    );
+            let action = Lookup::get(heap, &scope, holder, name)?;
+            Self::apply_get_action(vm, heap, state, &scope, receiver, name, action)
+        })
+    }
+
+    /// Execute a rooted get action. This is the runtime boundary; the
+    /// lookup core never invokes getters, proxy traps, or string allocation.
+    pub fn apply_get_action<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        receiver: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+        action: LookupActionGet<'_>,
+    ) -> Result<Coercion<'h>, VmError> {
+        match action {
+            LookupActionGet::Value(v) => Ok(Coercion::Value(v.as_tagged(heap))),
+            LookupActionGet::Getter(getter) => {
+                let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
+                let result = HostCtx::enter(vm, heap, state, getter, args, None)?;
+                let result = scope.handle(result);
+                if result.as_tagged(heap) == heap.known().exception.get(heap) {
+                    Ok(Coercion::Threw)
+                } else {
+                    Ok(Coercion::Value(result.as_tagged(heap)))
                 }
             }
-        })
+            LookupActionGet::Proxy(proxy) => Proxy::get(vm, heap, state, proxy, receiver, key),
+            LookupActionGet::StringChar(unit) => {
+                let value = DenseString::from_units(heap, scope, &[unit]);
+                Ok(Coercion::Value(value.as_tagged(heap).erase()))
+            }
+            LookupActionGet::Missing => {
+                Ok(Coercion::Value(heap.known().undefined.get(heap).erase()))
+            }
+        }
+    }
+
+    pub fn has_property<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        start: Handle<'_, Value>,
+        key: Handle<'_, Value>,
+    ) -> Result<Coercion<'h>, VmError> {
+        let action = Lookup::has(heap, scope, start, key)?;
+        Self::apply_has_action(vm, heap, state, scope, key, action)
+    }
+
+    pub fn apply_has_action<'h>(
+        vm: &VM,
+        heap: &'h mut Heap,
+        state: &ThreadState,
+        scope: &HandleScope<'_>,
+        key: Handle<'_, Value>,
+        action: LookupActionHas<'_>,
+    ) -> Result<Coercion<'h>, VmError> {
+        match action {
+            LookupActionHas::Value(found) => Ok(Coercion::Value(Convert::boolean(heap, found))),
+            LookupActionHas::Proxy(proxy) => {
+                let result = Proxy::has(vm, heap, state, proxy, key)?;
+                let _ = scope;
+                Ok(result)
+            }
+        }
     }
 
     pub fn to_numeric(

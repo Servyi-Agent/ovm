@@ -4,7 +4,7 @@ use std::path::Path;
 use kette_compiler::KetteCompiler;
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{Compiler, DefaultInterpreter, JSRuntime, KetteRuntime, Thread, VM};
-use vm::{DenseString, Float, Heap, JavascriptCompiler, LoadOutcome, SlotName, Smi, Tagged, Value};
+use vm::{DenseString, Float, Heap, JavascriptCompiler, SlotName, Smi, Tagged, Value};
 
 fn main() {
     trace::init();
@@ -169,7 +169,7 @@ fn show_value(thread: &mut Thread, v: Value) -> String {
     if let Some(smi) = Smi::decode(v) {
         return smi.value().to_string();
     }
-    {
+    thread.handle_scope(|thread, scope| {
         let heap = thread.heap();
         // Safety: `v` comes from this execution and no collection has run
         // since it was produced.
@@ -193,18 +193,18 @@ fn show_value(thread: &mut Thread, v: Value) -> String {
         if let Some(s) = tagged.get_as::<DenseString>(heap) {
             return s.to_rust_string(heap);
         }
-        if let Some(text) = error_text(heap, tagged) {
+        if let Some(text) = error_text(heap, &scope, tagged) {
             return text;
         }
         format!("{tagged:?}")
-    }
+    })
 }
 
-fn error_text(heap: &Heap, v: Tagged<'_, Value>) -> Option<String> {
+fn error_text(heap: &Heap, scope: &vm::HandleScope<'_>, v: Tagged<'_, Value>) -> Option<String> {
     v.as_heap_object()?;
     let known = heap.known();
-    let name = error_property(heap, v, known.strings.name.get(heap));
-    let message = error_property(heap, v, known.strings.message.get(heap));
+    let name = error_property(heap, scope, v, known.strings.name.get(heap));
+    let message = error_property(heap, scope, v, known.strings.message.get(heap));
     match (name, message) {
         (Some(n), Some(m)) if !m.is_empty() => Some(format!("{n}: {m}")),
         (Some(n), _) => Some(n),
@@ -215,11 +215,14 @@ fn error_text(heap: &Heap, v: Tagged<'_, Value>) -> Option<String> {
 
 fn error_property<'a>(
     heap: &'a Heap,
+    scope: &vm::HandleScope<'_>,
     v: Tagged<'a, Value>,
     name: Tagged<'a, SlotName>,
 ) -> Option<String> {
-    match v.get_no_gc(heap, name) {
-        Ok(LoadOutcome::Value(x)) => x
+    let action = vm::Lookup::get(heap, scope, scope.handle(v), scope.handle(name.erase())).ok()?;
+    match action {
+        vm::LookupActionGet::Value(x) => x
+            .as_tagged(heap)
             .get_as::<DenseString>(heap)
             .map(|s| s.to_rust_string(heap)),
         _ => None,

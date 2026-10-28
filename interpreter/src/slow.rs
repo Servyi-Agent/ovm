@@ -7,10 +7,10 @@ use bytecode::Opcode;
 use vm_core::ic::{InlineCache, StoreHit, StoreOutcomeKind};
 use vm_core::proxy::Proxy;
 use vm_core::{
-    AccessorPair, ChainLoad, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString,
-    EntryClass, Errors, FixedArray, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode,
-    LoadOutcome, Lookup, Object, PropertyDescriptor, Prototype, SetApplied, SetWalk, SlotName, Smi,
-    StoreSemantics, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
+    AccessorPair, Coercion, Compare, ContextInit, ContextObject, Convert, DenseString, EntryClass,
+    Errors, FixedArray, Found, Handle, HandleScope, Heap, Hint, HostCtx, Key, LanguageMode, Lookup,
+    LookupActionGet, LookupActionSet, Object, PropertyDescriptor, Prototype, SetApplied, SlotName,
+    Smi, StoreSemantics, Tagged, ThreadState, VM, Value, VmError, raise_runtime,
 };
 
 #[cfg(not(feature = "fast"))]
@@ -213,21 +213,21 @@ pub fn incdec_body<'a>(
     })
 }
 
-/// Apply the result of `Lookup::set`. The shared `Object::apply_set_walk`
+/// Apply the result of `Lookup::set`. The shared `Object::apply_set_action`
 /// invokes setters/proxy defines; this wrapper adds strict-mode mapping
 /// and the IC outcome kind.
 #[inline(never)]
-pub fn apply_set_walk_body(
+pub fn apply_set_action_body(
     vm: &VM,
     heap: &mut Heap,
     state: &ThreadState,
     receiver: Handle<'_, Value>,
-    walk: SetWalk<'_>,
+    walk: LookupActionSet<'_>,
     value: Handle<'_, Value>,
     mode: LanguageMode,
 ) -> Result<StoreOutcomeKind, ()> {
     state.handle_scope(|scope| {
-        match Object::apply_set_walk(vm, heap, state, &scope, receiver, value, walk) {
+        match Object::apply_set_action(vm, heap, state, &scope, receiver, value, walk) {
             Ok(vm_core::proxy::Flow::Threw) => Err(()),
             Ok(vm_core::proxy::Flow::Value(SetApplied::Rejected)) if mode.is_strict() => {
                 raise_runtime(vm, heap, state, VmError::Type);
@@ -274,15 +274,15 @@ pub fn store_named_tail_body<'a>(
             .map(|o| scope.handle(o.map(heap)));
         let key = scope.handle(name.as_tagged(heap).erase());
         let walk = if semantics == StoreSemantics::Shadow {
-            Lookup::set::<false>(vm, heap, state, &scope, recv, recv, key, value)
+            Lookup::set::<false>(heap, &scope, recv, recv, key)
         } else {
-            Lookup::set::<true>(vm, heap, state, &scope, recv, recv, key, value)
+            Lookup::set::<true>(heap, &scope, recv, recv, key)
         };
         let walk = match walk {
             Ok(walk) => walk,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        let kind = match apply_set_walk_body(vm, heap, state, recv, walk, value, mode) {
+        let kind = match apply_set_action_body(vm, heap, state, recv, walk, value, mode) {
             Ok(kind) => kind,
             Err(()) => return roots.exception.get(heap).erase(),
         };
@@ -814,17 +814,9 @@ fn load_keyed_body<'a>(
                 return scope.handle(unit).as_tagged(heap).erase();
             }
         }
-        let out = match Lookup::get(vm, heap, state, &scope, recv, recv, key.erase()) {
-            Ok(LoadOutcome::Value(v)) => scope.handle(v),
-            Ok(LoadOutcome::Getter(getter)) => {
-                let getter = scope.handle(getter);
-                let args = scope.stage(&[recv.as_tagged(heap).erase()]);
-                match HostCtx::enter(vm, heap, state, getter, args, None) {
-                    Ok(v) => scope.handle(v),
-                    Err(e) => return raise_runtime(vm, heap, state, e),
-                }
-            }
-            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
+        let out = match Object::get_property(vm, heap, state, recv, recv, key) {
+            Ok(Coercion::Value(v)) => scope.handle(v),
+            Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         out.as_tagged(heap).erase()
@@ -913,37 +905,34 @@ pub fn slow_named_load(frame: Frame) {
                 .callable(heap, base)
                 .constant_slot_name(heap, name_idx),
         );
-        let out = match Lookup::get(vm, heap, state, &scope, recv, recv, name.erase()) {
-            Ok(LoadOutcome::Value(v)) => {
-                let v = scope.handle(v);
-                InlineCache::update_load(
-                    heap,
-                    &scope,
-                    state
-                        .stack()
-                        .frame_header(base)
-                        .feedback(heap)
-                        .map(|v| scope.handle(v)),
-                    fb_slot,
-                    recv.as_tagged(heap)
-                        .as_heap_object()
-                        .map(|o| scope.handle(o)),
-                    scope.handle(name.as_tagged(heap).erase().as_name()),
-                    true,
-                );
-                v
-            }
-            Ok(LoadOutcome::Getter(getter)) => {
-                let getter = scope.handle(getter);
-                let args = scope.stage(&[recv.as_tagged(heap).erase()]);
-                match HostCtx::enter(vm, heap, state, getter, args, None) {
-                    Ok(v) => scope.handle(v),
-                    Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
-                }
-            }
-            Ok(LoadOutcome::Threw) => scope.handle(roots.exception.get(heap).erase()),
+        let action = match Lookup::get(heap, &scope, recv, name.erase()) {
+            Ok(action) => action,
             Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
         };
+        let is_getter = matches!(&action, LookupActionGet::Getter(_));
+        let out =
+            match Object::apply_get_action(vm, heap, state, &scope, recv, name.erase(), action) {
+                Ok(Coercion::Value(v)) => scope.handle(v),
+                Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
+                Err(e) => return Acc::set(raise_runtime(vm, heap, state, e)),
+            };
+        if !is_getter {
+            InlineCache::update_load(
+                heap,
+                &scope,
+                state
+                    .stack()
+                    .frame_header(base)
+                    .feedback(heap)
+                    .map(|v| scope.handle(v)),
+                fb_slot,
+                recv.as_tagged(heap)
+                    .as_heap_object()
+                    .map(|o| scope.handle(o)),
+                scope.handle(name.as_tagged(heap).erase().as_name()),
+                true,
+            );
+        }
         Acc::set(out.as_tagged(heap).erase())
     });
     frame.set_acc(v.get(frame.ctx().heap()));
@@ -972,63 +961,55 @@ pub fn global_load_body<'a>(
                 .as_name(),
         );
         let global_handle = scope.handle(global);
-        let out = match Lookup::get_with_missing(
+        let global_value = scope.handle(global_handle.as_tagged(heap).erase());
+        let action = match Lookup::get(heap, &scope, global_value, name.erase()) {
+            Ok(action) => action,
+            Err(e) => return raise_runtime(vm, heap, state, e),
+        };
+        if matches!(action, LookupActionGet::Missing) && !throws {
+            return roots.undefined.get(heap).erase();
+        }
+        if matches!(action, LookupActionGet::Missing) {
+            let text = name
+                .as_tagged(heap)
+                .erase()
+                .get_as::<DenseString>(heap)
+                .map(|s| s.to_rust_string(heap))
+                .unwrap_or_default();
+            let ex = Errors::not_defined(vm, heap, state, &text)
+                .expect("error materialization must not fail");
+            state.set_pending_exception(ex);
+            return roots.exception.get(heap).erase();
+        }
+        let is_getter = matches!(&action, LookupActionGet::Getter(_));
+        let out = match Object::apply_get_action(
             vm,
             heap,
             state,
             &scope,
-            global_handle.erase(),
+            global_value,
             name.erase(),
+            action,
         ) {
-            Ok(ChainLoad::Value(v)) => {
-                let v = scope.handle(v);
-                InlineCache::update_load(
-                    heap,
-                    &scope,
-                    state
-                        .stack()
-                        .frame_header(base)
-                        .feedback(heap)
-                        .map(|v| scope.handle(v)),
-                    fb_slot,
-                    Some(global_handle),
-                    scope.handle(name.as_tagged(heap).erase().as_name()),
-                    false,
-                );
-                v
-            }
-            Ok(ChainLoad::Getter(getter)) => {
-                let getter = scope.handle(getter);
-                if getter.as_tagged(heap) == roots.undefined.get(heap) {
-                    // a setter-only accessor: the read yields undefined
-                    return roots.undefined.get(heap).erase();
-                }
-                let args = scope.stage(&[global_handle.as_tagged(heap).erase()]);
-                match HostCtx::enter(vm, heap, state, getter, args, None) {
-                    Ok(v) => scope.handle(v),
-                    Err(e) => return raise_runtime(vm, heap, state, e),
-                }
-            }
-            Ok(ChainLoad::NotFound) if !throws => {
-                return roots.undefined.get(heap).erase();
-            }
-            Ok(ChainLoad::NotFound) => {
-                // unresolvable reference: GetValue throws a
-                // ReferenceError naming the binding
-                let text = name
-                    .as_tagged(heap)
-                    .erase()
-                    .get_as::<DenseString>(heap)
-                    .map(|s| s.to_rust_string(heap))
-                    .unwrap_or_default();
-                let ex = Errors::not_defined(vm, heap, state, &text)
-                    .expect("error materialization must not fail");
-                state.set_pending_exception(ex);
-                return roots.exception.get(heap).erase();
-            }
-            Ok(ChainLoad::Threw) => return roots.exception.get(heap).erase(),
+            Ok(Coercion::Value(v)) => scope.handle(v),
+            Ok(Coercion::Threw) => scope.handle(roots.exception.get(heap).erase()),
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
+        if !is_getter {
+            InlineCache::update_load(
+                heap,
+                &scope,
+                state
+                    .stack()
+                    .frame_header(base)
+                    .feedback(heap)
+                    .map(|v| scope.handle(v)),
+                fb_slot,
+                Some(global_handle),
+                scope.handle(name.as_tagged(heap).erase().as_name()),
+                false,
+            );
+        }
         out.as_tagged(heap).erase()
     })
 }
@@ -1115,15 +1096,15 @@ pub fn keyed_store_body<'a>(
             return value.as_tagged(heap).erase();
         }
         let walk = if semantics == StoreSemantics::Shadow {
-            Lookup::set::<false>(vm, heap, state, &scope, recv, recv, key.erase(), value)
+            Lookup::set::<false>(heap, &scope, recv, recv, key.erase())
         } else {
-            Lookup::set::<true>(vm, heap, state, &scope, recv, recv, key.erase(), value)
+            Lookup::set::<true>(heap, &scope, recv, recv, key.erase())
         };
         let walk = match walk {
             Ok(walk) => walk,
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
-        match apply_set_walk_body(vm, heap, state, recv, walk, value, mode) {
+        match apply_set_action_body(vm, heap, state, recv, walk, value, mode) {
             Ok(_) => value.as_tagged(heap).erase(),
             Err(()) => roots.exception.get(heap).erase(),
         }
@@ -1290,7 +1271,7 @@ pub fn slow_store_global(frame: Frame) {
         if mode.is_strict()
             && matches!(
                 global.as_tagged(heap).lookup(heap, name.as_tagged(heap)),
-                Lookup::NotFound
+                Found::Missing
             )
         {
             return raise_runtime(vm, heap, state, VmError::Reference);

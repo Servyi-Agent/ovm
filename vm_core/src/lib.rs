@@ -50,7 +50,9 @@ pub use heap::{
 pub use interner::StringInterner;
 pub use interpreter::{Acc, Ctx, Ops, Regs, Unwind};
 pub use language::{LanguageMode, MODE_SLOPPY, MODE_STRICT, mode_from_strict};
-pub use lookup::{ChainLoad, Key, LoadOutcome, Lookup, SetWalk};
+pub use lookup::{
+    Found, Key, Lookup, LookupActionGet, LookupActionHas, LookupActionSet, find_in_chain,
+};
 pub use native::{HostCtx, NativeFn, NativeIndex, NativeRegistry, raise_runtime};
 pub use objects::{
     AccessorPair, CallTarget, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code, CodeInit,

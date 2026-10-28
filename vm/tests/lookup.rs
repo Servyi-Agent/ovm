@@ -1,7 +1,7 @@
 use mark_sweep::{MarkSweep, MarkSweepConfig};
 use vm::{
-    FixedArray, HandleSlice, Heap, Object, PropertyDescriptor, SlotName, Smi, Tagged, Thread, VM,
-    Value,
+    FixedArray, Found, HandleSlice, Heap, Lookup, LookupActionGet, Object, PropertyDescriptor,
+    SlotName, Smi, Tagged, Thread, VM, Value, find_in_chain,
 };
 
 fn smi(v: i64) -> Value {
@@ -96,7 +96,7 @@ fn parents_of(thread: &mut Thread, p1: Value, p2: Value) -> Value {
 }
 
 #[test]
-fn lookup_in_parents_respects_priority_order() {
+fn find_in_chain_respects_priority_order() {
     let (_vm, mut thread) = thread();
     let null = null_word(&mut thread);
     let p1 = object_with(&mut thread, null, &[("a", 1)]);
@@ -109,25 +109,61 @@ fn lookup_in_parents_respects_priority_order() {
     {
         let heap = thread.heap();
         // "a" exists on both parents: the first in priority order wins
-        match unsafe { anchored(heap, protos) }.lookup_in_parents(heap, a) {
-            vm::Lookup::Data { slot, .. } => {
+        match find_in_chain::<false>(heap, unsafe { anchored(heap, protos) }, a.erase(), None)
+            .expect("a lookup")
+        {
+            Found::MapData { slot, .. } => {
                 assert_eq!(slot.get(heap).raw(), smi(1));
             }
             _ => panic!("a must resolve through the first parent"),
         }
         // "b" only exists on the second parent
-        match unsafe { anchored(heap, protos) }.lookup_in_parents(heap, b) {
-            vm::Lookup::Data { slot, .. } => assert_eq!(slot.get(heap).raw(), smi(3)),
+        match find_in_chain::<false>(heap, unsafe { anchored(heap, protos) }, b.erase(), None)
+            .expect("b lookup")
+        {
+            Found::MapData { slot, .. } => assert_eq!(slot.get(heap).raw(), smi(3)),
             _ => panic!("b must resolve through the second parent"),
         }
         assert!(matches!(
-            unsafe { anchored(heap, protos) }.lookup_in_parents(heap, missing),
-            vm::Lookup::NotFound
+            find_in_chain::<false>(
+                heap,
+                unsafe { anchored(heap, protos) },
+                missing.erase(),
+                None
+            )
+            .expect("missing lookup"),
+            Found::Missing
         ));
         // null terminates the chain
         assert!(matches!(
-            unsafe { anchored(heap, null) }.lookup_in_parents(heap, a),
-            vm::Lookup::NotFound
+            find_in_chain::<false>(heap, unsafe { anchored(heap, null) }, a.erase(), None)
+                .expect("null lookup"),
+            Found::Missing
         ));
     };
+}
+
+#[test]
+fn lookup_skips_multi_parent_cycles() {
+    let (_vm, mut thread) = thread();
+    let name_a = slot_name(&mut thread, "a");
+    let name_b = slot_name(&mut thread, "b");
+    let is_undefined = thread.handle_scope(|thread, scope| {
+        let (_vm, heap, _state) = thread.split();
+        let zero = Smi::new(0).into_tagged();
+        let a = heap.allocate_handle::<FixedArray>(scope.stage(&[zero, zero, zero, zero]), &scope);
+        let b = heap.allocate_handle::<FixedArray>(scope.stage(&[zero, zero, zero, zero]), &scope);
+        a.as_tagged(heap).set(heap, 0, name_a.erase());
+        a.as_tagged(heap).set(heap, 2, name_b.erase());
+        b.as_tagged(heap).set(heap, 0, name_a.erase());
+        b.as_tagged(heap).set(heap, 2, name_b.erase());
+        a.as_tagged(heap).set(heap, 1, b.as_tagged(heap).erase());
+        b.as_tagged(heap).set(heap, 3, a.as_tagged(heap).erase());
+
+        let start = scope.handle(a.as_tagged(heap).erase());
+        let key = scope.handle(name_a.erase());
+        let outcome = Lookup::get(heap, &scope, start, key)?;
+        Ok::<bool, vm::VmError>(matches!(outcome, LookupActionGet::Missing))
+    });
+    assert!(is_undefined.expect("cycle lookup must terminate"));
 }

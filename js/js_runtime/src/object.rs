@@ -1,7 +1,6 @@
 //! ES 20.1: the Object constructor, statics, and prototype methods.
 use vm_core::Coercion;
 use vm_core::HostCtx;
-use vm_core::Lookup;
 use vm_core::proxy::Flow;
 use vm_core::proxy::Proxy;
 
@@ -593,7 +592,7 @@ pub fn object_define_property<'a>(
             vm,
             heap,
             state,
-            Lookup::to_property_descriptor(vm, heap, state, &scope, attrs)
+            Object::to_property_descriptor(vm, heap, state, &scope, attrs)
         ) {
             Some(partial) => partial,
             None => return vm.known().exception.get(heap).erase(),

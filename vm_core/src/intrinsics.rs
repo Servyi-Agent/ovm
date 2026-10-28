@@ -4,8 +4,8 @@
 //! its ES section), not JS-visible library functions.
 
 use crate::{
-    AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Handle,
-    HandleSlice, Heap, Key, LanguageMode, LoadOutcome, Lookup, Object, ObjectSlotsInit,
+    AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Found, Handle,
+    HandleSlice, Heap, Key, LanguageMode, Lookup, LookupActionGet, Object, ObjectSlotsInit,
     PropertyDescriptor, SetApplied, SlotName, Smi, StoreSemantics, StringData, StringOwn, Symbol,
     Tagged, Value, VmError, WellKnown,
 };
@@ -279,7 +279,8 @@ fn for_in_enumerate<'a>(
         {
             return vm.known().undefined.get(heap).erase();
         }
-        let Some(level) = for_in_initial_level(heap, vm.known(), subject.as_tagged(heap)) else {
+        let Some(level) = for_in_initial_level(heap, &scope, vm.known(), subject.as_tagged(heap))
+        else {
             return vm.known().undefined.get(heap).erase();
         };
         // the level must survive the key collection and FixedArray
@@ -308,8 +309,9 @@ fn for_in_enumerate<'a>(
 /// their level 0 is the constructor's prototype, so additions to
 /// `Number.prototype` etc. are observable (ES 14.7.5.9: the walk starts
 /// at ToObject(subject)). `None` when the prototype is unreachable.
-fn for_in_initial_level<'a>(
+fn for_in_initial_level<'a, 's>(
     heap: &'a Heap,
+    scope: &'s HandleScope<'_>,
     roots: &WellKnown,
     subject: Tagged<'a, Value>,
 ) -> Option<Tagged<'a, Value>> {
@@ -337,15 +339,15 @@ fn for_in_initial_level<'a>(
         "Boolean" => strings.boolean_ctor.get(heap),
         _ => strings.symbol_ctor.get(heap),
     };
-    let ctor = match global.erase().get_no_gc(heap, ctor_handle).ok()? {
-        LoadOutcome::Value(v) if v.is_strong_ptr() => v,
+    let global = scope.handle(global.erase());
+    let ctor_key = scope.handle(ctor_handle.erase());
+    let ctor = match Lookup::get(heap, scope, global, ctor_key).ok()? {
+        LookupActionGet::Value(v) if v.as_tagged(heap).is_strong_ptr() => v.as_tagged(heap),
         _ => return None,
     };
-    match ctor
-        .get_no_gc(heap, roots.strings.prototype.get(heap))
-        .ok()?
-    {
-        LoadOutcome::Value(p) if p.is_strong_ptr() => Some(p),
+    let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
+    match Lookup::get(heap, scope, scope.handle(ctor), proto_key).ok()? {
+        LookupActionGet::Value(p) if p.as_tagged(heap).is_strong_ptr() => Some(p.as_tagged(heap)),
         _ => None,
     }
 }
@@ -601,26 +603,28 @@ fn for_in_next_level<'s>(
     if level.get_as::<DenseString>(heap).is_some() {
         // String.prototype via the global object (both plain data
         // lookups; no user code can run)
-        let global = roots.global_object.get(heap);
-        let Some(string_ctor) = global
-            .erase()
-            .get_no_gc(heap, roots.strings.string.get(heap))
-            .ok()
-            .and_then(|o| match o {
-                LoadOutcome::Value(v) => Some(v),
-                LoadOutcome::Getter(_) | LoadOutcome::Threw => None,
-            })
+        let global = scope.handle(roots.global_object.get(heap).erase());
+        let ctor_key = scope.handle(roots.strings.string.get(heap).erase());
+        let Some(string_ctor) =
+            Lookup::get(heap, scope, global, ctor_key)
+                .ok()
+                .and_then(|action| match action {
+                    LookupActionGet::Value(v) => Some(v),
+                    _ => None,
+                })
         else {
             return Ok(None);
         };
-        let proto = string_ctor
-            .get_no_gc(heap, roots.strings.prototype.get(heap))
+        let proto_key = scope.handle(roots.strings.prototype.get(heap).erase());
+        let proto = Lookup::get(heap, scope, string_ctor, proto_key)
             .ok()
-            .and_then(|o| match o {
-                LoadOutcome::Value(v) => Some(v),
-                LoadOutcome::Getter(_) | LoadOutcome::Threw => None,
+            .and_then(|action| match action {
+                LookupActionGet::Value(v) => Some(v),
+                _ => None,
             });
-        return Ok(proto.filter(|p| p.is_strong_ptr()).map(|p| scope.handle(p)));
+        return Ok(proto
+            .filter(|p| p.as_tagged(heap).is_strong_ptr())
+            .map(|p| scope.handle(p.as_tagged(heap).erase())));
     }
     let Some(obj) = level.as_heap_object() else {
         return Ok(None);
@@ -846,11 +850,12 @@ fn has_property<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
+        let key_value = scope.handle(key.as_tagged(heap).erase());
         let has = match rt_try!(
             vm,
             heap,
             state,
-            Lookup::has(vm, heap, state, &scope, obj, key.erase())
+            Object::has_property(vm, heap, state, &scope, obj, key_value)
         ) {
             Coercion::Threw => return vm.known().exception.get(heap).erase(),
             Coercion::Value(v) => scope.handle(v),
@@ -972,7 +977,7 @@ fn copy_data_properties<'a>(
                 target
                     .as_tagged(heap)
                     .lookup(heap, key.as_tagged(heap).as_name()),
-                Lookup::NotFound
+                Found::Missing
             );
             if exists {
                 continue;
@@ -1301,33 +1306,21 @@ fn get_property_lenient<'a>(
         vm, heap, state, ..
     } = nctx;
     state.handle_scope(|scope| {
-        let (value, getter) = match rt_try!(
-            vm,
-            heap,
-            state,
-            receiver
-                .as_tagged(heap)
-                .get_no_gc(heap, name.as_tagged(heap).as_name())
-        ) {
-            LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
-            LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
-            LoadOutcome::Threw => return vm.known().exception.get(heap).erase(),
-        };
-        if let Some(v) = value {
-            return v.as_tagged(heap);
-        }
-        let getter = getter.expect("one of the two arms is set");
-        let getter_tagged = getter.as_tagged(heap);
-        let skip = getter_tagged.ptr_eq(vm.known().undefined.get(heap).erase())
-            || !getter_tagged.is_callable(heap);
-        if skip {
-            return vm.known().undefined.get(heap).erase();
-        }
-        let recv = receiver.as_tagged(heap);
-        let call_args = scope.stage(&[recv]);
-        match HostCtx::enter(vm, heap, state, getter, call_args, None).map(|v| v.raw()) {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
+        let action = match Lookup::get(heap, &scope, receiver, name) {
+            Ok(action) => action,
             Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        let result = match Object::apply_get_action(vm, heap, state, &scope, receiver, name, action)
+        {
+            Ok(result) => result,
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        match result {
+            Coercion::Value(v) => {
+                let v = scope.handle(v);
+                v.as_tagged(heap).erase()
+            }
+            Coercion::Threw => vm.known().exception.get(heap).erase(),
         }
     })
 }
@@ -1394,9 +1387,10 @@ fn set_function_name<'a>(
             .as_tagged(heap)
             .lookup(heap, name_key.as_tagged(heap))
         {
-            Lookup::Data { flags, .. } => flags.is_writable(),
-            Lookup::Accessor { .. } => true,
-            Lookup::NotFound => false,
+            Found::MapData { flags, .. } => flags.is_writable(),
+            Found::Accessor { .. } => true,
+            Found::Missing => false,
+            _ => false,
         };
         let defined = if explicit {
             true
@@ -2025,9 +2019,8 @@ fn store_dynamic_name<'a>(
                 let global = scope.handle(vm.known().global_object.get(heap).erase());
                 let threw = state.handle_scope(|scope| -> Result<bool, VmError> {
                     let key = scope.handle(name.as_tagged(heap).erase());
-                    let walk =
-                        Lookup::set::<true>(vm, heap, state, &scope, global, global, key, value)?;
-                    match Object::apply_set_walk(vm, heap, state, &scope, global, value, walk)? {
+                    let walk = Lookup::set::<true>(heap, &scope, global, global, key)?;
+                    match Object::apply_set_action(vm, heap, state, &scope, global, value, walk)? {
                         crate::proxy::Flow::Threw => Ok(true),
                         crate::proxy::Flow::Value(SetApplied::Rejected) if mode.is_strict() => {
                             Err(VmError::Type)
@@ -2126,7 +2119,10 @@ fn super_get_property<'a>(
         };
         // root the name: the tagged result anchors the `&mut` borrow
         let key = scope.handle(key);
-        let proto = home.as_tagged(heap).home_proto(heap);
+        let proto = home
+            .as_tagged(heap)
+            .as_heap_object()
+            .map(|o| o.prototype(heap));
         let name = match rt_try!(
             vm,
             heap,
@@ -2141,31 +2137,17 @@ fn super_get_property<'a>(
         };
         let start = scope.handle(proto);
         let key = scope.handle(name.erase());
-        let outcome = match rt_try!(
-            vm,
-            heap,
-            state,
-            Lookup::get(vm, heap, state, &scope, start, recv, key)
-        ) {
-            LoadOutcome::Value(v) => (Some(scope.handle(v)), None),
-            LoadOutcome::Getter(g) => (None, Some(scope.handle(g))),
-            LoadOutcome::Threw => return vm.known().exception.get(heap).erase(),
-        };
-        if let Some(v) = outcome.0 {
-            return v.as_tagged(heap);
-        }
-        let getter = outcome.1.expect("one of the two arms is set");
-        let getter_tagged = getter.as_tagged(heap);
-        let skip = getter_tagged.ptr_eq(vm.known().undefined.get(heap).erase())
-            || !getter_tagged.is_callable(heap);
-        if skip {
-            return vm.known().undefined.get(heap).erase();
-        }
-        let r = recv.as_tagged(heap);
-        let call_args = scope.stage(&[r]);
-        match HostCtx::enter(vm, heap, state, getter, call_args, None).map(|v| v.raw()) {
-            Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
+        let action = rt_try!(vm, heap, state, Lookup::get(heap, &scope, start, key));
+        let result = match Object::apply_get_action(vm, heap, state, &scope, recv, key, action) {
+            Ok(result) => result,
             Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        match result {
+            Coercion::Value(v) => {
+                let v = scope.handle(v);
+                v.as_tagged(heap).erase()
+            }
+            Coercion::Threw => vm.known().exception.get(heap).erase(),
         }
     })
 }
@@ -2211,7 +2193,10 @@ fn super_set_property<'a>(
         } else {
             StoreSemantics::Shadow
         };
-        let proto = home.as_tagged(heap).home_proto(heap);
+        let proto = home
+            .as_tagged(heap)
+            .as_heap_object()
+            .map(|o| o.prototype(heap));
         let name = match rt_try!(
             vm,
             heap,
@@ -2231,21 +2216,21 @@ fn super_set_property<'a>(
                 vm,
                 heap,
                 state,
-                Lookup::set::<true>(vm, heap, state, &scope, start, recv, key, value)
+                Lookup::set::<true>(heap, &scope, start, recv, key)
             )
         } else {
             rt_try!(
                 vm,
                 heap,
                 state,
-                Lookup::set::<false>(vm, heap, state, &scope, start, recv, key, value)
+                Lookup::set::<false>(heap, &scope, start, recv, key)
             )
         };
         let applied = rt_try!(
             vm,
             heap,
             state,
-            Object::apply_set_walk(vm, heap, state, &scope, recv, value, walk)
+            Object::apply_set_action(vm, heap, state, &scope, recv, value, walk)
         );
         match applied {
             crate::proxy::Flow::Threw => return vm.known().exception.get(heap).erase(),

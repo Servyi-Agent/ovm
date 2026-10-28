@@ -1,3 +1,4 @@
+use crate::lookup::Found as LookupFound;
 use crate::{
     AccessorPair, CallTarget, CallableInfoObject, Cell, ContextObject, DataHandler,
     DataHandlerInit, DenseString, FeedbackVector, FixedArray, FunctionKind, Handle, HandleScope,
@@ -112,24 +113,6 @@ enum Handler<'s> {
     WeakPair(Handle<'s, AccessorPair>),
     /// A store transition: migrate the receiver to this map.
     WeakMap(Handle<'s, Map>),
-}
-
-/// What a walk step found.
-enum Found<'s> {
-    Data {
-        offset: usize,
-        holder: Handle<'s, Object>,
-    },
-    Accessor {
-        pair: Handle<'s, AccessorPair>,
-        holder: Handle<'s, Object>,
-    },
-    ParentName {
-        index: i64,
-        holder: Handle<'s, Object>,
-    },
-    /// a prototype shape the encoding cannot describe
-    Uncacheable,
 }
 
 /// What the load analysis found, rooted so it survives handler
@@ -307,86 +290,6 @@ fn set_word_at(
     word: Tagged<'_, MaybeWeak<Value>>,
 ) {
     arr.set(heap, i, word);
-}
-
-fn walk<'s>(
-    heap: &Heap,
-    scope: &'s HandleScope<'_>,
-    obj: Tagged<'_, Object>,
-    name: Tagged<'_, SlotName>,
-) -> Option<Found<'s>> {
-    let map = obj.map(heap);
-    // Exotic own properties depend on the holder (array length, String
-    // wrapper length/index), so a handler for the receiver cannot describe
-    // a chain that passes through one. Fall back to the slow walk.
-    if obj.array_length(heap, name).is_some()
-        || DenseString::from_receiver(heap, obj.erase())
-            .is_some_and(|s| s.own_key(heap, name).is_some())
-    {
-        return Some(Found::Uncacheable);
-    }
-    // accessor entries in a sparse hop act like accessor descriptors
-    if let Some(pair) = obj.dictionary_accessor(heap, name.as_index()) {
-        return Some(Found::Accessor {
-            pair: scope.handle(pair),
-            holder: scope.handle(obj),
-        });
-    }
-    for d in map.descriptors() {
-        if !d.name(heap).ptr_eq(name) {
-            continue;
-        }
-        if d.flags().is_accessor() {
-            let pair = d
-                .value
-                .get(heap)
-                .get_as::<AccessorPair>(heap)
-                .expect("accessor descriptor holds an AccessorPair");
-            return Some(Found::Accessor {
-                pair: scope.handle(pair),
-                holder: scope.handle(obj),
-            });
-        }
-        return Some(Found::Data {
-            offset: d.offset(),
-            holder: scope.handle(obj),
-        });
-    }
-    let proto = map.prototype.get(heap);
-    if proto == heap.known().null.get(heap) {
-        return None;
-    }
-    if let Some(pairs) = proto.get_as::<FixedArray>(heap) {
-        let mut i = 0;
-        while i < pairs.len() {
-            if pairs.at(heap, i).ptr_eq(name) {
-                return Some(Found::ParentName {
-                    index: (i + 1) as i64,
-                    holder: scope.handle(obj),
-                });
-            }
-            i += 2;
-        }
-        let mut i = 1;
-        while i < pairs.len() {
-            let Some(parent) = pairs.at(heap, i).as_heap_object() else {
-                i += 2;
-                continue;
-            };
-            if let Some(found) = walk(heap, scope, parent, name) {
-                return Some(found);
-            }
-            i += 2;
-        }
-        return None;
-    }
-    let Some(proto_obj) = proto.as_heap_object() else {
-        return Some(Found::Uncacheable);
-    };
-    if !proto_obj.map(heap).kind().kind().is_js_receiver() {
-        return Some(Found::Uncacheable);
-    }
-    walk(heap, scope, proto_obj, name)
 }
 
 /// Build a guarded handler. `None` when the receiver's prototype closure
@@ -581,27 +484,72 @@ fn analyze_load<'s>(
     if receiver.array_length(heap, name).is_some() {
         return mk(PlanKind::ArrayLength, 0, None, None, true);
     }
-    match walk(heap, scope, receiver, name) {
-        Some(Found::Data { offset, holder }) => {
+    let found =
+        match crate::lookup::find_in_chain::<false>(heap, receiver.erase(), name.erase(), None) {
+            Ok(found) => found,
+            Err(_) => return mk(PlanKind::Slow, 0, None, None, false),
+        };
+    match found {
+        LookupFound::MapData { holder, offset, .. } => {
+            let holder = scope.handle(holder);
+            if !holder
+                .as_tagged(heap)
+                .map(heap)
+                .kind()
+                .kind()
+                .is_js_receiver()
+            {
+                return mk(PlanKind::Slow, 0, None, None, false);
+            }
             let own = holder.as_tagged(heap).ptr_eq(receiver);
             mk(PlanKind::Field, offset, None, Some(holder), own)
         }
-        Some(Found::Accessor { pair, holder }) => {
+        LookupFound::Accessor { holder, pair, .. } => {
+            let holder = scope.handle(holder);
+            if !holder
+                .as_tagged(heap)
+                .map(heap)
+                .kind()
+                .kind()
+                .is_js_receiver()
+            {
+                return mk(PlanKind::Slow, 0, None, None, false);
+            }
             let own = holder.as_tagged(heap).ptr_eq(receiver);
-            mk(PlanKind::Accessor, 0, Some(pair), Some(holder), own)
+            mk(
+                PlanKind::Accessor,
+                0,
+                Some(scope.handle(pair)),
+                Some(holder),
+                own,
+            )
         }
-        Some(Found::ParentName { index, holder }) => mk(
-            PlanKind::ParentName,
-            index as usize,
-            None,
-            Some(holder),
-            false,
-        ),
-        None => {
+        LookupFound::Parent {
+            holder,
+            index,
+            value: _,
+            ..
+        } => {
+            let holder = scope.handle(holder);
+            if !holder
+                .as_tagged(heap)
+                .map(heap)
+                .kind()
+                .kind()
+                .is_js_receiver()
+            {
+                return mk(PlanKind::Slow, 0, None, None, false);
+            }
+            mk(PlanKind::ParentName, index, None, Some(holder), false)
+        }
+        LookupFound::String { .. }
+        | LookupFound::Element { .. }
+        | LookupFound::ArrayLength { .. }
+        | LookupFound::Proxy(_) => mk(PlanKind::Slow, 0, None, None, false),
+        LookupFound::Missing => {
             let own = !has_parents(heap, receiver_map.as_tagged(heap));
             mk(PlanKind::NonExistent, 0, None, None, own)
         }
-        Some(Found::Uncacheable) => mk(PlanKind::Slow, 0, None, None, false),
     }
 }
 
@@ -795,13 +743,18 @@ fn analyze_store<'s>(
         setter_own: false,
         receiver_map: scope.handle(receiver.map(heap)),
     };
-    match walk(heap, scope, receiver, name) {
-        Some(Found::Data { offset, holder }) if holder.as_tagged(heap).ptr_eq(receiver) => {
+    let found =
+        match crate::lookup::find_in_chain::<false>(heap, receiver.erase(), name.erase(), None) {
+            Ok(found) => found,
+            Err(_) => return plan,
+        };
+    match found {
+        LookupFound::MapData { holder, offset, .. } if holder.ptr_eq(receiver) => {
             plan.field = Some(offset)
         }
-        Some(Found::Accessor { pair, holder }) => {
-            plan.setter_own = holder.as_tagged(heap).ptr_eq(receiver);
-            plan.setter = Some(pair);
+        LookupFound::Accessor { pair, holder, .. } => {
+            plan.setter_own = holder.ptr_eq(receiver);
+            plan.setter = Some(scope.handle(pair));
         }
         _ => {}
     }
