@@ -707,10 +707,14 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
     // Date instances carry the [[DateValue]] in one in-object value slot
     // (date.rs stores it via `new_object`); declaring it here keeps the
     // map's layout in sync so later property stores transition correctly.
+    // The DATE flag is inherited by every transition map, so adding
+    // properties to a Date does not lose its internal slot.
     let date_instance_map = alloc_parent_map_with_slots(
         heap,
         &scope,
-        MapKind::OBJECT.union(MapKind::EXTENDABLE),
+        MapKind::OBJECT
+            .union(MapKind::EXTENDABLE)
+            .union(MapKind::DATE),
         date_prototype,
         1,
     );

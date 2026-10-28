@@ -11,6 +11,8 @@ pub enum VmError {
     NotExtensible,
     /// Unresolvable binding or TDZ access (spec: ReferenceError).
     Reference,
+    /// Date time value outside the valid range (spec: RangeError).
+    InvalidTime,
     /// TypeError with a specific message, by registry id.
     Message(Message),
 }
@@ -85,7 +87,9 @@ impl VmError {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Arity | Self::Type | Self::NotExtensible | Self::Message(_) => "TypeError",
-            Self::Overflow | Self::OutOfBounds | Self::StackOverflow => "RangeError",
+            Self::Overflow | Self::OutOfBounds | Self::InvalidTime | Self::StackOverflow => {
+                "RangeError"
+            }
             Self::Reference => "ReferenceError",
         }
     }
@@ -97,6 +101,7 @@ impl VmError {
             Self::Type => "invalid operand type",
             Self::Overflow => "value out of range",
             Self::OutOfBounds => "index out of bounds",
+            Self::InvalidTime => "Invalid time value",
             Self::StackOverflow => "maximum call stack size exceeded",
             Self::NotExtensible => "object is not extensible",
             Self::Reference => "cannot access variable before initialization",

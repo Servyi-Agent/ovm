@@ -25,11 +25,12 @@ use array::{
 };
 use boolean::{boolean_constructor, boolean_to_string, boolean_value_of};
 use date::{
-    date_constructor, date_now, date_parse, date_to_gmt_string, date_to_iso_string, date_to_string,
-    date_value_of,
+    date_constructor, date_get_time, date_now, date_parse, date_to_gmt_string, date_to_iso_string,
+    date_to_json, date_to_string, date_value_of,
 };
 use error::{
-    error_constructor, error_to_string, reference_error_constructor, type_error_constructor,
+    error_constructor, error_to_string, range_error_constructor, reference_error_constructor,
+    type_error_constructor,
 };
 use function::{
     BIND_PRELUDE, function_apply, function_bind, function_call, function_constructor,
@@ -95,6 +96,7 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         string_value_of: vm.register_runtime(string_value_of),
         string_to_string: vm.register_runtime(string_to_string),
         reference_error: vm.register_runtime(reference_error_constructor),
+        range_error: vm.register_runtime(range_error_constructor),
         function_to_string: vm.register_runtime(function_to_string),
         object_to_string: vm.register_runtime(object_to_string),
         number: vm.register_runtime(number_constructor),
@@ -122,8 +124,10 @@ pub fn register_builtin_runtimes(vm: &mut VM) -> BuiltinIndices {
         date: vm.register_runtime(date_constructor),
         date_now: vm.register_runtime(date_now),
         date_value_of: vm.register_runtime(date_value_of),
+        date_get_time: vm.register_runtime(date_get_time),
         date_to_string: vm.register_runtime(date_to_string),
         date_to_iso_string: vm.register_runtime(date_to_iso_string),
+        date_to_json: vm.register_runtime(date_to_json),
         date_to_gmt_string: vm.register_runtime(date_to_gmt_string),
         date_parse: vm.register_runtime(date_parse),
         print: vm.register_runtime(print),
@@ -177,6 +181,7 @@ pub struct BuiltinIndices {
     pub string_value_of: NativeIndex,
     pub string_to_string: NativeIndex,
     pub reference_error: NativeIndex,
+    pub range_error: NativeIndex,
     pub function_to_string: NativeIndex,
     pub object_to_string: NativeIndex,
     pub number: NativeIndex,
@@ -204,8 +209,10 @@ pub struct BuiltinIndices {
     pub date: NativeIndex,
     pub date_now: NativeIndex,
     pub date_value_of: NativeIndex,
+    pub date_get_time: NativeIndex,
     pub date_to_string: NativeIndex,
     pub date_to_iso_string: NativeIndex,
+    pub date_to_json: NativeIndex,
     pub date_to_gmt_string: NativeIndex,
     pub date_parse: NativeIndex,
     pub print: NativeIndex,
@@ -485,6 +492,40 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
                 prototype: reference_error_proto.erase(),
             });
             known.reference_error_map.init(map);
+        }
+
+        let (_, range_error_proto) = Object::install_constructor(
+            thread,
+            &scope,
+            idx.range_error,
+            "RangeError",
+            error_proto,
+        )?;
+        let range_error_name = thread.intern(&scope, "RangeError");
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            range_error_proto,
+            wks_name,
+            PropertyDescriptor::data(range_error_name.erase()),
+        )?;
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            range_error_proto,
+            wks_message,
+            PropertyDescriptor::data(wks_empty),
+        )?;
+        {
+            let heap = thread.heap();
+
+            let map = heap.allocate::<Map>(MapInit {
+                kind: MapKind::OBJECT.union(MapKind::EXTENDABLE),
+                value_slot_count: 0,
+                descriptors: &[],
+                prototype: range_error_proto.erase(),
+            });
+            known.range_error_map.init(map);
         }
 
         // ---- Function (constructor: dynamic bodies via eval, ES 20.2.1) --------
@@ -795,6 +836,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             PropertyDescriptor::data(date_prototype.erase()),
         )?;
         Object::install_method(thread, &scope, date_prototype, "valueOf", idx.date_value_of)?;
+        Object::install_method(thread, &scope, date_prototype, "getTime", idx.date_get_time)?;
         Object::install_method(
             thread,
             &scope,
@@ -809,6 +851,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             "toISOString",
             idx.date_to_iso_string,
         )?;
+        Object::install_method(thread, &scope, date_prototype, "toJSON", idx.date_to_json)?;
         Object::install_method(
             thread,
             &scope,

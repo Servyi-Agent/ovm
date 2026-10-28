@@ -30,6 +30,14 @@ pub fn reference_error_constructor<'a>(
     make_error(nctx, args, "ReferenceError")
 }
 
+pub fn range_error_constructor<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    make_error(nctx, args, "RangeError")
+}
+
 pub fn make_error<'a>(nctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
@@ -54,6 +62,7 @@ pub fn make_error<'a>(nctx: HostCtx<'a>, args: Args, class: &str) -> Tagged<'a, 
         let map = match class {
             "TypeError" => vm.known().type_error_map.get(heap),
             "ReferenceError" => vm.known().reference_error_map.get(heap),
+            "RangeError" => vm.known().range_error_map.get(heap),
             _ => vm.known().error_map.get(heap),
         };
 

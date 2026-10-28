@@ -1,61 +1,100 @@
-//! ES 21.4 (Date): epoch-millisecond instants. The VM has no time-zone
-//! database, so every operation is UTC. `Date.parse`/`toISOString`/
-//! `toGMTString`/`toString` are written to round-trip each other exactly.
+//! ES 21.4 (Date): integral epoch-millisecond instants.
+//!
+//! The VM has no time-zone database, so every operation is UTC. Local-time
+//! forms (`toString`, the component constructor) therefore coincide with
+//! their UTC counterparts.
+//!
+//! TODO(timezone): `TZ` is ignored and `LocalTime`/`UTC` are the identity.
+//! ES 21.4.1.24 explicitly allows a UTC-only host, but once tz data is wired
+//! up (`GetNamedTimeZoneOffsetNanoseconds`), offsetless `Date.parse` input,
+//! the component constructor, `toString`/`toTimeString`, `getTimezoneOffset`
+//! and the local getters/setters need to use it.
+//!
+//! Time values follow ES 21.4.1.1/21.4.1.31: integral milliseconds in the
+//! inclusive range ±8.64e15; anything else is NaN. Every entry point funnels
+//! through [`time_clip`].
 
 use vm_core::Handle;
 use vm_core::HostCtx;
 use vm_core::Object;
+use vm_core::raise_runtime;
 use vm_core::{Args, Heap};
-use vm_core::{DenseString, Tagged, Value, VmError};
+use vm_core::{Coercion, Hint};
+use vm_core::{DenseString, MapKind, Tagged, Value, VmError};
 use vm_core::{ThreadState, VM};
-use vm_core::{raise_runtime, rt_try};
 
 /// Milliseconds in a UTC day.
-const MS_PER_DAY: f64 = 86_400_000.0;
+const MS_PER_DAY_I64: i64 = 86_400_000;
+/// The largest time value (ES 21.4.1.1): 100_000_000 days.
+const MAX_TIME_MS: f64 = 8.64e15;
+const MAX_TIME_MS_I128: i128 = 8_640_000_000_000_000;
+/// Component values beyond this magnitude can never reach a valid instant;
+/// rejecting them early keeps the civil arithmetic in range.
+const MAX_COMPONENT: f64 = 1e15;
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// Milliseconds since the Unix epoch.
+/// ES 21.4.1.31 TimeClip: non-finite and out-of-range instants are NaN,
+/// everything else is truncated toward zero and normalized to `+0`.
+fn time_clip(time: f64) -> f64 {
+    if !time.is_finite() || time.abs() > MAX_TIME_MS {
+        return f64::NAN;
+    }
+    time.trunc() + 0.0
+}
+
+/// TimeClip for an already-integral instant.
+fn time_clip_i128(time: i128) -> f64 {
+    if time.abs() > MAX_TIME_MS_I128 {
+        f64::NAN
+    } else {
+        time as f64
+    }
+}
+
+/// Milliseconds since the Unix epoch, truncated to a whole millisecond.
 fn now_millis() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64() * 1000.0)
+        .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0)
 }
 
-// ---- civil math (proleptic Gregorian; exact over the ±1e8-day range) ----
-
 /// Days from 1970-01-01 to (year, month, day).
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
+///
+/// `month` is 1-based. `day` may be outside the month's range: the result is
+/// the ordinary day count plus `day - 1`, exactly the normalisation ES
+/// MakeDay requires (e.g. February 30 → March 1).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
     let yoe = y - era * 400;
-    let mp = ((m + 9) % 12) as i64;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
 }
 
 /// (year, month, day) from days since 1970-01-01.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { y + 1 } else { y }, month, day)
 }
 
 /// Weekday of a day count (0 = Sunday; 1970-01-01 was a Thursday).
-fn week_day(z: i64) -> usize {
-    (z + 4).rem_euclid(7) as usize
+fn week_day(days: i64) -> usize {
+    (days + 4).rem_euclid(7) as usize
 }
 
 /// A broken-down UTC instant.
@@ -70,12 +109,15 @@ struct Broken {
     weekday: usize,
 }
 
-fn break_down(t: f64) -> Option<Broken> {
-    if !t.is_finite() {
+/// Break a valid time value down into UTC fields. `None` for NaN and
+/// out-of-range values (which cannot arise from TimeClip'd slots).
+fn break_down(time: f64) -> Option<Broken> {
+    if !time.is_finite() || time.abs() > MAX_TIME_MS {
         return None;
     }
-    let days = (t / MS_PER_DAY).floor() as i64;
-    let tod = t.rem_euclid(MS_PER_DAY) as i64;
+    let time = time.trunc() as i64;
+    let days = time.div_euclid(MS_PER_DAY_I64);
+    let tod = time.rem_euclid(MS_PER_DAY_I64);
     let (year, month, day) = civil_from_days(days);
     Some(Broken {
         year,
@@ -90,21 +132,24 @@ fn break_down(t: f64) -> Option<Broken> {
 }
 
 /// The year in ISO form: 4 digits in 0..=9999, else sign + 6 digits.
-fn year_iso(y: i64) -> String {
-    if (0..=9999).contains(&y) {
-        format!("{y:04}")
-    } else if y < 0 {
-        format!("-{:06}", y.unsigned_abs())
+fn year_iso(year: i64) -> String {
+    if (0..=9999).contains(&year) {
+        format!("{year:04}")
+    } else if year < 0 {
+        format!("-{:06}", year.unsigned_abs())
     } else {
-        format!("+{:06}", y.unsigned_abs())
+        format!("+{:06}", year.unsigned_abs())
     }
 }
 
-fn year_date_string(y: i64) -> String {
-    if (0..=9999).contains(&y) {
-        format!("{y:04}")
+/// The year in the legacy Date string forms: at least 4 digits for
+/// 0..=9999 (and for negative years, after the sign), else the plain
+/// signed number, in the legacy date-string format.
+fn year_date_string(year: i64) -> String {
+    if year < 0 {
+        format!("-{:04}", year.unsigned_abs())
     } else {
-        format!("{y}")
+        format!("{year:04}")
     }
 }
 
@@ -147,144 +192,202 @@ fn format_date_string(b: &Broken) -> String {
     )
 }
 
-// ---- parsing ---------------------------------------------------------------
-
-/// A decimal digit run at `i`; returns (value, next index).
-fn parse_uint(b: &[u8], i: usize) -> Option<(i64, usize)> {
-    let start = i;
-    let mut j = i;
-    while j < b.len() && b[j].is_ascii_digit() {
-        j += 1;
-    }
-    if j == start {
-        return None;
-    }
-    let s = core::str::from_utf8(&b[start..j]).ok()?;
-    Some((s.parse().ok()?, j))
+/// Parse text the way both `Date.parse` and the one-argument constructor do.
+fn parse_text(text: &str) -> f64 {
+    parse_iso(text)
+        .or_else(|| parse_loose(text))
+        .unwrap_or(f64::NAN)
 }
 
-/// `YYYY-MM-DDTHH:mm:ss(.sss)(Z|±HH:mm)`; missing tail parts default per
-/// ES (date-only forms are UTC). `None` when the input is not ISO-shaped.
-fn parse_iso(s: &str) -> Option<f64> {
-    let b = s.as_bytes();
-    let mut i = 0;
-    let mut sign = 1i64;
-    match b.first() {
-        Some(b'+') => i += 1,
-        Some(b'-') => {
-            sign = -1;
-            i += 1;
+/// Exactly `len` ASCII digits at `at`, as an integer.
+fn fixed_digits(bytes: &[u8], at: usize, len: usize) -> Option<(i64, usize)> {
+    let end = at.checked_add(len)?;
+    let digits = bytes.get(at..end)?;
+    let mut value = 0i64;
+    for &byte in digits {
+        if !byte.is_ascii_digit() {
+            return None;
         }
-        Some(c) if c.is_ascii_digit() => {}
+        value = value * 10 + i64::from(byte - b'0');
+    }
+    Some((value, end))
+}
+
+/// The ECMAScript Date Time String Format (ES 21.4.1.32):
+///
+/// ```text
+/// [±YYYYYY|YYYY][-MM[-DD]][T HH:mm[:ss[.sss]][Z|±HH:mm]]
+/// ```
+///
+/// with the extensions Node also accepts: a space or `t` separator, lowercase
+/// `z`, `±HHmm`, and fractional seconds of any length (truncated to
+/// milliseconds). Date-only forms are UTC; time forms without an offset are
+/// local time, which is UTC here. `None` means the input does not match;
+/// `Some(NaN)` means it matched but lies outside the valid time range.
+fn parse_iso(text: &str) -> Option<f64> {
+    let bytes = text.as_bytes();
+
+    let (year, mut i) = match bytes.first()? {
+        b'+' | b'-' => {
+            let sign = if bytes[0] == b'-' { -1 } else { 1 };
+            let (year, next) = fixed_digits(bytes, 1, 6)?;
+            // "-000000" is not a valid expanded year (year zero is positive).
+            if sign < 0 && year == 0 {
+                return None;
+            }
+            (sign * year, next)
+        }
+        byte if byte.is_ascii_digit() => fixed_digits(bytes, 0, 4)?,
         _ => return None,
-    }
-    let (year, ni) = parse_uint(b, i)?;
-    i = ni;
-    let (mut month, mut day) = (1u32, 1u32);
-    let (mut hour, mut min, mut sec, mut ms) = (0i64, 0i64, 0i64, 0i64);
-    let mut has_time = false;
-    if b.get(i) == Some(&b'-') {
-        let (v, ni) = parse_uint(b, i + 1)?;
-        month = u32::try_from(v).ok()?;
-        i = ni;
-        if b.get(i) == Some(&b'-') {
-            let (v, ni) = parse_uint(b, i + 1)?;
-            day = u32::try_from(v).ok()?;
-            i = ni;
+    };
+
+    let (mut month, mut day) = (1, 1);
+    if bytes.get(i) == Some(&b'-') {
+        let (value, next) = fixed_digits(bytes, i + 1, 2)?;
+        if !(1..=12).contains(&value) {
+            return None;
+        }
+        month = value;
+        i = next;
+        if bytes.get(i) == Some(&b'-') {
+            let (value, next) = fixed_digits(bytes, i + 1, 2)?;
+            if !(1..=31).contains(&value) {
+                return None;
+            }
+            day = value;
+            i = next;
         }
     }
-    if matches!(b.get(i), Some(b'T') | Some(b' ')) {
-        has_time = true;
-        let (v, ni) = parse_uint(b, i + 1)?;
-        hour = v;
-        i = ni;
-        if b.get(i) == Some(&b':') {
-            let (v, ni) = parse_uint(b, i + 1)?;
-            min = v;
-            i = ni;
-            if b.get(i) == Some(&b':') {
-                let (v, ni) = parse_uint(b, i + 1)?;
-                sec = v;
-                i = ni;
-                if b.get(i) == Some(&b'.') {
-                    // 1-3 fractional digits, right-padded to milliseconds
-                    let start = i + 1;
-                    let (v, ni) = parse_uint(b, start)?;
-                    let n = ni - start;
-                    if !(1..=3).contains(&n) {
+
+    let mut offset_minutes = 0i64;
+    if matches!(bytes.get(i), Some(b'T' | b't' | b' ')) {
+        i += 1;
+        let (hour, next) = fixed_digits(bytes, i, 2)?;
+        if hour > 24 {
+            return None;
+        }
+        i = next;
+        if bytes.get(i) != Some(&b':') {
+            return None;
+        }
+        let (minute, next) = fixed_digits(bytes, i + 1, 2)?;
+        if minute > 59 {
+            return None;
+        }
+        i = next;
+
+        let (mut second, mut millis) = (0, 0);
+        if bytes.get(i) == Some(&b':') {
+            let (value, next) = fixed_digits(bytes, i + 1, 2)?;
+            if value > 59 {
+                return None;
+            }
+            second = value;
+            i = next;
+            if bytes.get(i) == Some(&b'.') {
+                i += 1;
+                let start = i;
+                while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+                if i == start {
+                    return None;
+                }
+                // The first three fractional digits are the milliseconds;
+                // the rest are truncated.
+                for k in 0..3 {
+                    millis *= 10;
+                    if let Some(byte) = bytes.get(start + k).filter(|b| b.is_ascii_digit()) {
+                        millis += i64::from(*byte - b'0');
+                    }
+                }
+            }
+        }
+
+        // 24:00 is allowed as end-of-day, but nothing later.
+        if hour == 24 && (minute != 0 || second != 0 || millis != 0) {
+            return None;
+        }
+
+        match bytes.get(i) {
+            Some(b'Z' | b'z') => i += 1,
+            Some(sign @ (b'+' | b'-')) => {
+                let sign = if *sign == b'-' { -1 } else { 1 };
+                i += 1;
+                // Node also accepts the four-digit `±HHmm` extension.
+                if let Some((value, next)) = fixed_digits(bytes, i, 4) {
+                    let (hour, minute) = (value / 100, value % 100);
+                    if hour > 23 || minute > 59 {
                         return None;
                     }
-                    ms = v * 10i64.pow(3 - n as u32);
-                    i = ni;
+                    offset_minutes = sign * (hour * 60 + minute);
+                    i = next;
+                } else {
+                    let (hour, next) = fixed_digits(bytes, i, 2)?;
+                    if hour > 23 {
+                        return None;
+                    }
+                    i = next;
+                    if bytes.get(i) != Some(&b':') {
+                        return None;
+                    }
+                    let (minute, next) = fixed_digits(bytes, i + 1, 2)?;
+                    if minute > 59 {
+                        return None;
+                    }
+                    offset_minutes = sign * (hour * 60 + minute);
+                    i = next;
                 }
             }
-        }
-    }
-    // zone: Z, or ±HH:mm / ±HHmm / ±HH
-    let mut offset_min = 0i64;
-    if has_time {
-        match b.get(i) {
-            Some(b'Z') | None => i += b.get(i).is_some() as usize,
-            Some(c @ (b'+' | b'-')) => {
-                let zs = if *c == b'+' { 1 } else { -1 };
-                let (zh, ni) = parse_uint(b, i + 1)?;
-                let mut ni = ni;
-                let mut zm = 0;
-                if b.get(ni) == Some(&b':') {
-                    let (v, n2) = parse_uint(b, ni + 1)?;
-                    zm = v;
-                    ni = n2;
-                } else if b.len() - ni == 2 && b[ni].is_ascii_digit() {
-                    // ±HHmm form: parse_uint already consumed all digits
-                    zm = zh % 100;
-                    offset_min = zh / 100;
-                }
-                offset_min = offset_min * 60 + zm;
-                offset_min *= zs;
-                i = ni;
-            }
+            None => {}
             _ => return None,
         }
+
+        if i != bytes.len() {
+            return None;
+        }
+        let time_of_day = ((hour * 60 + minute) * 60 + second) * 1_000 + millis;
+        let days = i128::from(days_from_civil(year, month, day));
+        let total = days * i128::from(MS_PER_DAY_I64) + i128::from(time_of_day)
+            - i128::from(offset_minutes) * 60_000;
+        return Some(time_clip_i128(total));
     }
-    if i != b.len() {
+
+    if i != bytes.len() {
         return None;
     }
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 24 || min > 59 || sec > 59 {
-        return None;
-    }
-    let days = days_from_civil(sign * year, month, day);
-    let ms_total =
-        days as f64 * MS_PER_DAY + ((hour * 60 + min) * 60 + sec) as f64 * 1000.0 + ms as f64
-            - (offset_min as f64 * 60_000.0);
-    Some(ms_total)
+
+    // Date-only form: always UTC.
+    let days = i128::from(days_from_civil(year, month, day));
+    Some(time_clip_i128(days * i128::from(MS_PER_DAY_I64)))
 }
 
-/// The tokenized forms we emit ourselves: `"Thu, 01 Jan 1970 00:00:00
-/// GMT"` and `"Thu Jan 01 1970 00:00:00 GMT+0000 (...)"`.
-fn parse_loose(s: &str) -> Option<f64> {
+/// The tokenized forms we emit ourselves: `"Thu, 01 Jan 1970 00:00:00 GMT"`
+/// and `"Thu Jan 01 1970 00:00:00 GMT+0000 (...)"`.
+fn parse_loose(text: &str) -> Option<f64> {
     let (mut month, mut day, mut year) = (None, None, None);
-    let (mut hour, mut min, mut sec) = (0i64, 0i64, 0i64);
-    for tok in s.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')')) {
-        if tok.is_empty() || tok.starts_with("GMT") || tok.starts_with("gmt") {
+    let (mut hour, mut minute, mut second) = (0i64, 0i64, 0i64);
+    for token in text.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')')) {
+        if token.is_empty() || token.starts_with("GMT") || token.starts_with("gmt") {
             continue;
         }
         if month.is_none()
-            && let Some(m) = MONTHS.iter().position(|m| m.eq_ignore_ascii_case(tok))
+            && let Some(m) = MONTHS.iter().position(|m| m.eq_ignore_ascii_case(token))
         {
-            month = Some(m as u32 + 1);
+            month = Some(m as i64 + 1);
             continue;
         }
-        if tok.contains(':') {
-            let mut it = tok.split(':');
+        if token.contains(':') {
+            let mut it = token.split(':');
             hour = it.next()?.parse().ok()?;
-            min = it.next().and_then(|s| s.parse().ok())?;
-            sec = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            minute = it.next().and_then(|s| s.parse().ok())?;
+            second = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             continue;
         }
-        if let Ok(n) = tok.parse::<i64>() {
+        if let Ok(n) = token.parse::<i64>() {
             // 1-2 digit non-negative token is the day of month, the rest
             // is the year (3+ digits, or signed)
-            if tok.len() < 3 && !tok.starts_with(['+', '-']) && day.is_none() {
+            if token.len() < 3 && !token.starts_with(['+', '-']) && day.is_none() {
                 day = Some(n);
             } else if year.is_none() {
                 year = Some(n);
@@ -292,15 +395,21 @@ fn parse_loose(s: &str) -> Option<f64> {
             continue;
         }
     }
-    let (m, d, y) = (month?, day?, year?);
-    if !(1..=31).contains(&d) || hour > 24 || min > 59 || sec > 59 {
+    let (month, day, year) = (month?, day?, year?);
+    if !(1..=31).contains(&day) || hour > 24 || minute > 59 || second > 59 {
         return None;
     }
-    let days = days_from_civil(y, m, u32::try_from(d).ok()?);
-    Some(days as f64 * MS_PER_DAY + ((hour * 60 + min) * 60 + sec) as f64 * 1000.0)
+    // Anything beyond the valid year range would clip to NaN anyway; the
+    // bound also keeps `days_from_civil` free of overflow.
+    if year.abs() > 1_000_000 {
+        return None;
+    }
+    let days = i128::from(days_from_civil(year, month, day));
+    let time = i128::from((hour * 60 + minute) * 60 + second) * 1_000;
+    Some(time_clip_i128(days * i128::from(MS_PER_DAY_I64) + time))
 }
 
-/// `Date.parse(string)` (ES 21.4.2.2): the ISO form plus the formats our
+/// `Date.parse(string)` (ES 21.4.3.2): the ISO form plus the formats our
 /// `toGMTString`/`toString` emit. Unparseable input is NaN.
 pub fn date_parse<'a>(
     nctx: HostCtx<'a>,
@@ -311,6 +420,11 @@ pub fn date_parse<'a>(
         vm, heap, state, ..
     } = nctx;
     let arg = args.get_handle(heap, 1);
+    // Fast path: a primitive string needs no ToString coercion.
+    if let Some(text) = arg.as_tagged(heap).get_as::<DenseString>(heap) {
+        let text = text.to_rust_string(heap);
+        return heap.new_number(parse_text(&text));
+    }
     state.handle_scope(|scope| {
         let text = match Object::to_string(vm, heap, state, arg) {
             Ok(Some(s)) => {
@@ -323,147 +437,255 @@ pub fn date_parse<'a>(
             Ok(None) => return vm.known().exception.get(heap).erase(),
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        let ms = parse_iso(&text)
-            .or_else(|| parse_loose(&text))
-            .unwrap_or(f64::NAN);
-        heap.new_number(ms)
+        heap.new_number(parse_text(&text))
     })
 }
 
-/// `Date(...)` / `new Date(...)`: no arguments → now; one numeric
-/// argument → that many epoch milliseconds; anything richer stays
-/// unimplemented.
+/// One-argument `new Date(value)`: a Date argument contributes its
+/// [[DateValue]] directly; otherwise ToPrimitive with the default hint,
+/// then parse a String or TimeClip a Number (ES 21.4.2.1).
+fn date_from_value(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    value: Handle<'_, Value>,
+) -> Result<Option<f64>, VmError> {
+    let tagged = value.as_tagged(heap);
+    // Fast paths: numbers, strings, and the other primitives need neither
+    // ToPrimitive nor a handle scope.
+    if let Some(number) = tagged.as_number(heap) {
+        return Ok(Some(time_clip(number)));
+    }
+    if let Some(text) = tagged.get_as::<DenseString>(heap) {
+        return Ok(Some(parse_text(&text.to_rust_string(heap))));
+    }
+    // A Date argument carries its instant in [[DateValue]]; ES reads that
+    // slot instead of running ToPrimitive (which could call user code).
+    if let Some(millis) = date_value(heap, tagged) {
+        return Ok(Some(time_clip(millis)));
+    }
+    if tagged.is_primitive(heap) {
+        return Ok(Some(time_clip(tagged.to_number(heap)?)));
+    }
+    state.handle_scope(
+        |scope| match Object::to_primitive(vm, heap, state, value, Hint::Default)? {
+            Coercion::Threw => Ok(None),
+            Coercion::Value(value) => {
+                let value = scope.handle(value);
+                if let Some(text) = value.as_tagged(heap).get_as::<DenseString>(heap) {
+                    let text = text.to_rust_string(heap);
+                    Ok(Some(parse_text(&text)))
+                } else {
+                    let number = value.as_tagged(heap).to_number(heap)?;
+                    Ok(Some(time_clip(number)))
+                }
+            }
+        },
+    )
+}
+
+/// Component form `new Date(year, month[, date[, hours[, minutes[, seconds
+/// [, ms]]]]])` (ES 21.4.2.1): every field is ToNumber'd, the year is
+/// mapped through MakeFullYear, and MakeDay/MakeTime normalise out-of-range
+/// fields before TimeClip.
+fn date_from_components(
+    vm: &VM,
+    heap: &mut Heap,
+    state: &ThreadState,
+    args: Args,
+) -> Result<Option<f64>, VmError> {
+    // year, month, date=1, hours=0, minutes=0, seconds=0, ms=0
+    let mut parts = [0.0f64; 7];
+    parts[2] = 1.0;
+    let count = args.len().saturating_sub(1).min(parts.len());
+    for (index, part) in parts.iter_mut().enumerate().take(count) {
+        // Fast path: ToNumber on a primitive is the value itself (or, for
+        // Strings, the numeric-string conversion) and cannot run user code.
+        let tagged = args.get(heap, index + 1);
+        if tagged.is_primitive(heap) {
+            *part = tagged.to_number(heap)?;
+            continue;
+        }
+        let value = args.get_handle(heap, index + 1);
+        match Object::to_numeric(vm, heap, state, value)? {
+            Some(value) => *part = value,
+            None => return Ok(None),
+        }
+    }
+
+    // MakeDay/MakeTime are NaN when a field is not finite.
+    if parts[..count].iter().any(|part| !part.is_finite()) {
+        return Ok(Some(f64::NAN));
+    }
+    if parts[..count].iter().any(|part| part.abs() > MAX_COMPONENT) {
+        return Ok(Some(f64::NAN));
+    }
+
+    let mut year = parts[0].trunc();
+    if (0.0..=99.0).contains(&year) {
+        year += 1900.0;
+    }
+    let month = parts[1].trunc() as i64;
+    let date = parts[2].trunc() as i64;
+    let hours = parts[3].trunc() as i64;
+    let minutes = parts[4].trunc() as i64;
+    let seconds = parts[5].trunc() as i64;
+    let millis = parts[6].trunc() as i64;
+
+    // MakeDay: normalise the month into a year offset and a 1-based month.
+    let year = year as i64 + month.div_euclid(12);
+    let month = month.rem_euclid(12) + 1;
+    let days = i128::from(days_from_civil(year, month, 1)) + i128::from(date) - 1;
+    let time = i128::from(hours) * 3_600_000
+        + i128::from(minutes) * 60_000
+        + i128::from(seconds) * 1_000
+        + i128::from(millis);
+    Ok(Some(time_clip_i128(
+        days * i128::from(MS_PER_DAY_I64) + time,
+    )))
+}
+
+/// `Date(...)` / `new Date(...)` (ES 21.4.2.1). The call form ignores its
+/// arguments and answers the current date-time as a string; the constructor
+/// accepts no arguments, one value, or the component form.
 pub fn date_constructor<'a>(
     nctx: HostCtx<'a>,
     new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let is_construct = new_target.is_some();
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
-    let ms = if args.len() < 2 {
-        now_millis()
-    } else {
-        let arg = args.get_handle(heap, 1);
-        {
-            let ms = rt_try!(
-                vm,
-                heap,
-                state,
-                state.handle_scope(|scope| {
-                    let arg = scope.handle(arg.as_tagged(heap));
-                    Object::to_numeric(vm, heap, state, arg)
-                })
-            );
-            let Some(ms) = ms else {
-                return vm.known().exception.get(heap).erase();
-            };
-            ms
-        }
-    };
 
-    if !is_construct {
-        // call form answers the current date-time as a string (ES
-        // 21.4.2.2: `Date()` ignores arguments)
+    if new_target.is_none() {
         return state.handle_scope(|scope| {
-            let text = break_down(now_millis())
+            let text = break_down(time_clip(now_millis()))
                 .map(|b| format_date_string(&b))
                 .unwrap_or_else(|| "Invalid Date".to_string());
-            let s = DenseString::from_utf8(heap, &scope, &text);
-            s.as_tagged(heap).erase()
+            DenseString::from_utf8(heap, &scope, &text)
+                .as_tagged(heap)
+                .erase()
         });
     }
 
+    let time = if args.len() < 2 {
+        Ok(Some(time_clip(now_millis())))
+    } else if args.len() == 2 {
+        let value = args.get_handle(heap, 1);
+        date_from_value(vm, heap, state, value)
+    } else {
+        date_from_components(vm, heap, state, args)
+    };
+    let millis = match time {
+        Ok(Some(millis)) => millis,
+        Ok(None) => return vm.known().exception.get(heap).erase(),
+        Err(err) => return raise_runtime(vm, heap, state, err),
+    };
+
+    // TODO(new-target): step 6 of ES 21.4.2.1 is
+    // `OrdinaryCreateFromConstructor(NewTarget, "%Date.prototype%",
+    // « [[DateValue]] »)`. This always uses the intrinsic Date map/prototype,
+    // so `class X extends Date` and `Reflect.construct(Date, [], NewTarget)`
+    // do not inherit `NewTarget.prototype`.
     state.handle_scope(|scope| {
         let map = scope.handle(vm.known().date_instance_map.get(heap));
-        let value = scope.handle(heap.new_number(ms));
+        let value = scope.handle(heap.new_number(millis));
         heap.new_object(&scope, map, scope.stage(&[value.as_tagged(heap).erase()]))
             .erase()
     })
 }
 
-/// `Date.now()` (ES 21.4.2.2): epoch milliseconds as a Number.
+/// `Date.now()` (ES 21.4.4.2): the current time value, an integral number of
+/// epoch milliseconds.
 pub fn date_now<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     _args: Args,
 ) -> Tagged<'a, Value> {
-    nctx.heap.new_number(now_millis())
+    nctx.heap.new_number(time_clip(now_millis()))
 }
 
-/// `Date.prototype.valueOf` (ES 21.4.4.40): the wrapped epoch
-/// milliseconds. Only real Date instances qualify.
+/// The [[DateValue]] of a receiver, or `None` when it is not a Date.
+fn date_value(heap: &Heap, receiver: Tagged<'_, Value>) -> Option<f64> {
+    let object = receiver.as_heap_object()?;
+    if !object.as_ref().map(heap).kind().contains(MapKind::DATE) {
+        return None;
+    }
+    object.as_ref().slots(heap).at(heap, 0).as_number(heap)
+}
+
+/// `Date.prototype.getTime` (ES 21.4.4.9): the wrapped time value.
+pub fn date_get_time<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    let Some(millis) = date_value(heap, args.get(heap, 0)) else {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    };
+    heap.new_number(millis)
+}
+
+/// `Date.prototype.valueOf` (ES 21.4.4.40): the same [[DateValue]] access
+/// as `getTime`.
 pub fn date_value_of<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    let HostCtx {
-        vm, heap, state, ..
-    } = nctx;
-    let receiver = args.get(heap, 0);
-    date_slot(
-        vm,
-        heap,
-        state,
-        // Safety: fresh rooted-slot word, no allocation since the read.
-        unsafe { Tagged::<Value>::from_value_unchecked(receiver.raw()) },
-    )
+    date_get_time(nctx, None, args)
 }
 
-/// Shared body of the string formatters: break the receiver's time value
-/// down and apply `format`. `invalid` is the NaN text ("Invalid Date");
-/// `None` asks for a TypeError (toISOString's RangeError approximation).
+/// Shared body of the string formatters: read the receiver's time value and
+/// format it, or emit `invalid` for an invalid Date.
 fn format_with<'a>(
     nctx: HostCtx<'a>,
     args: Args,
     format: fn(&Broken) -> String,
-    invalid: Option<&'static str>,
+    invalid: &'static str,
 ) -> Tagged<'a, Value> {
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
+    let Some(millis) = date_value(heap, args.get(heap, 0)) else {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    };
+    let text = match break_down(millis) {
+        Some(broken) => format(&broken),
+        None => invalid.to_string(),
+    };
     state.handle_scope(|scope| {
-        let receiver = args.get(heap, 0);
-        let exception = vm.known().exception.get(heap).erase().raw();
-        let word = date_slot(
-            vm,
-            heap,
-            state,
-            // Safety: fresh rooted-slot word, no allocation since the read.
-            unsafe { Tagged::<Value>::from_value_unchecked(receiver.raw()) },
-        )
-        .raw();
-        if word == exception {
-            // Safety: old-gen singleton word.
-            return unsafe { Tagged::<Value>::from_value_unchecked(word) };
-        }
-        // Safety: fresh slot word, no allocation since the read.
-        let Some(ms) = unsafe { Tagged::<Value>::from_value_unchecked(word) }.as_number(heap)
-        else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
-        let text = match break_down(ms) {
-            Some(b) => format(&b),
-            None => match invalid {
-                Some(t) => t.to_string(),
-                None => return raise_runtime(vm, heap, state, VmError::Type),
-            },
-        };
-        let s = DenseString::from_utf8(heap, &scope, &text);
-        s.as_tagged(heap).erase()
+        DenseString::from_utf8(heap, &scope, &text)
+            .as_tagged(heap)
+            .erase()
     })
 }
 
-/// `Date.prototype.toISOString` (ES 21.4.4.36): NaN is a RangeError
-/// (approximated here as a TypeError).
+/// `Date.prototype.toISOString` (ES 21.4.4.36): the ISO 8601 extended form.
+/// An invalid Date is a RangeError.
 pub fn date_to_iso_string<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    format_with(nctx, args, format_iso, None)
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    let Some(millis) = date_value(heap, args.get(heap, 0)) else {
+        return raise_runtime(vm, heap, state, VmError::Type);
+    };
+    let Some(broken) = break_down(millis) else {
+        return raise_runtime(vm, heap, state, VmError::InvalidTime);
+    };
+    state.handle_scope(|scope| {
+        let text = format_iso(&broken);
+        DenseString::from_utf8(heap, &scope, &text)
+            .as_tagged(heap)
+            .erase()
+    })
 }
 
 /// `Date.prototype.toGMTString` / `toUTCString` (ES 21.4.4.43).
@@ -472,7 +694,7 @@ pub fn date_to_gmt_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    format_with(nctx, args, format_gmt, Some("Invalid Date"))
+    format_with(nctx, args, format_gmt, "Invalid Date")
 }
 
 /// `Date.prototype.toString` (ES 21.4.4.41; UTC-formatted).
@@ -481,22 +703,57 @@ pub fn date_to_string<'a>(
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
 ) -> Tagged<'a, Value> {
-    format_with(nctx, args, format_date_string, Some("Invalid Date"))
+    format_with(nctx, args, format_date_string, "Invalid Date")
 }
 
-/// slots[0] of a Date instance (the milliseconds), or a TypeError.
-fn date_slot<'a>(
-    vm: &VM,
-    heap: &'a mut Heap,
-    state: &ThreadState,
-    receiver: Tagged<'a, Value>,
+/// `Date.prototype.toJSON` (ES 21.4.4.37): `null` for non-finite time
+/// values, otherwise the result of invoking `this.toISOString()`.
+pub fn date_to_json<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
 ) -> Tagged<'a, Value> {
-    let Some(obj) = receiver.as_heap_object() else {
-        return raise_runtime(vm, heap, state, VmError::Type);
-    };
-    let map = obj.as_ref().map(heap);
-    if map != vm.known().date_instance_map.get(heap) {
-        return raise_runtime(vm, heap, state, VmError::Type);
-    }
-    obj.as_ref().slots(heap).at(heap, 0)
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    state.handle_scope(|scope| {
+        let this = args.get_handle(heap, 0);
+        let object = scope.handle(this.as_tagged(heap));
+        let primitive = match Object::to_primitive(vm, heap, state, object, Hint::Number) {
+            Ok(Coercion::Value(value)) => scope.handle(value),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        if primitive
+            .as_tagged(heap)
+            .as_number(heap)
+            .is_some_and(|number| !number.is_finite())
+        {
+            return vm.known().null.get(heap).erase();
+        }
+        let name = vm
+            .interner()
+            .intern_str(heap, &scope, "toISOString")
+            .erase();
+        let method = match Object::get_property(vm, heap, state, object, object, name, false) {
+            Ok(Coercion::Value(value)) => scope.handle(value),
+            Ok(Coercion::Threw) => return vm.known().exception.get(heap).erase(),
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        if !method.as_tagged(heap).is_callable(heap) {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        let call_args = scope.stage(&[object.as_tagged(heap).erase()]);
+        // Root the call result before dropping the heap borrow it carries:
+        // that keeps the error path free of a second `&mut Heap` while the
+        // first is still anchored.
+        let outcome = match HostCtx::enter(vm, heap, state, method, call_args, None) {
+            Ok(value) => Ok(scope.handle(value)),
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(value) => value.as_tagged(heap).erase(),
+            Err(err) => raise_runtime(vm, heap, state, err),
+        }
+    })
 }

@@ -388,6 +388,8 @@ impl MapKind {
     pub const NATIVE: MapKind = MapKind(1 << 11);
     pub const PRIMITIVE_WRAPPER: MapKind = MapKind(1 << 12);
     pub const CLASS_CONSTRUCTOR: MapKind = MapKind(1 << 13);
+    /// Date instances carry a [[DateValue]] in their first value slot.
+    pub const DATE: MapKind = MapKind(1 << 26);
 
     pub const LATIN1: MapKind = MapKind(1 << 14);
     pub const PROTOTYPE: MapKind = MapKind(1 << 15);
