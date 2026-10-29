@@ -161,6 +161,23 @@ pub struct ClassInfo<'a> {
     pub decl_symbol: Option<(SymbolId, String)>,
 }
 
+/// The single record for a lexical for-head scope: its loop node and
+/// context slot count. `slots == 0` means the context was dropped in
+/// `finalize_for_heads` and its bindings live in the enclosing function's
+/// registers.
+#[derive(Clone, Copy)]
+pub struct ForHead {
+    pub node: NodeId,
+    pub slots: u32,
+}
+
+impl ForHead {
+    /// Whether this head retained a runtime context.
+    pub fn creates_context(&self) -> bool {
+        self.slots > 0
+    }
+}
+
 /// Everything the codegen needs besides the AST and oxc's own tables.
 pub struct Facts<'a> {
     pub mode: Mode,
@@ -196,14 +213,13 @@ pub struct Facts<'a> {
     pub captures_new_target: HashSet<Fid>,
     /// derived constructors with an arrow-delegated super()
     pub needs_this_function: HashSet<Fid>,
-    /// for/for-in loop nodes → number of context-allocated lexical head
-    /// bindings (absent: the head needs no context at all)
-    pub for_slots: HashMap<NodeId, u32>,
+    /// lexical-head for scopes → loop node and context slots. A zero slot
+    /// count means the head's context was dropped; its bindings are
+    /// register-allocated by the enclosing function.
+    pub for_heads: HashMap<ScopeId, ForHead>,
     /// references that must not emit a TDZ hole check (for-head bindings
     /// outside their head initializer, which always ran first)
     pub ref_skip_hole: HashSet<ReferenceId>,
-    /// lexical-head for scope → loop node
-    pub for_of_scope: HashMap<ScopeId, NodeId>,
     /// loop nodes needing a fresh context per iteration
     pub per_iteration: HashSet<NodeId>,
     /// object literals owning a home-object context
@@ -216,6 +232,13 @@ pub struct Facts<'a> {
     pub param_symbols: HashMap<SymbolId, u32>,
     /// names bound by parameter patterns (TDZ locals, not param registers)
     pub pattern_params: HashSet<SymbolId>,
+}
+
+impl Facts<'_> {
+    /// The lexical for-head at `scope`, if any.
+    pub fn for_head(&self, scope: Option<ScopeId>) -> Option<&ForHead> {
+        scope.and_then(|scope| self.for_heads.get(&scope))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -245,8 +268,7 @@ struct Collector<'a, 'p> {
     classes: Vec<ClassInfo<'a>>,
     class_of_node: HashMap<NodeId, ClassIdx>,
     class_of_scope: HashMap<ScopeId, ClassIdx>,
-    for_slots: HashMap<NodeId, u32>,
-    for_of_scope: HashMap<ScopeId, NodeId>,
+    for_heads: HashMap<ScopeId, ForHead>,
     hoist_fns: HashMap<Fid, Vec<(SymbolId, Fid)>>,
     param_symbols: HashMap<SymbolId, u32>,
     pattern_params: HashSet<SymbolId>,
@@ -275,8 +297,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             classes: Vec::new(),
             class_of_node: HashMap::new(),
             class_of_scope: HashMap::new(),
-            for_slots: HashMap::new(),
-            for_of_scope: HashMap::new(),
+            for_heads: HashMap::new(),
             hoist_fns: HashMap::new(),
             param_symbols: HashMap::new(),
             pattern_params: HashSet::new(),
@@ -293,8 +314,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             classes: &mut self.classes,
             class_of_node: &self.class_of_node,
             class_of_scope: &self.class_of_scope,
-            for_slots: &mut self.for_slots,
-            for_of_scope: &self.for_of_scope,
+            for_heads: &mut self.for_heads,
             fn_scope_to_fid: &self.fn_scope_to_fid,
             captured: HashSet::new(),
             creates_context: HashSet::new(),
@@ -317,7 +337,7 @@ impl<'a, 'p> Collector<'a, 'p> {
         // final before any depth is resolved
         d.scan_special_owners();
         d.scan_captures();
-        d.finalize_for_slots();
+        d.finalize_for_heads();
         d.creates_context = d.compute_creates_context();
         d.scan_special_nodes();
         d.compute_reference_depths();
@@ -344,7 +364,7 @@ impl<'a, 'p> Collector<'a, 'p> {
                 if let Some(&fid) = self.fn_scope_to_fid.get(&cur) {
                     break fid;
                 }
-                if self.class_of_scope.contains_key(&cur) || self.for_of_scope.contains_key(&cur) {
+                if self.class_of_scope.contains_key(&cur) || self.for_heads.contains_key(&cur) {
                     // class / for contexts have their own slot spaces
                     break Fid(u32::MAX);
                 }
@@ -358,13 +378,13 @@ impl<'a, 'p> Collector<'a, 'p> {
 
         // per-iteration loops: for heads whose lexical bindings are captured
         let mut per_iteration = HashSet::new();
-        for (sid, &node) in &self.for_of_scope {
+        for (&sid, head) in &self.for_heads {
             if self
                 .scoping
-                .iter_bindings_in(*sid)
+                .iter_bindings_in(sid)
                 .any(|sym| captured.contains(&sym))
             {
-                per_iteration.insert(node);
+                per_iteration.insert(head.node);
             }
         }
 
@@ -408,8 +428,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             captures_this,
             captures_new_target,
             needs_this_function,
-            for_slots: self.for_slots,
-            for_of_scope: self.for_of_scope,
+            for_heads: self.for_heads,
             per_iteration,
             obj_lit_home,
             hoist_vars,
@@ -522,8 +541,7 @@ impl<'a, 'p> Collector<'a, 'p> {
         }
         let count = self.scoping.iter_bindings_in(scope).len() as u32;
         if count > 0 {
-            self.for_slots.insert(node, count);
-            self.for_of_scope.insert(scope, node);
+            self.for_heads.insert(scope, ForHead { node, slots: count });
         }
     }
 
@@ -877,8 +895,7 @@ struct Deriver<'a, 'p, 'f> {
     classes: &'f mut Vec<ClassInfo<'a>>,
     class_of_node: &'f HashMap<NodeId, ClassIdx>,
     class_of_scope: &'f HashMap<ScopeId, ClassIdx>,
-    for_slots: &'f mut HashMap<NodeId, u32>,
-    for_of_scope: &'f HashMap<ScopeId, NodeId>,
+    for_heads: &'f mut HashMap<ScopeId, ForHead>,
     fn_scope_to_fid: &'f HashMap<ScopeId, Fid>,
     captured: HashSet<SymbolId>,
     creates_context: HashSet<Fid>,
@@ -1157,7 +1174,7 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
     /// owner runs no direct eval), drop the head context: its bindings
     /// live in registers. Nested scopes are unaffected; captured ones
     /// keep the context, along with every head binding.
-    fn finalize_for_slots(&mut self) {
+    fn finalize_for_heads(&mut self) {
         let eval_fns: HashSet<Fid> = self
             .fn_scope_to_fid
             .iter()
@@ -1172,8 +1189,8 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         for &sym in &self.captured {
             let mut cur = self.scoping.symbol_scope_id(sym);
             loop {
-                if let Some(&node) = self.for_of_scope.get(&cur) {
-                    captured_for.insert(node);
+                if let Some(head) = self.for_heads.get(&cur) {
+                    captured_for.insert(head.node);
                     break;
                 }
                 if self.fn_scope_to_fid.contains_key(&cur) || self.class_of_scope.contains_key(&cur)
@@ -1187,9 +1204,9 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             }
         }
         let loops: Vec<(ScopeId, NodeId)> = self
-            .for_of_scope
+            .for_heads
             .iter()
-            .map(|(&scope, &node)| (scope, node))
+            .map(|(&scope, head)| (scope, head.node))
             .collect();
         let mut candidates: Vec<(ScopeId, NodeId)> = Vec::new();
         for (scope, node) in loops {
@@ -1234,12 +1251,15 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             let ref_node = reference.node_id();
             if ref_node == init_node || self.nodes.ancestors(ref_node).any(|a| a.id() == init_node)
             {
-                tdz_for.insert(self.for_of_scope[&decl_scope]);
+                tdz_for.insert(self.for_heads[&decl_scope].node);
             }
         }
-        for (_, node) in candidates {
+        for (scope, node) in candidates {
             if !tdz_for.contains(&node) {
-                self.for_slots.remove(&node);
+                self.for_heads
+                    .get_mut(&scope)
+                    .expect("candidate is a for head")
+                    .slots = 0;
             }
         }
     }
@@ -1303,7 +1323,7 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 if let Some(&fid) = self.fn_scope_to_fid.get(&cur) {
                     break Some(fid);
                 }
-                if self.class_of_scope.contains_key(&cur) || self.for_of_scope.contains_key(&cur) {
+                if self.class_of_scope.contains_key(&cur) || self.for_heads.contains_key(&cur) {
                     break None;
                 }
                 match self.scoping.scope_parent_id(cur) {
@@ -1335,11 +1355,20 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 self.classes[idx.0 as usize].slot_count > 0
             }
             AstKind::ObjectExpression(o) => self.obj_lit_home.contains(&o.node_id.get()),
-            AstKind::ForStatement(f) => self.for_slots.contains_key(&f.node_id.get()),
-            AstKind::ForInStatement(f) => self.for_slots.contains_key(&f.node_id.get()),
-            AstKind::ForOfStatement(f) => self.for_slots.contains_key(&f.node_id.get()),
+            AstKind::ForStatement(f) => self.for_scope_creates_ctx(f.scope_id.get()),
+            AstKind::ForInStatement(f) => self.for_scope_creates_ctx(f.scope_id.get()),
+            AstKind::ForOfStatement(f) => self.for_scope_creates_ctx(f.scope_id.get()),
             _ => false,
         }
+    }
+
+    /// Whether the lexical head at `scope` retained a runtime context.
+    fn for_scope_creates_ctx(&self, scope: Option<ScopeId>) -> bool {
+        scope.is_some_and(|scope| {
+            self.for_heads
+                .get(&scope)
+                .is_some_and(|head| head.creates_context())
+        })
     }
 
     /// A home owner for `super.x`: a class with `uses_super` or a
@@ -1518,10 +1547,13 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                     if self.class_of_scope.contains_key(&cur) {
                         break false;
                     }
-                    if let Some(&node) = self.for_of_scope.get(&cur)
-                        && self.for_slots.contains_key(&node)
-                    {
-                        break false;
+                    if let Some(head) = self.for_heads.get(&cur) {
+                        // A lexical for-head whose context was dropped is
+                        // register-allocated by its enclosing function, so
+                        // stop looking for an outer context host: otherwise
+                        // an enclosing retained loop would be mistaken for
+                        // this binding's host.
+                        break !head.creates_context();
                     }
                     match self.scoping.scope_parent_id(cur) {
                         Some(p) => cur = p,
@@ -1579,8 +1611,12 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                     return Some(self.classes[idx.0 as usize].node);
                 }
             }
-            if let Some(&node) = self.for_of_scope.get(&cur) {
-                return Some(node);
+            if let Some(head) = self.for_heads.get(&cur) {
+                // Only retained for-heads create a context; a register-allocated
+                // one is transparent, like any other scope without slots.
+                if head.creates_context() {
+                    return Some(head.node);
+                }
             }
             cur = self.scoping.scope_parent_id(cur)?;
         }

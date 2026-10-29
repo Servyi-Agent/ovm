@@ -511,8 +511,8 @@ pub fn generate<'a>(scoping: &Scoping, facts: &Facts<'a>) -> Result<Program, Com
         if facts.class_of_scope.contains_key(&sid) || facts.fn_scope_to_fid.contains_key(&sid) {
             continue;
         }
-        if let Some(&node) = facts.for_of_scope.get(&sid) {
-            if !facts.for_slots.contains_key(&node) {
+        if let Some(head) = facts.for_heads.get(&sid) {
+            if !head.creates_context() {
                 let mut cur = scoping.scope_parent_id(sid);
                 while let Some(s) = cur {
                     if let Some(&fid) = facts.fn_scope_to_fid.get(&s) {
@@ -535,7 +535,7 @@ pub fn generate<'a>(scoping: &Scoping, facts: &Facts<'a>) -> Result<Program, Com
             if facts.class_of_scope.contains_key(&s) {
                 break;
             }
-            if facts.for_of_scope.contains_key(&s) {
+            if facts.for_heads.contains_key(&s) {
                 crossed_for = true;
             }
             cur = scoping.scope_parent_id(s);
@@ -599,9 +599,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return self.facts.classes[idx.0 as usize].slot_count > 0;
         }
         self.facts
-            .for_of_scope
+            .for_heads
             .get(&scope)
-            .is_some_and(|node| self.facts.for_slots.contains_key(node))
+            .is_some_and(|head| head.creates_context())
     }
 
     /// Whether `host` is the context-creating scope at or above
@@ -658,8 +658,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
             if let Some(&idx) = self.facts.class_of_scope.get(&cur) {
                 return ContextHost::Class(idx);
             }
-            if let Some(&node) = self.facts.for_of_scope.get(&cur) {
-                return ContextHost::For(node);
+            if let Some(head) = self.facts.for_heads.get(&cur) {
+                return ContextHost::For(head.node);
             }
             if let Some(&fid) = self.facts.fn_scope_to_fid.get(&cur) {
                 return ContextHost::Function(fid);
@@ -3825,7 +3825,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn emit_for_in(&mut self, s: &ForInStatement<'_>) -> Result<(), CompileError> {
         let node = s.node_id.get();
         let per_iteration = self.c.facts.per_iteration.contains(&node);
-        let slots = self.c.facts.for_slots.get(&node).copied().unwrap_or(0);
+        let slots = self
+            .c
+            .facts
+            .for_head(s.scope_id.get())
+            .map_or(0, |head| head.slots);
         let labels = self.take_labels();
         self.with_temps(|g, temps| {
             // lexical heads (`for (let/const k in …)`) own a block
@@ -4016,7 +4020,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn emit_for(&mut self, s: &ForStatement<'_>) -> Result<(), CompileError> {
         let node = s.node_id.get();
         let per_iteration = self.c.facts.per_iteration.contains(&node);
-        let slots = self.c.facts.for_slots.get(&node).copied().unwrap_or(0);
+        let slots = self
+            .c
+            .facts
+            .for_head(s.scope_id.get())
+            .map_or(0, |head| head.slots);
         let labels = self.take_labels();
         self.with_temps(|g, temps| {
             let mut loop_ctx: Option<Reg> = None;
