@@ -1,9 +1,16 @@
 use core::alloc::Layout;
 
 use crate::{
-    EdgeVisitable, FixedArray, GcSlot, Handle, Header, Heap, HeapObject, ObjectKind, OptionGcSlot,
-    Smi, Visitor,
+    EdgeVisitable, FixedArray, GcSlot, Handle, Header, Heap, HeapObject, Object, ObjectKind,
+    OptionGcSlot, Smi, Visitor,
 };
+
+/// `ScopeInfo::flags` bit: the context is a variable-declaration
+/// environment (`var` declarations hoist here).
+pub const SCOPE_DECLARATION: i64 = 1 << 0;
+/// `ScopeInfo::flags` bit: the declaration environment is a script/global
+/// environment, so new top-level eval vars become global properties.
+pub const SCOPE_SCRIPT: i64 = 1 << 1;
 
 // TODO: more info
 #[repr(C)]
@@ -11,10 +18,26 @@ pub struct ScopeInfo {
     pub header: Header,
     /// parallel to the context's slots
     pub names: GcSlot<FixedArray>,
+    pub flags: GcSlot<Smi>,
 }
 
 pub struct ScopeInfoInit<'a> {
     pub names: Handle<'a, FixedArray>,
+    pub flags: i64,
+}
+
+impl ScopeInfo {
+    pub fn flags(&self) -> i64 {
+        self.flags.to_smi_unchecked().value()
+    }
+
+    pub fn is_declaration_context(&self) -> bool {
+        self.flags() & SCOPE_DECLARATION != 0
+    }
+
+    pub fn is_script_context(&self) -> bool {
+        self.flags() & SCOPE_SCRIPT != 0
+    }
 }
 
 impl HeapObject for ScopeInfo {
@@ -29,6 +52,7 @@ impl HeapObject for ScopeInfo {
         let host = self.tagged(heap);
         self.header.map.init(heap.known().scope_info_map.get(heap));
         self.names.set(heap, host, config.names.as_tagged(heap));
+        self.flags.set(heap, host, Smi::new(config.flags));
     }
 
     fn header(&self) -> &Header {
@@ -44,6 +68,7 @@ impl EdgeVisitable for ScopeInfo {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
         visitor.visit(self.names.as_raw());
+        visitor.visit(self.flags.as_raw());
     }
 }
 
@@ -53,6 +78,9 @@ pub struct ContextObject {
     pub outer: OptionGcSlot<ContextObject>,
     pub slots: GcSlot<FixedArray>,
     pub scope_info: GcSlot<ScopeInfo>,
+    /// Lazily created context-extension object for dynamically declared
+    /// bindings (sloppy direct eval). The hole means no extension yet.
+    pub extension: OptionGcSlot<Object>,
 }
 
 pub struct ContextInit<'a> {
@@ -79,6 +107,7 @@ impl HeapObject for ContextObject {
         self.slots.set(heap, host, config.slots.as_tagged(heap));
         self.scope_info
             .set(heap, host, config.scope_info.as_tagged(heap));
+        self.extension.clear(heap);
     }
 
     fn header(&self) -> &Header {
@@ -96,6 +125,7 @@ impl EdgeVisitable for ContextObject {
         visitor.visit(self.outer.as_raw());
         visitor.visit(self.slots.as_raw());
         visitor.visit(self.scope_info.as_raw());
+        visitor.visit(self.extension.as_raw());
     }
 }
 

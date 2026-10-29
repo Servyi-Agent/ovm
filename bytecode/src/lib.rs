@@ -143,11 +143,15 @@ pub enum BuiltinFn {
     /// of the argument window (threaded through .this_function)
     ConstructSuperVia,
     /// (name) -> value — direct-eval name load: walk the frame context
-    /// chain by name; unresolved names fall back to the global object
+    /// chain by name (slots, then context extension objects); unresolved
+    /// names fall back to the global object
     LoadDynamicName,
     /// (value, name) -> value — direct-eval name store: write through to
-    /// the context-chain slot, else the global object
+    /// the nearest context slot or extension property, else the global object
     StoreDynamicName,
+    /// (name) -> undefined — sloppy direct-eval var declaration: create
+    /// the binding in the caller's variable environment when absent
+    DeclareEvalVar,
     /// (first) -> array — a fresh array of the frame's arguments from
     /// formal index `first` (a Smi)
     CreateRestParameter,
@@ -179,7 +183,7 @@ impl BuiltinFn {
     /// All variants in discriminant order. The array length is the
     /// variant count (type-checked), and the VM registers its table in
     /// this order so registry indices equal discriminants.
-    pub const ALL: [Self; 38] = [
+    pub const ALL: [Self; 39] = [
         Self::GetIterator,
         Self::IteratorNext,
         Self::IteratorDone,
@@ -210,6 +214,7 @@ impl BuiltinFn {
         Self::ConstructSuperVia,
         Self::LoadDynamicName,
         Self::StoreDynamicName,
+        Self::DeclareEvalVar,
         Self::CreateRestParameter,
         Self::SuperGetProperty,
         Self::SuperSetProperty,

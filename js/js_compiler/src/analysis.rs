@@ -245,6 +245,7 @@ impl Facts<'_> {
 pub enum Mode {
     Script,
     Eval,
+    EvalStrict,
     Repl,
 }
 
@@ -285,7 +286,8 @@ impl<'a, 'p> Collector<'a, 'p> {
                 params: Vec::new(),
                 formal_length: 0,
                 kind: FnKind::Script,
-                strict: scoping.root_scope_flags().contains(ScopeFlags::StrictMode),
+                strict: matches!(mode, Mode::EvalStrict)
+                    || scoping.root_scope_flags().contains(ScopeFlags::StrictMode),
                 body: FnBody::Script(program),
                 field_key: None,
                 class: None,
@@ -546,9 +548,10 @@ impl<'a, 'p> Collector<'a, 'p> {
     }
 
     fn strict_scope(&self, scope: Option<ScopeId>) -> bool {
-        scope
-            .map(|s| self.scoping.scope_flags(s).contains(ScopeFlags::StrictMode))
-            .unwrap_or(true)
+        matches!(self.mode, Mode::EvalStrict)
+            || scope
+                .map(|s| self.scoping.scope_flags(s).contains(ScopeFlags::StrictMode))
+                .unwrap_or(true)
     }
 }
 

@@ -14,8 +14,12 @@ impl FunctionId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceMode {
     Script,
-    /// unresolved names become dynamic lookups through the caller's context chain.
+    /// sloppy direct eval: unresolved names become dynamic lookups through
+    /// the caller's context chain and top-level vars extend the caller.
     Eval,
+    /// strict direct eval: dynamic lookups still target the caller's
+    /// context chain, but top-level vars stay local to the eval.
+    EvalStrict,
     /// top-level declarations become global object properties
     Repl,
 }
@@ -104,9 +108,10 @@ pub enum Constant {
     /// `CreateClosure` template: the shared callable info of a nested function
     Callable(FunctionId),
     /// The function context's slot names (parallel to its slots, for
-    /// dynamic name resolution); materialized into a shared `ScopeInfo`
-    /// referenced by `CreateFunctionContext`
-    ContextNames(Vec<Box<[u8]>>),
+    /// dynamic name resolution) and its declaration-context flags;
+    /// materialized into a shared `ScopeInfo` referenced by
+    /// `CreateFunctionContext`
+    ContextNames { names: Vec<Box<[u8]>>, flags: i64 },
     /// %Object.prototype% (base-class prototype parent)
     ObjectPrototype,
     /// %Function.prototype% (base-class constructor parent)
@@ -121,7 +126,7 @@ impl Constant {
             Self::Float(f) => ConstantKey::Float(f.to_bits()),
             Self::Smi(v) => ConstantKey::Smi(*v),
             Self::Callable(id) => ConstantKey::Callable(*id),
-            Self::ContextNames(names) => ConstantKey::ContextNames(names),
+            Self::ContextNames { names, flags } => ConstantKey::ContextNames(names, *flags),
             Self::ObjectPrototype => ConstantKey::ObjectPrototype,
             Self::FunctionPrototype => ConstantKey::FunctionPrototype,
         }
@@ -149,7 +154,7 @@ enum ConstantKey<'a> {
     Float(u64),
     Smi(i64),
     Callable(FunctionId),
-    ContextNames(&'a [Box<[u8]>]),
+    ContextNames(&'a [Box<[u8]>], i64),
     ObjectPrototype,
     FunctionPrototype,
 }

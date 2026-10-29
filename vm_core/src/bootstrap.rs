@@ -798,7 +798,10 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         .init_tagged(Symbol::new(heap, &scope, b"<normalize-dictionary>").as_tagged(heap));
 
     let empty_scope_info = heap
-        .allocate::<ScopeInfo>(ScopeInfoInit { names: empty_slots })
+        .allocate::<ScopeInfo>(ScopeInfoInit {
+            names: empty_slots,
+            flags: 0,
+        })
         .as_handle(&scope);
     let empty_context = heap
         .allocate::<ContextObject>(ContextInit {

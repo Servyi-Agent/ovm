@@ -109,7 +109,7 @@ fn materialize_function<'s>(
                 let info = materialize_function(vm, heap, state, scope, program, infos, *child)?;
                 info.erase()
             }
-            Constant::ContextNames(names) => {
+            Constant::ContextNames { names, flags } => {
                 let interned: Vec<Handle<'s, Value>> = names
                     .iter()
                     .map(|n| intern(heap, state, scope, vm, n).erase())
@@ -119,8 +119,14 @@ fn materialize_function<'s>(
                 let names = heap.allocate_handle::<FixedArray>(scope.stage(&words), scope);
                 // one shared ScopeInfo per compiled scope; every activation
                 // of the scope references it from its context
-                heap.allocate_handle::<ScopeInfo>(ScopeInfoInit { names }, scope)
-                    .erase()
+                heap.allocate_handle::<ScopeInfo>(
+                    ScopeInfoInit {
+                        names,
+                        flags: *flags,
+                    },
+                    scope,
+                )
+                .erase()
             }
             Constant::ObjectPrototype => {
                 scope.handle(vm.known().object_prototype.get(heap).erase())

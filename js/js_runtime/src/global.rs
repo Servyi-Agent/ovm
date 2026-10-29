@@ -4,8 +4,8 @@ use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::materialize::Materialize;
 use vm_core::{
-    Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, Smi, Tagged,
-    ThreadState, VM, Value, VmError, WellKnown,
+    Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, LanguageMode,
+    Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -38,7 +38,20 @@ pub fn eval_runtime<'a>(
             return raise_runtime(vm, heap, state, VmError::Type);
         };
 
-        let program = match js_compiler::compile_js(&text, bytecode::SourceMode::Eval) {
+        // TODO: pass this in better.
+        let eval_mode = if state.is_frame_active()
+            && state
+                .stack()
+                .frame_header(state.frame_base())
+                .callable(heap)
+                .callable_info(heap)
+                .is_some_and(|info| info.mode() == LanguageMode::Strict)
+        {
+            bytecode::SourceMode::EvalStrict
+        } else {
+            bytecode::SourceMode::Eval
+        };
+        let program = match js_compiler::compile_js(&text, eval_mode) {
             Ok(program) => program,
             // TODO: a SyntaxError class; approximate with TypeError for now
             Err(_) => {

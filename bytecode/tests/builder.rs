@@ -109,8 +109,12 @@ fn constant_pool_dedups() {
     );
 
     let names: Vec<Box<[u8]>> = vec![b"a".as_slice().into(), b"b".as_slice().into()];
-    let scope = b.constant(Constant::ContextNames(names.clone()));
-    assert_eq!(b.constant(Constant::ContextNames(names)), scope);
+    let flags = 1;
+    let scope = b.constant(Constant::ContextNames {
+        names: names.clone(),
+        flags,
+    });
+    assert_eq!(b.constant(Constant::ContextNames { names, flags }), scope);
 
     let callable = b.constant(Constant::Callable(FunctionId(3)));
     assert_eq!(b.constant(Constant::Callable(FunctionId(3))), callable);

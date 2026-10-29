@@ -10,7 +10,6 @@ use crate::{
 };
 
 use crate::Float;
-use crate::GcSlot;
 use crate::HandleScope;
 use crate::PartialDescriptor;
 use crate::proxy::Flow;
@@ -59,6 +58,7 @@ pub fn native_fn(id: bytecode::BuiltinFn) -> NativeFn {
         bytecode::BuiltinFn::ConstructSuperVia => construct_super_via,
         bytecode::BuiltinFn::LoadDynamicName => load_dynamic_name,
         bytecode::BuiltinFn::StoreDynamicName => store_dynamic_name,
+        bytecode::BuiltinFn::DeclareEvalVar => declare_eval_var,
         bytecode::BuiltinFn::CreateRestParameter => create_rest_parameter,
         bytecode::BuiltinFn::SuperGetProperty => super_get_property,
         bytecode::BuiltinFn::SuperSetProperty => super_set_property,
@@ -1235,31 +1235,6 @@ fn frame_context_value<'a>(
     Ok(state.stack.context(heap, state.frame_base()))
 }
 
-/// Find the slot named `name` in `context`'s chain (direct eval). Returns
-/// the slot cell, or Reference when no context in the chain has the name.
-fn dynamic_slot<'a>(
-    heap: &'a Heap,
-    context: &mut Tagged<'a, ContextObject>,
-    name: Tagged<'a, Value>,
-) -> Result<&'a GcSlot, VmError> {
-    // both sides are interned (constant pool / ScopeInfo names), so
-    // pointer identity decides — no content comparison in lookup
-    name.get_as::<DenseString>(heap).ok_or(VmError::Type)?;
-    loop {
-        let ctx = *context;
-        let names = ctx.scope_info.get(heap).names.get(heap);
-        for i in 0..names.len() {
-            if names.at(heap, i) == name {
-                return Ok(ctx.slots.get(heap).as_ref().element_slot(i));
-            }
-        }
-        match ctx.outer.get(heap) {
-            Some(outer) => *context = outer,
-            None => return Err(VmError::Reference),
-        }
-    }
-}
-
 /// Walk the current frame's context chain looking for a slot named
 /// `name` (direct eval): Some(slot value) found (possibly the hole),
 /// None when the whole chain lacks the name. The result is rooted in
@@ -1272,10 +1247,44 @@ fn dynamic_lookup_frame<'s>(
 ) -> Result<Option<Handle<'s, Value>>, VmError> {
     let context = frame_context_value(state, heap)?;
     let mut context = context.get_as::<ContextObject>(heap).ok_or(VmError::Type)?;
-    match dynamic_slot(heap, &mut context, name.as_tagged(heap)) {
-        Ok(slot) => Ok(Some(scope.handle(slot.get(heap)))),
-        Err(VmError::Reference) => Ok(None),
-        Err(e) => Err(e),
+    loop {
+        let ctx = context;
+        let names = ctx.scope_info.get(heap).names.get(heap);
+        for i in 0..names.len() {
+            if names.at(heap, i) == name.as_tagged(heap) {
+                return Ok(Some(
+                    scope.handle(ctx.slots.get(heap).as_ref().element_slot(i).get(heap)),
+                ));
+            }
+        }
+        if let Some(extension) = ctx.extension.get(heap)
+            && let Some(value) = extension_property(heap, scope, extension, name)
+        {
+            return Ok(Some(value));
+        }
+        match ctx.outer.get(heap) {
+            Some(outer) => context = outer,
+            None => return Ok(None),
+        }
+    }
+}
+
+/// Own-property lookup on a context extension object. Extension objects are
+/// internal variable environments: they behave as if they have no prototype.
+fn extension_property<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    extension: Tagged<'_, Object>,
+    name: Handle<'_, Value>,
+) -> Option<Handle<'s, Value>> {
+    let extension = scope.handle(extension.erase());
+    let mut it = crate::lookup::Lookup::new(heap, scope, extension, name, true);
+    match it.next(heap, scope) {
+        crate::lookup::Hit::Miss => None,
+        crate::lookup::Hit::Data { value, .. }
+        | crate::lookup::Hit::Element { value, .. }
+        | crate::lookup::Hit::Parent { value, .. } => Some(scope.handle(value)),
+        _ => Some(scope.handle(heap.known().undefined.get(heap).erase())),
     }
 }
 
@@ -1908,7 +1917,8 @@ fn construct_super_via<'a>(
 // ---- dynamic names (direct eval) ---------------------------------------------
 
 /// Direct-eval name load: (name) -> value. Walks the frame context chain
-/// by name; unresolved names fall back to the global object.
+/// by name (slots, then extension objects); unresolved names fall back to
+/// the global object.
 fn load_dynamic_name<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -1937,8 +1947,9 @@ fn load_dynamic_name<'a>(
     })
 }
 
-/// Direct-eval name store: (value, name) -> value. Writes through to the
-/// context-chain slot; unresolved names store on the global object.
+/// Direct-eval name store: (value, name) -> value. Walks the caller's
+/// context chain in order (slots then extension object per context);
+/// unresolved names store on the global object.
 fn store_dynamic_name<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
@@ -1950,68 +1961,175 @@ fn store_dynamic_name<'a>(
     let value = args.get_handle(heap, 0);
     let name = args.get_handle(heap, 1);
     state.handle_scope(|scope| {
-        let found = rt_try!(
+        debug_assert!(state.is_frame_active());
+        let header = state.stack().frame_header(state.frame_base());
+        let callable = header.callable(heap);
+        let info = callable
+            .callable_info(heap)
+            .expect("a bytecode frame's callable must have callable info");
+        let mode = info.mode();
+
+        let context = rt_try!(vm, heap, state, frame_context_value(state, heap));
+        let mut context = rt_try!(
             vm,
             heap,
             state,
-            dynamic_lookup_frame(heap, state, &scope, name)
+            context.get_as::<ContextObject>(heap).ok_or(VmError::Type)
         );
-        match found {
-            Some(v) if !is_the_hole(heap, vm.known(), v.as_tagged(heap)) => {
-                // write through to the found slot
-                let context = rt_try!(vm, heap, state, frame_context_value(state, heap));
-                let mut context = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    context.get_as::<ContextObject>(heap).ok_or(VmError::Type)
-                );
-                let target = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    dynamic_slot(heap, &mut context, name.as_tagged(heap))
-                );
-                let host = context.erase();
-                target.set(heap, host, value.as_tagged(heap));
-            }
-            Some(_) => return raise_runtime(vm, heap, state, VmError::Reference),
-            None => {
-                // `dynamic_lookup_frame` above established that a frame is
-                // active, so the current callable's mode is valid here.
-                debug_assert!(state.is_frame_active());
-                let header = state.stack().frame_header(state.frame_base());
-                let callable = header.callable(heap);
-                let info = callable
-                    .callable_info(heap)
-                    .expect("a bytecode frame's callable must have callable info");
-                let mode = info.mode();
-                let global = scope.handle(vm.known().global_object.get(heap).erase());
-                let threw = state.handle_scope(|scope| -> Result<bool, VmError> {
-                    let key = scope.handle(name.as_tagged(heap).erase());
-                    match Object::set_property(
-                        vm,
+        let target = loop {
+            let ctx = context;
+            let names = ctx.scope_info.get(heap).names.get(heap);
+            for i in 0..names.len() {
+                if names.at(heap, i) == name.as_tagged(heap) {
+                    let host = ctx.erase();
+                    ctx.slots.get(heap).as_ref().element_slot(i).set(
                         heap,
-                        state,
-                        global,
-                        global,
-                        key,
-                        value,
-                        StoreSemantics::WriteThrough,
-                        true,
-                        mode,
-                    )? {
-                        Flow::Threw => Ok(true),
-                        Flow::Value(_) => Ok(false),
-                    }
-                });
-                let threw = rt_try!(vm, heap, state, threw);
-                if threw {
-                    return vm.known().exception.get(heap).erase();
+                        host,
+                        value.as_tagged(heap),
+                    );
+                    return value.as_tagged(heap);
                 }
             }
+            if let Some(extension) = ctx.extension.get(heap)
+                && extension_property(heap, &scope, extension, name).is_some()
+            {
+                break scope.handle(extension.erase());
+            }
+            match ctx.outer.get(heap) {
+                Some(outer) => context = outer,
+                None => break scope.handle(vm.known().global_object.get(heap).erase()),
+            }
+        };
+
+        let key = scope.handle(name.as_tagged(heap).erase());
+        match rt_try!(
+            vm,
+            heap,
+            state,
+            Object::set_property(
+                vm,
+                heap,
+                state,
+                target,
+                target,
+                key,
+                value,
+                StoreSemantics::WriteThrough,
+                true,
+                mode,
+            )
+        ) {
+            Flow::Threw => vm.known().exception.get(heap).erase(),
+            Flow::Value(_) => value.as_tagged(heap),
         }
-        value.as_tagged(heap)
+    })
+}
+
+/// Sloppy direct-eval var declaration: (name) -> undefined. Creates the
+/// binding in the caller's nearest declaration environment when absent.
+/// Existing var bindings are left untouched (the initializer assignment,
+/// if any, is a separate dynamic store).
+fn declare_eval_var<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    let name = args.get_handle(heap, 0);
+    state.handle_scope(|scope| {
+        let context = rt_try!(vm, heap, state, frame_context_value(state, heap));
+        let mut context = rt_try!(
+            vm,
+            heap,
+            state,
+            context.get_as::<ContextObject>(heap).ok_or(VmError::Type)
+        );
+        // A declaration context is the variable environment: function /
+        // script contexts, or a strict eval context. Sloppy eval and normal
+        // block/for/class contexts are skipped.
+        loop {
+            if context
+                .scope_info
+                .get(heap)
+                .as_ref()
+                .is_declaration_context()
+            {
+                break;
+            }
+            match context.outer.get(heap) {
+                Some(outer) => context = outer,
+                None => return raise_runtime(vm, heap, state, VmError::Type),
+            }
+        }
+        let context = context.as_handle(&scope);
+        let ctx = context.as_tagged(heap);
+
+        // Existing statically allocated var: re-declaration is a no-op.
+        let names = ctx.scope_info.get(heap).names.get(heap);
+        for i in 0..names.len() {
+            if names.at(heap, i) == name.as_tagged(heap) {
+                return vm.known().undefined.get(heap).erase();
+            }
+        }
+        // Existing dynamically declared var.
+        if let Some(extension) = ctx.extension.get(heap)
+            && extension_property(heap, &scope, extension, name).is_some()
+        {
+            return vm.known().undefined.get(heap).erase();
+        }
+
+        let is_script = ctx.scope_info.get(heap).as_ref().is_script_context();
+        let target = if is_script {
+            let global = scope.handle(vm.known().global_object.get(heap).erase());
+            let mut it = crate::lookup::Lookup::new(heap, &scope, global, name, true);
+            if !matches!(it.next(heap, &scope), crate::lookup::Hit::Miss) {
+                return vm.known().undefined.get(heap).erase();
+            }
+            global
+        } else {
+            let extension = match ctx.extension.get(heap) {
+                Some(extension) => extension.as_handle(&scope),
+                None => {
+                    let map = scope.handle(vm.known().object_initial_map.get(heap));
+                    let extension = heap
+                        .new_object(&scope, map, HandleSlice::EMPTY)
+                        .as_handle(&scope);
+                    let ctx = context.as_tagged(heap);
+                    ctx.extension
+                        .set(heap, ctx.erase(), extension.as_tagged(heap));
+                    extension
+                }
+            };
+            scope.handle(extension.as_tagged(heap).erase())
+        };
+        let target = rt_try!(
+            vm,
+            heap,
+            state,
+            scope
+                .cast::<Object>(heap, target.as_tagged(heap))
+                .ok_or(VmError::Type)
+        );
+        let key = scope.handle(name.as_tagged(heap).as_name());
+        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
+        let defined = rt_try!(
+            vm,
+            heap,
+            state,
+            Object::define_own_property(
+                heap,
+                &scope,
+                target,
+                key,
+                PropertyDescriptor::data(undefined),
+            )
+        );
+        if !defined {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        }
+        vm.known().undefined.get(heap).erase()
     })
 }
 

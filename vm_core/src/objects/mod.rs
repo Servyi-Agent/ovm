@@ -24,7 +24,7 @@ pub use cell::{Cell, CellInit};
 pub use code::{Code, CodeInit};
 pub use context::{
     ContextInit, ContextObject, HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit,
-    ScopeInfo, ScopeInfoInit,
+    SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit,
 };
 pub use data_handler::{DataHandler, DataHandlerInit};
 pub use dictionary::{

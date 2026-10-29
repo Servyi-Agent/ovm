@@ -18,6 +18,7 @@ use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
     Symbol, UnaryOp,
 };
+use vm_core::SCOPE_DECLARATION;
 
 use crate::CompileError;
 
@@ -310,7 +311,10 @@ impl<'a> FunctionGen<'a> {
             .iter()
             .map(|d| self.ast.symbol(d.name).into())
             .collect();
-        let ctx_info = self.b.constant(Constant::ContextNames(names));
+        let ctx_info = self.b.constant(Constant::ContextNames {
+            names,
+            flags: SCOPE_DECLARATION,
+        });
         self.b.create_function_context(ctx_info);
         self.b.push_context(self.ctx_save);
         self.b.load_undefined();

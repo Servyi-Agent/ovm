@@ -11,6 +11,7 @@ use bytecode::{
     BuiltinFn, CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, Label,
     Opcode, Program, PropertyFlags, Reg, RegList, RtArg, TempScope,
 };
+use vm_core::{SCOPE_DECLARATION, SCOPE_SCRIPT};
 
 use crate::analysis::{ClassIdx, Facts, Fid, FnBody, FnKind, Home, MemberKind, Mode, Special};
 
@@ -489,6 +490,9 @@ pub struct Compiler<'a, 'p> {
     layouts: Vec<Layout>,
     /// fid → its oxc function scope (eval detection)
     fid_scope: HashMap<Fid, ScopeId>,
+    /// any sloppy direct eval in the program (fast path for identifier
+    /// resolution: without one, static bindings cannot be shadowed)
+    any_sloppy_eval: bool,
     /// for-head scopes: next slot index (declaration-order assignment)
     for_counters: HashMap<ScopeId, u32>,
 }
@@ -546,6 +550,10 @@ pub fn generate<'a>(scoping: &Scoping, facts: &Facts<'a>) -> Result<Program, Com
             nested_scopes_by_fid[fid.0 as usize].push(sid);
         }
     }
+    let any_sloppy_eval = facts.fn_scope_to_fid.iter().any(|(&scope, &fid)| {
+        !facts.functions[fid.0 as usize].strict
+            && scoping.scope_flags(scope).contains(ScopeFlags::DirectEval)
+    });
     let mut compiler = Compiler {
         scoping,
         facts,
@@ -569,6 +577,7 @@ pub fn generate<'a>(scoping: &Scoping, facts: &Facts<'a>) -> Result<Program, Com
             .iter()
             .map(|(&s, &f)| (f, s))
             .collect(),
+        any_sloppy_eval,
         for_counters: HashMap::new(),
     };
     // Frame layouts decide both register counts and whether a function
@@ -1186,6 +1195,88 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         matches!(self.identifier_resolution(ident), Ok(IdRes::Global))
     }
 
+    /// Whether `sym` is a top-level `var` in a sloppy direct-eval program.
+    /// Such declarations belong to the caller's variable environment, not
+    /// the eval frame.
+    fn is_eval_dynamic_var(&self, sym: SymbolId) -> bool {
+        if !matches!(self.c.facts.mode, Mode::Eval) || self.fid != Fid(0) {
+            return false;
+        }
+        // Strict eval keeps its vars local; only sloppy direct eval extends
+        // the caller's variable environment.
+        if self.c.facts.functions[self.fid.0 as usize].strict {
+            return false;
+        }
+        let flags = self.c.scoping.symbol_flags(sym);
+        self.c.scoping.symbol_scope_id(sym) == self.c.facts.root
+            && flags.contains(SymbolFlags::FunctionScopedVariable)
+            && !flags.contains(SymbolFlags::Function)
+    }
+
+    /// Whether the reference's enclosing scope chain contains a direct eval.
+    /// oxc propagates `DirectEval` to ancestor scopes; a sloppy eval there may
+    /// introduce names that no static binding resolved.
+    fn scope_has_direct_eval(&self, scope: ScopeId) -> bool {
+        let mut current = Some(scope);
+        while let Some(scope) = current {
+            if self
+                .c
+                .scoping
+                .scope_flags(scope)
+                .contains(ScopeFlags::DirectEval)
+            {
+                return true;
+            }
+            current = self.c.scoping.scope_parent_id(scope);
+        }
+        false
+    }
+
+    /// The function owning a resolved symbol's declaration scope.
+    fn symbol_owner_fn(&self, sym: SymbolId) -> Option<Fid> {
+        let mut current = Some(self.c.scoping.symbol_scope_id(sym));
+        while let Some(scope) = current {
+            if let Some(&fid) = self.c.facts.fn_scope_to_fid.get(&scope) {
+                return Some(fid);
+            }
+            current = self.c.scoping.scope_parent_id(scope);
+        }
+        None
+    }
+
+    /// A static binding outside an eval-extendable function is not stable:
+    /// the eval may add a same-named binding in the eval function's
+    /// environment, which shadows the outer one for code inside it.
+    fn eval_may_shadow(&self, sym: SymbolId, reference_scope: ScopeId) -> bool {
+        if !self.c.any_sloppy_eval {
+            return false;
+        }
+        let Some(owner) = self.symbol_owner_fn(sym) else {
+            return false;
+        };
+        let mut current = Some(reference_scope);
+        while let Some(scope) = current {
+            if let Some(&fid) = self.c.facts.fn_scope_to_fid.get(&scope) {
+                // Reached the declaration function: within its own
+                // environment a var redeclaration updates the same slot.
+                if fid == owner {
+                    return false;
+                }
+                if !self.c.facts.functions[fid.0 as usize].strict
+                    && self
+                        .c
+                        .scoping
+                        .scope_flags(scope)
+                        .contains(ScopeFlags::DirectEval)
+                {
+                    return true;
+                }
+            }
+            current = self.c.scoping.scope_parent_id(scope);
+        }
+        false
+    }
+
     fn identifier_resolution(
         &mut self,
         ident: &IdentifierReference<'_>,
@@ -1195,11 +1286,20 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         };
         let reference = self.c.scoping.get_reference(rid);
         match reference.symbol_id() {
-            None => Ok(match self.c.facts.mode {
-                Mode::Eval => IdRes::Dynamic,
-                _ => IdRes::Global,
-            }),
+            None => {
+                let dynamic = matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict)
+                    || self.scope_has_direct_eval(reference.scope_id());
+                Ok(if dynamic {
+                    IdRes::Dynamic
+                } else {
+                    IdRes::Global
+                })
+            }
             Some(sym) => {
+                if self.is_eval_dynamic_var(sym) || self.eval_may_shadow(sym, reference.scope_id())
+                {
+                    return Ok(IdRes::Dynamic);
+                }
                 let skip_hole = self.c.facts.ref_skip_hole.contains(&rid);
                 let check = |hole: bool| hole && !skip_hole;
                 let slot = self.c.slot_of(sym);
@@ -3813,12 +3913,21 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     let Some(sym) = b.symbol_id.get() else {
                         return self.err(b.span, "declaration without a binding");
                     };
+                    let eval_dynamic = self.is_eval_dynamic_var(sym);
                     if let Some(init) = &decl.init {
                         self.expr(init)?;
                         if self.is_anon_function(init) {
                             self.emit_set_name_const(b.name.as_bytes());
                         }
-                        self.store_symbol(sym, b.name.as_ref())?;
+                        if eval_dynamic {
+                            let idx = self.b.name(b.name.as_bytes());
+                            self.b.call_runtime_staged(
+                                BuiltinFn::StoreDynamicName,
+                                &[RtArg::Acc, RtArg::Const(idx)],
+                            );
+                        } else {
+                            self.store_symbol(sym, b.name.as_ref())?;
+                        }
                     } else if d.kind == VariableDeclarationKind::Let {
                         // ES InitializeBinding: `let x;` initializes x to
                         // undefined. `var` is already undefined from frame
@@ -4434,7 +4543,21 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 .iter()
                 .map(|n| n.as_slice().into())
                 .collect();
-            let ctx_info = self.b.constant(Constant::ContextNames(names));
+            let func = &self.c.facts.functions[self.fid.0 as usize];
+            // A function/script context is a var-declaration environment.
+            // A sloppy eval root is not: its vars hoist to the caller.
+            let eval_root =
+                matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict) && self.fid == Fid(0);
+            let declaration = !(eval_root && !func.strict);
+            let script = func.kind == FnKind::Script && !eval_root;
+            let mut flags = 0;
+            if declaration {
+                flags |= SCOPE_DECLARATION;
+            }
+            if script {
+                flags |= SCOPE_SCRIPT;
+            }
+            let ctx_info = self.b.constant(Constant::ContextNames { names, flags });
             self.b.create_function_context(ctx_info);
             self.push_frame_context();
         }
@@ -4632,6 +4755,12 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if let Some(vars) = self.c.facts.hoist_vars.get(&self.fid).cloned() {
             for sym in vars {
                 let name = self.c.scoping.symbol_name(sym).to_string();
+                if self.is_eval_dynamic_var(sym) {
+                    let idx = self.b.name(name.as_bytes());
+                    self.b
+                        .call_runtime_staged(BuiltinFn::DeclareEvalVar, &[RtArg::Const(idx)]);
+                    continue;
+                }
                 match self.c.slot_of(sym) {
                     Slot::Global => {
                         let idx = self.b.name(name.as_bytes());

@@ -60,10 +60,10 @@ pub use objects::{
     FeedbackVectorInit, FixedArray, FixedByteArray, Float, FunctionKind, HandlerEntry,
     HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject, Key, Map, MapInit,
     MapKind, NumberDictionary, NumberDictionaryInit, Object, ObjectInit, ObjectKind,
-    ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit, ProxyObject, ScopeInfo,
-    ScopeInfoInit, SlotDescriptor, SlotFlags, SlotName, StringData, StringOwn, Symbol,
-    WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8, new_feedback_vector, object_kind,
-    object_layout, string_content_hash, visit_object,
+    ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION,
+    SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, SlotDescriptor, SlotFlags, SlotName, StringData,
+    StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8,
+    new_feedback_vector, object_kind, object_layout, string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};
