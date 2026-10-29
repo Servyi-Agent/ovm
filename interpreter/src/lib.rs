@@ -264,6 +264,9 @@ fn op_load_current_closure(frame: Frame) {
 #[handler(LoadGlobal)]
 fn op_load_global(frame: Frame) {
     let heap = frame.ctx().heap();
+    if heap.known().script_context_table.get(heap).length() != 0 {
+        tail!(slow_global_load)
+    }
     let fb = frame.unsigned::<1>();
     let global = roots.global_object.get(heap).erase();
     if let Some(LoadHit::Value(v)) =
@@ -1470,7 +1473,7 @@ fn op_create_function_context(frame: Frame) {
             .constants(heap)
             .at(heap, scope_idx)
             .get_as::<ScopeInfo>(heap)
-            .map(|r| r.as_ref().names.get(heap).len())
+            .map(|r| r.local_count())
         else {
             return raise_runtime(vm, heap, state, VmError::Type);
         };

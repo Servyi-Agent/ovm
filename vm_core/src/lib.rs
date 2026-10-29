@@ -30,6 +30,7 @@ pub mod value;
 
 pub use objects::object::SetApplied;
 pub use objects::proxy;
+pub use objects::script_context::{global_lexical_get, global_lexical_has, global_lexical_set};
 pub use objects::string;
 
 pub use api::{EntryFn, ErasedRuntimeState, Interpreter, Runtime};
@@ -58,12 +59,15 @@ pub use objects::{
     DETAILS_CONFIGURABLE, DETAILS_DATA, DETAILS_ENUMERABLE, DETAILS_WRITABLE, DataHandler,
     DataHandlerInit, DenseString, ElementsKind, Encoding, EntryClass, FeedbackVector,
     FeedbackVectorInit, FixedArray, FixedByteArray, Float, FunctionKind, HandlerEntry,
-    HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject, Key, Map, MapInit,
-    MapKind, NumberDictionary, NumberDictionaryInit, Object, ObjectInit, ObjectKind,
-    ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit, ProxyObject, SCOPE_DECLARATION,
-    SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, SlotDescriptor, SlotFlags, SlotName, StringData,
+    HandlerEntryInit, HandlerTable, HandlerTableInit, Header, HeapObject, INFO_GLOBAL,
+    INFO_MODE_MASK, Key, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, Map, MapInit, MapKind,
+    NameToIndexHashTable, NameToIndexHashTableInit, NumberDictionary, NumberDictionaryInit, Object,
+    ObjectInit, ObjectKind, ObjectSlotsInit, PrototypeInfo, PrototypeInfoInit, ProxyInit,
+    ProxyObject, SCOPE_DECLARATION, SCOPE_REPL, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit,
+    ScriptContextTable, ScriptContextTableInit, SlotDescriptor, SlotFlags, SlotName, StringData,
     StringOwn, Symbol, WeakFixedArray, WeakFixedArrayInit, WrapperKind, decode_wtf8,
-    new_feedback_vector, object_kind, object_layout, string_content_hash, visit_object,
+    info_is_immutable, info_is_lexical, info_mode, new_feedback_vector, object_kind, object_layout,
+    string_content_hash, visit_object,
 };
 pub use prototype::{Prototype, PrototypeRegistry};
 pub use stack::{Args, Callee, FrameMeta, Recv, STACK_SLOTS, Stack};
@@ -147,6 +151,8 @@ pub struct SharedVM {
     /// Interpreter entry ([[Call]]/[[Construct]] on bytecode callables);
     /// set once at construction from the `I: Interpreter` type parameter.
     execute: EntryFn,
+    /// JS source compiler used by direct eval; installed by the JS runtime.
+    eval_compile: std::sync::OnceLock<bytecode::CompileFn>,
 }
 
 pub struct VM {
@@ -648,6 +654,7 @@ impl VM {
             weak_slots: Mutex::new(Vec::new()),
             shutdown_requested: AtomicBool::new(false),
             execute: I::EXECUTE,
+            eval_compile: std::sync::OnceLock::new(),
         });
         shared.heap.set_host(shared.gc_host());
         let mut local = shared
@@ -692,6 +699,14 @@ impl VM {
             .runtimes
             .get(index)
             .expect("unknown runtime index")
+    }
+
+    pub fn set_eval_compiler(&self, compile: bytecode::CompileFn) {
+        let _ = self.shared.eval_compile.set(compile);
+    }
+
+    pub fn eval_compiler(&self) -> Option<bytecode::CompileFn> {
+        self.shared.eval_compile.get().copied()
     }
 
     pub fn register_runtime(&mut self, f: NativeFn) -> NativeIndex {

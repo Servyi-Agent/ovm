@@ -962,6 +962,15 @@ pub fn global_load_body<'a>(
         );
         let global_handle = scope.handle(global);
         let global_value = scope.handle(global_handle.as_tagged(heap).erase());
+        let name_value = name.as_tagged(heap).erase();
+        let lexical = match vm_core::global_lexical_get(heap, name_value) {
+            Ok(Some(value)) => Some(scope.handle(value)),
+            Ok(None) => None,
+            Err(err) => return raise_runtime(vm, heap, state, err),
+        };
+        if let Some(value) = lexical {
+            return value.as_tagged(heap).erase();
+        }
         let out = match Object::get_property(
             vm,
             heap,
@@ -1270,6 +1279,13 @@ pub fn slow_store_global(frame: Frame) {
                 .as_name(),
         );
         let global = scope.handle(roots.global_object.get(heap).erase());
+        let name_value = name.as_tagged(heap).erase();
+        if vm_core::global_lexical_has(heap, name_value) {
+            return match vm_core::global_lexical_set(heap, name_value, value.as_tagged(heap)) {
+                Ok(()) => value.as_tagged(heap).erase(),
+                Err(err) => raise_runtime(vm, heap, state, err),
+            };
+        }
         // contextual store: a strict undeclared global raises
         // ReferenceError inside `Object::set_property`
         store_named_tail(

@@ -20,6 +20,8 @@ pub enum SourceMode {
     /// strict direct eval: dynamic lookups still target the caller's
     /// context chain, but top-level vars stay local to the eval.
     EvalStrict,
+    /// indirect eval: global environment and global `this`
+    EvalGlobal,
     /// top-level declarations become global object properties
     Repl,
 }
@@ -91,6 +93,31 @@ pub enum CallableKind {
 
 /// Constant-pool entry. The VM materializes these into heap objects:
 /// interned strings, `Float`s, and shared callable templates for closures.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScopeLocal {
+    pub name: Box<[u8]>,
+    /// packed binding mode and global-record bit
+    pub info: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScopeLayout {
+    pub locals: Box<[ScopeLocal]>,
+    pub flags: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GlobalFunctionDecl {
+    pub name: Box<[u8]>,
+    pub function: FunctionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GlobalDeclarations {
+    pub vars: Box<[Box<[u8]>]>,
+    pub funcs: Box<[GlobalFunctionDecl]>,
+}
+
 /// The well-known singletons (undefined/null/true/false/0) load through
 /// their dedicated `Load*` opcodes instead of the constant pool.
 ///
@@ -111,11 +138,16 @@ pub enum Constant {
     /// dynamic name resolution) and its declaration-context flags;
     /// materialized into a shared `ScopeInfo` referenced by
     /// `CreateFunctionContext`
-    ContextNames { names: Vec<Box<[u8]>>, flags: i64 },
+    ScopeInfo(ScopeLayout),
+    /// One script's global var/function declarations, validated and
+    /// installed together before the body runs.
+    GlobalDeclarations(GlobalDeclarations),
     /// %Object.prototype% (base-class prototype parent)
     ObjectPrototype,
     /// %Function.prototype% (base-class constructor parent)
     FunctionPrototype,
+    /// The realm's global object (`this` in global code)
+    GlobalObject,
 }
 
 impl Constant {
@@ -126,9 +158,11 @@ impl Constant {
             Self::Float(f) => ConstantKey::Float(f.to_bits()),
             Self::Smi(v) => ConstantKey::Smi(*v),
             Self::Callable(id) => ConstantKey::Callable(*id),
-            Self::ContextNames { names, flags } => ConstantKey::ContextNames(names, *flags),
+            Self::ScopeInfo(layout) => ConstantKey::ScopeInfo(layout),
+            Self::GlobalDeclarations(decls) => ConstantKey::GlobalDeclarations(decls),
             Self::ObjectPrototype => ConstantKey::ObjectPrototype,
             Self::FunctionPrototype => ConstantKey::FunctionPrototype,
+            Self::GlobalObject => ConstantKey::GlobalObject,
         }
     }
 }
@@ -154,9 +188,11 @@ enum ConstantKey<'a> {
     Float(u64),
     Smi(i64),
     Callable(FunctionId),
-    ContextNames(&'a [Box<[u8]>], i64),
+    ScopeInfo(&'a ScopeLayout),
+    GlobalDeclarations(&'a GlobalDeclarations),
     ObjectPrototype,
     FunctionPrototype,
+    GlobalObject,
 }
 
 /// `layout [try_start, try_end, handler_pc]`: a half-open bytecode region.

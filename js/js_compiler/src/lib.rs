@@ -67,6 +67,7 @@ pub fn compile_js(source: &str, mode: SourceMode) -> Result<Program, FrontendErr
                 SourceMode::Script => analysis::Mode::Script,
                 SourceMode::Eval => analysis::Mode::Eval,
                 SourceMode::EvalStrict => analysis::Mode::EvalStrict,
+                SourceMode::EvalGlobal => analysis::Mode::EvalGlobal,
                 SourceMode::Repl => analysis::Mode::Repl,
             },
         )

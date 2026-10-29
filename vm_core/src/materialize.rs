@@ -10,8 +10,9 @@
 
 use crate::{
     CallableInfoInit, CallableInfoObject, Code, CodeInit, ContextObject, FixedArray, FunctionKind,
-    Handle, HandleScope, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap, Object, ScopeInfo,
-    ScopeInfoInit, Tagged, Value, VmError, decode_wtf8, mode_from_strict, new_feedback_vector,
+    Handle, HandleScope, HandleSlice, HandlerEntryInit, HandlerTable, HandlerTableInit, Heap,
+    Object, ScopeInfo, ScopeInfoInit, Tagged, Value, VmError, decode_wtf8, mode_from_strict,
+    new_feedback_vector,
 };
 
 use bytecode::{CallableKind, Constant, FunctionId, Program};
@@ -109,24 +110,51 @@ fn materialize_function<'s>(
                 let info = materialize_function(vm, heap, state, scope, program, infos, *child)?;
                 info.erase()
             }
-            Constant::ContextNames { names, flags } => {
-                let interned: Vec<Handle<'s, Value>> = names
+            Constant::ScopeInfo(layout) => {
+                let names: Vec<Handle<'s, Value>> = layout
+                    .locals
                     .iter()
-                    .map(|n| intern(heap, state, scope, vm, n).erase())
+                    .map(|local| intern(heap, state, scope, vm, &local.name).erase())
                     .collect();
-                let words: Vec<Tagged<'_, Value>> =
-                    interned.iter().map(|h| h.as_tagged(heap)).collect();
-                let names = heap.allocate_handle::<FixedArray>(scope.stage(&words), scope);
-                // one shared ScopeInfo per compiled scope; every activation
-                // of the scope references it from its context
+                let names: HandleSlice<'s> =
+                    scope.stage(&names.iter().map(|h| h.as_tagged(heap)).collect::<Vec<_>>());
+                let infos: Vec<i64> = layout.locals.iter().map(|l| l.info as i64).collect();
                 heap.allocate_handle::<ScopeInfo>(
                     ScopeInfoInit {
                         names,
-                        flags: *flags,
+                        infos: &infos,
+                        flags: layout.flags,
                     },
                     scope,
                 )
                 .erase()
+            }
+            Constant::GlobalDeclarations(decls) => {
+                let mut values: Vec<Handle<'s, Value>> = Vec::new();
+                values.push(scope.handle(Smi::new(decls.vars.len() as i64)));
+                for name in &decls.vars {
+                    values.push(intern(heap, state, scope, vm, name).erase());
+                }
+                values.push(scope.handle(Smi::new(decls.funcs.len() as i64)));
+                for decl in &decls.funcs {
+                    values.push(intern(heap, state, scope, vm, &decl.name).erase());
+                }
+                for decl in &decls.funcs {
+                    let info = materialize_function(
+                        vm,
+                        heap,
+                        state,
+                        scope,
+                        program,
+                        infos,
+                        decl.function,
+                    )?;
+                    values.push(info.erase());
+                }
+                let words: Vec<Tagged<'_, Value>> =
+                    values.iter().map(|h| h.as_tagged(heap)).collect();
+                heap.allocate_handle::<FixedArray>(scope.stage(&words), scope)
+                    .erase()
             }
             Constant::ObjectPrototype => {
                 scope.handle(vm.known().object_prototype.get(heap).erase())
@@ -134,6 +162,7 @@ fn materialize_function<'s>(
             Constant::FunctionPrototype => {
                 scope.handle(vm.known().function_prototype.get(heap).erase())
             }
+            Constant::GlobalObject => scope.handle(vm.known().global_object.get(heap).erase()),
         };
         materialized.push(value);
     }

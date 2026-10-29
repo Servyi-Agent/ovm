@@ -4,14 +4,17 @@
 //! its ES section), not JS-visible library functions.
 
 use crate::{
-    AccessorPair, Args, Coercion, ContextObject, Convert, DenseString, FixedArray, Handle,
-    HandleSlice, Heap, Key, LanguageMode, Object, ObjectSlotsInit, PropertyDescriptor, SlotName,
-    Smi, StoreSemantics, StringData, StringOwn, Symbol, Tagged, Value, VmError, WellKnown,
+    AccessorPair, Args, CallableInfoObject, Coercion, ContextObject, Convert, DenseString,
+    FixedArray, Handle, HandleSlice, Heap, INFO_GLOBAL, Key, LanguageMode, MODE_CLASS, MODE_LET,
+    Object, ObjectSlotsInit, PropertyDescriptor, SlotFlags, SlotName, Smi, StoreSemantics,
+    StringData, StringOwn, Symbol, Tagged, Value, VmError, WellKnown, info_is_immutable,
+    info_is_lexical, info_mode,
 };
 
 use crate::Float;
 use crate::HandleScope;
 use crate::PartialDescriptor;
+use crate::materialize::Materialize;
 use crate::proxy::Flow;
 use crate::proxy::Proxy;
 use crate::tools::KetteTools;
@@ -59,6 +62,12 @@ pub fn native_fn(id: bytecode::BuiltinFn) -> NativeFn {
         bytecode::BuiltinFn::LoadDynamicName => load_dynamic_name,
         bytecode::BuiltinFn::StoreDynamicName => store_dynamic_name,
         bytecode::BuiltinFn::DeclareEvalVar => declare_eval_var,
+        bytecode::BuiltinFn::DeclareEvalFunction => declare_eval_function,
+        bytecode::BuiltinFn::ResolveDirectEval => resolve_direct_eval,
+        bytecode::BuiltinFn::StoreReplGlobalInit => store_repl_global_init,
+        bytecode::BuiltinFn::ValidateEvalDeclarations => validate_eval_declarations,
+        bytecode::BuiltinFn::DeclareGlobals => declare_globals,
+        bytecode::BuiltinFn::ThrowConstAssign => throw_const_assign_error,
         bytecode::BuiltinFn::CreateRestParameter => create_rest_parameter,
         bytecode::BuiltinFn::SuperGetProperty => super_get_property,
         bytecode::BuiltinFn::SuperSetProperty => super_set_property,
@@ -259,6 +268,10 @@ fn delete_identifier_sloppy<'a>(
         heap,
         state,
         state.handle_scope(|scope| {
+            let name = scope.handle(args.get(heap, 0));
+            if crate::global_lexical_has(heap, name.as_tagged(heap)) {
+                return Ok(false);
+            }
             let global = scope.handle(vm.known().global_object.get(heap).erase());
             let name = scope.handle(args.get(heap, 0));
             delete_property_core(heap, vm.known(), &scope, global, name)
@@ -1249,13 +1262,15 @@ fn dynamic_lookup_frame<'s>(
     let mut context = context.get_as::<ContextObject>(heap).ok_or(VmError::Type)?;
     loop {
         let ctx = context;
-        let names = ctx.scope_info.get(heap).names.get(heap);
-        for i in 0..names.len() {
-            if names.at(heap, i) == name.as_tagged(heap) {
-                return Ok(Some(
-                    scope.handle(ctx.slots.get(heap).as_ref().element_slot(i).get(heap)),
-                ));
-            }
+        if !ctx.scope_info.get(heap).is_repl_context()
+            && let Some((i, _)) = ctx
+                .scope_info
+                .get(heap)
+                .context_slot_index(heap, name.as_tagged(heap))
+        {
+            return Ok(Some(
+                scope.handle(ctx.slots.get(heap).as_ref().element_slot(i).get(heap)),
+            ));
         }
         if let Some(extension) = ctx.extension.get(heap)
             && let Some(value) = extension_property(heap, scope, extension, name)
@@ -1264,7 +1279,23 @@ fn dynamic_lookup_frame<'s>(
         }
         match ctx.outer.get(heap) {
             Some(outer) => context = outer,
-            None => return Ok(None),
+            None => {
+                let table = heap.known().script_context_table.get(heap);
+                let Some(found) = table.lookup(heap, name.as_tagged(heap)) else {
+                    return Ok(None);
+                };
+                let context = table.context(heap, found.context_index);
+                return Ok(Some(
+                    scope.handle(
+                        context
+                            .slots
+                            .get(heap)
+                            .as_ref()
+                            .element_slot(found.slot_index)
+                            .get(heap),
+                    ),
+                ));
+            }
         }
     }
 }
@@ -1936,7 +1967,9 @@ fn load_dynamic_name<'a>(
             dynamic_lookup_frame(heap, state, &scope, name)
         );
         match found {
-            Some(v) if !is_the_hole(heap, vm.known(), v.as_tagged(heap)) => v.as_tagged(heap),
+            Some(v) if !v.as_tagged(heap).ptr_eq(vm.known().the_hole.get(heap)) => {
+                v.as_tagged(heap)
+            }
             Some(_) => raise_runtime(vm, heap, state, VmError::Reference),
             None => {
                 // unresolved: fall back to a global object property
@@ -1978,17 +2011,21 @@ fn store_dynamic_name<'a>(
         );
         let target = loop {
             let ctx = context;
-            let names = ctx.scope_info.get(heap).names.get(heap);
-            for i in 0..names.len() {
-                if names.at(heap, i) == name.as_tagged(heap) {
-                    let host = ctx.erase();
-                    ctx.slots.get(heap).as_ref().element_slot(i).set(
-                        heap,
-                        host,
-                        value.as_tagged(heap),
-                    );
-                    return value.as_tagged(heap);
+            if !ctx.scope_info.get(heap).is_repl_context()
+                && let Some((i, info)) = ctx
+                    .scope_info
+                    .get(heap)
+                    .context_slot_index(heap, name.as_tagged(heap))
+            {
+                let slot = ctx.slots.get(heap).as_ref().element_slot(i);
+                if slot.get(heap) == heap.known().the_hole.get(heap).erase() {
+                    return raise_runtime(vm, heap, state, VmError::Reference);
                 }
+                if info_is_immutable(info) {
+                    return raise_runtime(vm, heap, state, VmError::Type);
+                }
+                slot.set(heap, ctx.erase(), value.as_tagged(heap));
+                return value.as_tagged(heap);
             }
             if let Some(extension) = ctx.extension.get(heap)
                 && extension_property(heap, &scope, extension, name).is_some()
@@ -2000,6 +2037,27 @@ fn store_dynamic_name<'a>(
                 None => break scope.handle(vm.known().global_object.get(heap).erase()),
             }
         };
+        if let Some(found) = heap
+            .known()
+            .script_context_table
+            .get(heap)
+            .lookup(heap, name.as_tagged(heap))
+        {
+            let ctx = heap
+                .known()
+                .script_context_table
+                .get(heap)
+                .context(heap, found.context_index);
+            let slot = ctx.slots.get(heap).as_ref().element_slot(found.slot_index);
+            if slot.get(heap) == heap.known().the_hole.get(heap).erase() {
+                return raise_runtime(vm, heap, state, VmError::Reference);
+            }
+            if info_is_immutable(found.info) {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
+            slot.set(heap, ctx.erase(), value.as_tagged(heap));
+            return value.as_tagged(heap);
+        }
 
         let key = scope.handle(name.as_tagged(heap).erase());
         match rt_try!(
@@ -2025,11 +2083,7 @@ fn store_dynamic_name<'a>(
     })
 }
 
-/// Sloppy direct-eval var declaration: (name) -> undefined. Creates the
-/// binding in the caller's nearest declaration environment when absent.
-/// Existing var bindings are left untouched (the initializer assignment,
-/// if any, is a separate dynamic store).
-fn declare_eval_var<'a>(
+fn store_repl_global_init<'a>(
     nctx: HostCtx<'a>,
     _new_target: Option<Handle<'_, Value>>,
     args: Args,
@@ -2037,94 +2091,249 @@ fn declare_eval_var<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
-    let name = args.get_handle(heap, 0);
+    let value = args.get_handle(heap, 0);
+    let name = args.get_handle(heap, 1);
+    state.handle_scope(|_scope| {
+        let table = heap.known().script_context_table.get(heap);
+        let Some(found) = table.lookup(heap, name.as_tagged(heap)) else {
+            return raise_runtime(vm, heap, state, VmError::Reference);
+        };
+        let context = table.context(heap, found.context_index);
+        context
+            .slots
+            .get(heap)
+            .as_ref()
+            .element_slot(found.slot_index)
+            .set(heap, context.erase(), value.as_tagged(heap));
+        value.as_tagged(heap)
+    })
+}
+
+/// Sloppy direct-eval declaration. `value == None` is a var; otherwise a
+/// function declaration is installed with that value.
+fn resolve_direct_eval<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    let callee = args.get_handle(heap, 0);
+    if callee.as_tagged(heap) != vm.known().eval_function.get(heap).erase() {
+        return callee.as_tagged(heap).erase();
+    }
+    let source = args.get_handle(heap, 1);
+    let Some(text) = source
+        .as_tagged(heap)
+        .get_as::<DenseString>(heap)
+        .map(|s| s.to_rust_string(heap))
+    else {
+        return callee.as_tagged(heap).erase();
+    };
+    let Some(compile) = vm.eval_compiler() else {
+        return callee.as_tagged(heap).erase();
+    };
+    let strict = state.is_frame_active()
+        && state
+            .stack()
+            .frame_header(state.frame_base())
+            .callable(heap)
+            .callable_info(heap)
+            .is_some_and(|info| info.mode() == LanguageMode::Strict);
+    let mode = if strict {
+        bytecode::SourceMode::EvalStrict
+    } else {
+        bytecode::SourceMode::Eval
+    };
+    let program = match compile(&text, mode) {
+        Ok(program) => program,
+        Err(_) => return raise_runtime(vm, heap, state, VmError::Syntax),
+    };
     state.handle_scope(|scope| {
         let context = rt_try!(vm, heap, state, frame_context_value(state, heap));
-        let mut context = rt_try!(
+        let Some(context) = scope.cast::<ContextObject>(heap, context) else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        match Materialize::closure_vm(vm, heap, state, &scope, &program, context) {
+            Ok(closure) => closure.as_tagged(heap).erase(),
+            Err(err) => raise_runtime(vm, heap, state, err),
+        }
+    })
+}
+
+fn validate_eval_binding<'s>(
+    heap: &Heap,
+    state: &ThreadState,
+    scope: &'s HandleScope<'_>,
+    name: Handle<'_, Value>,
+    is_function: bool,
+) -> Result<Handle<'s, ContextObject>, VmError> {
+    let context = frame_context_value(state, heap)?;
+    let mut context = context.get_as::<ContextObject>(heap).ok_or(VmError::Type)?;
+    loop {
+        let scope_info = context.scope_info.get(heap);
+        if let Some((_, info)) = scope_info.context_slot_index(heap, name.as_tagged(heap))
+            && info_is_lexical(info)
+        {
+            return Err(VmError::Syntax);
+        }
+        if scope_info.is_declaration_context() {
+            break;
+        }
+        context = context.outer.get(heap).ok_or(VmError::Type)?;
+    }
+    let context = scope
+        .cast::<ContextObject>(heap, context.erase())
+        .ok_or(VmError::Type)?;
+    let ctx = context.as_tagged(heap);
+    if let Some((_, info)) = ctx
+        .scope_info
+        .get(heap)
+        .context_slot_index(heap, name.as_tagged(heap))
+    {
+        if info_is_lexical(info) {
+            return Err(VmError::Syntax);
+        }
+        return Ok(context);
+    }
+    if let Some(extension) = ctx.extension.get(heap)
+        && extension_property(heap, scope, extension, name).is_some()
+    {
+        return Ok(context);
+    }
+    if ctx.scope_info.get(heap).is_script_context() {
+        if heap
+            .known()
+            .script_context_table
+            .get(heap)
+            .lookup(heap, name.as_tagged(heap))
+            .is_some()
+        {
+            return Err(VmError::Syntax);
+        }
+        if is_function {
+            if !can_declare_global_function(heap, scope, name) {
+                return Err(VmError::Type);
+            }
+        } else if !can_declare_global_var(heap, scope, name) {
+            return Err(VmError::Type);
+        }
+    }
+    Ok(context)
+}
+
+fn declare_eval_binding<'a>(
+    nctx: HostCtx<'a>,
+    name: Handle<'_, Value>,
+    value: Option<Handle<'_, Value>>,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    state.handle_scope(|scope| {
+        let context = rt_try!(
             vm,
             heap,
             state,
-            context.get_as::<ContextObject>(heap).ok_or(VmError::Type)
+            validate_eval_binding(heap, state, &scope, name, value.is_some())
         );
-        // A declaration context is the variable environment: function /
-        // script contexts, or a strict eval context. Sloppy eval and normal
-        // block/for/class contexts are skipped.
-        loop {
-            if context
-                .scope_info
-                .get(heap)
-                .as_ref()
-                .is_declaration_context()
-            {
-                break;
-            }
-            match context.outer.get(heap) {
-                Some(outer) => context = outer,
-                None => return raise_runtime(vm, heap, state, VmError::Type),
-            }
-        }
-        let context = context.as_handle(&scope);
         let ctx = context.as_tagged(heap);
-
-        // Existing statically allocated var: re-declaration is a no-op.
-        let names = ctx.scope_info.get(heap).names.get(heap);
-        for i in 0..names.len() {
-            if names.at(heap, i) == name.as_tagged(heap) {
-                return vm.known().undefined.get(heap).erase();
-            }
-        }
-        // Existing dynamically declared var.
-        if let Some(extension) = ctx.extension.get(heap)
-            && extension_property(heap, &scope, extension, name).is_some()
+        if let Some((slot, info)) = ctx
+            .scope_info
+            .get(heap)
+            .context_slot_index(heap, name.as_tagged(heap))
         {
+            if info_is_lexical(info) {
+                return raise_runtime(vm, heap, state, VmError::Syntax);
+            }
+            if let Some(value) = value {
+                ctx.slots.get(heap).as_ref().element_slot(slot).set(
+                    heap,
+                    ctx.erase(),
+                    value.as_tagged(heap),
+                );
+            }
             return vm.known().undefined.get(heap).erase();
         }
 
-        let is_script = ctx.scope_info.get(heap).as_ref().is_script_context();
-        let target = if is_script {
-            let global = scope.handle(vm.known().global_object.get(heap).erase());
-            let mut it = crate::lookup::Lookup::new(heap, &scope, global, name, true);
-            if !matches!(it.next(heap, &scope), crate::lookup::Hit::Miss) {
-                return vm.known().undefined.get(heap).erase();
-            }
-            global
-        } else {
-            let extension = match ctx.extension.get(heap) {
-                Some(extension) => extension.as_handle(&scope),
-                None => {
-                    let map = scope.handle(vm.known().object_initial_map.get(heap));
-                    let extension = heap
-                        .new_object(&scope, map, HandleSlice::EMPTY)
-                        .as_handle(&scope);
-                    let ctx = context.as_tagged(heap);
-                    ctx.extension
-                        .set(heap, ctx.erase(), extension.as_tagged(heap));
-                    extension
+        if let Some(extension) = ctx.extension.get(heap)
+            && extension_property(heap, &scope, extension, name).is_some()
+        {
+            if let Some(value) = value {
+                let Some(extension) = scope.cast::<Object>(heap, extension.erase()) else {
+                    return raise_runtime(vm, heap, state, VmError::Type);
+                };
+                let key = scope.handle(name.as_tagged(heap).as_name());
+                let defined = rt_try!(
+                    vm,
+                    heap,
+                    state,
+                    Object::define_own_property(
+                        heap,
+                        &scope,
+                        extension,
+                        key,
+                        PropertyDescriptor::data(value),
+                    )
+                );
+                if !defined {
+                    return raise_runtime(vm, heap, state, VmError::Type);
                 }
-            };
-            scope.handle(extension.as_tagged(heap).erase())
+            }
+            return vm.known().undefined.get(heap).erase();
+        }
+
+        if ctx.scope_info.get(heap).is_script_context() {
+            if let Some(value) = value {
+                rt_try!(
+                    vm,
+                    heap,
+                    state,
+                    create_global_function_binding(heap, &scope, name, value, true)
+                );
+            } else {
+                rt_try!(
+                    vm,
+                    heap,
+                    state,
+                    create_global_var_binding(heap, &scope, name, true)
+                );
+            }
+            return vm.known().undefined.get(heap).erase();
+        }
+
+        let extension = match ctx.extension.get(heap) {
+            Some(extension) => extension.as_handle(&scope),
+            None => {
+                let map = scope.handle(vm.known().object_initial_map.get(heap));
+                let extension = heap
+                    .new_object(&scope, map, HandleSlice::EMPTY)
+                    .as_handle(&scope);
+                let ctx = context.as_tagged(heap);
+                ctx.extension
+                    .set(heap, ctx.erase(), extension.as_tagged(heap));
+                extension
+            }
         };
         let target = rt_try!(
             vm,
             heap,
             state,
             scope
-                .cast::<Object>(heap, target.as_tagged(heap))
+                .cast::<Object>(heap, extension.as_tagged(heap).erase())
                 .ok_or(VmError::Type)
         );
         let key = scope.handle(name.as_tagged(heap).as_name());
-        let undefined = scope.handle(vm.known().undefined.get(heap).erase());
+        let value = match value {
+            Some(value) => value,
+            None => scope.handle(vm.known().undefined.get(heap).erase()),
+        };
         let defined = rt_try!(
             vm,
             heap,
             state,
-            Object::define_own_property(
-                heap,
-                &scope,
-                target,
-                key,
-                PropertyDescriptor::data(undefined),
-            )
+            Object::define_own_property(heap, &scope, target, key, PropertyDescriptor::data(value),)
         );
         if !defined {
             return raise_runtime(vm, heap, state, VmError::Type);
@@ -2133,9 +2342,358 @@ fn declare_eval_var<'a>(
     })
 }
 
-/// Fresh singleton-word compare against the hole sentinel.
-fn is_the_hole(heap: &Heap, roots: &WellKnown, v: Tagged<'_, Value>) -> bool {
-    v.ptr_eq(roots.the_hole.get(heap))
+fn read_global_declarations<'s>(
+    heap: &Heap,
+    scope: &'s HandleScope<'_>,
+    meta: Tagged<'_, FixedArray>,
+) -> Result<
+    (
+        Vec<Handle<'s, Value>>,
+        Vec<Handle<'s, Value>>,
+        Vec<Handle<'s, CallableInfoObject>>,
+    ),
+    VmError,
+> {
+    let var_count = meta.at(heap, 0).to_i64().unwrap_or(0).max(0) as usize;
+    let mut pos = 1;
+    let mut vars = Vec::with_capacity(var_count);
+    for _ in 0..var_count {
+        vars.push(scope.handle(meta.at(heap, pos)));
+        pos += 1;
+    }
+    let func_count = meta.at(heap, pos).to_i64().unwrap_or(0).max(0) as usize;
+    pos += 1;
+    let mut funcs = Vec::with_capacity(func_count);
+    for _ in 0..func_count {
+        funcs.push(scope.handle(meta.at(heap, pos)));
+        pos += 1;
+    }
+    let mut infos = Vec::with_capacity(func_count);
+    for _ in 0..func_count {
+        let Some(info) = scope.cast::<CallableInfoObject>(heap, meta.at(heap, pos)) else {
+            return Err(VmError::Type);
+        };
+        infos.push(info);
+        pos += 1;
+    }
+    Ok((vars, funcs, infos))
+}
+
+fn validate_eval_declarations<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    let declarations = args.get_handle(heap, 0);
+    state.handle_scope(|scope| {
+        let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        let (vars, funcs, _) = rt_try!(
+            vm,
+            heap,
+            state,
+            read_global_declarations(heap, &scope, meta.as_tagged(heap))
+        );
+        for name in &vars {
+            rt_try!(
+                vm,
+                heap,
+                state,
+                validate_eval_binding(heap, state, &scope, *name, false)
+            );
+        }
+        for name in &funcs {
+            rt_try!(
+                vm,
+                heap,
+                state,
+                validate_eval_binding(heap, state, &scope, *name, true)
+            );
+        }
+        vm.known().undefined.get(heap).erase()
+    })
+}
+
+fn declare_eval_var<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let name = args.get_handle(nctx.heap, 0);
+    declare_eval_binding(nctx, name, None)
+}
+
+fn declare_eval_function<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let name = args.get_handle(nctx.heap, 0);
+    let value = args.get_handle(nctx.heap, 1);
+    declare_eval_binding(nctx, name, Some(value))
+}
+
+fn global_property_flags(
+    heap: &Heap,
+    scope: &HandleScope<'_>,
+    name: Handle<'_, Value>,
+) -> Option<SlotFlags> {
+    let global = scope.handle(heap.known().global_object.get(heap).erase());
+    let mut lookup = crate::lookup::Lookup::new(heap, scope, global, name, true);
+    match lookup.next(heap, scope) {
+        crate::lookup::Hit::Data { flags, .. }
+        | crate::lookup::Hit::Accessor { flags, .. }
+        | crate::lookup::Hit::NativeAccessor { flags, .. } => Some(flags),
+        _ => None,
+    }
+}
+
+fn can_declare_global_var(heap: &Heap, scope: &HandleScope<'_>, name: Handle<'_, Value>) -> bool {
+    if global_property_flags(heap, scope, name).is_some() {
+        return true;
+    }
+    heap.known()
+        .global_object
+        .get(heap)
+        .as_ref()
+        .is_extendable(heap)
+}
+
+fn can_declare_global_function(
+    heap: &Heap,
+    scope: &HandleScope<'_>,
+    name: Handle<'_, Value>,
+) -> bool {
+    let Some(flags) = global_property_flags(heap, scope, name) else {
+        return heap
+            .known()
+            .global_object
+            .get(heap)
+            .as_ref()
+            .is_extendable(heap);
+    };
+    flags.is_configurable()
+        || (!flags.is_accessor() && flags.is_writable() && flags.is_enumerable())
+}
+
+fn create_global_var_binding(
+    heap: &mut Heap,
+    scope: &HandleScope<'_>,
+    name: Handle<'_, Value>,
+    deletable: bool,
+) -> Result<(), VmError> {
+    if global_property_flags(heap, scope, name).is_some() {
+        return Ok(());
+    }
+    let global = scope
+        .cast::<Object>(heap, heap.known().global_object.get(heap).erase())
+        .ok_or(VmError::Type)?;
+    if !global.as_tagged(heap).is_extendable(heap) {
+        return Err(VmError::Type);
+    }
+    let key = scope.handle(name.as_tagged(heap).as_name());
+    let value = scope.handle(heap.known().undefined.get(heap).erase());
+    if Object::define_own_property(
+        heap,
+        scope,
+        global,
+        key,
+        PropertyDescriptor::Data {
+            value,
+            writable: true,
+            enumerable: true,
+            configurable: deletable,
+        },
+    )? {
+        Ok(())
+    } else {
+        Err(VmError::Type)
+    }
+}
+
+fn create_global_function_binding(
+    heap: &mut Heap,
+    scope: &HandleScope<'_>,
+    name: Handle<'_, Value>,
+    value: Handle<'_, Value>,
+    deletable: bool,
+) -> Result<(), VmError> {
+    let global = scope
+        .cast::<Object>(heap, heap.known().global_object.get(heap).erase())
+        .ok_or(VmError::Type)?;
+    let flags = global_property_flags(heap, scope, name);
+    let desc = match flags {
+        Some(flags) if !flags.is_configurable() => PropertyDescriptor::Data {
+            value,
+            writable: flags.is_writable(),
+            enumerable: flags.is_enumerable(),
+            configurable: false,
+        },
+        _ => PropertyDescriptor::Data {
+            value,
+            writable: true,
+            enumerable: true,
+            configurable: deletable,
+        },
+    };
+    let key = scope.handle(name.as_tagged(heap).as_name());
+    if Object::define_own_property(heap, scope, global, key, desc)? {
+        Ok(())
+    } else {
+        Err(VmError::Type)
+    }
+}
+
+fn declare_globals<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    let declarations = args.get_handle(heap, 0);
+    state.handle_scope(|scope| {
+        let Some(meta) = scope.cast::<FixedArray>(heap, declarations.as_tagged(heap)) else {
+            return raise_runtime(vm, heap, state, VmError::Type);
+        };
+        let (vars, func_names, func_infos) = rt_try!(
+            vm,
+            heap,
+            state,
+            read_global_declarations(heap, &scope, meta.as_tagged(heap))
+        );
+
+        let context_value = rt_try!(vm, heap, state, frame_context_value(state, heap));
+        let context = rt_try!(
+            vm,
+            heap,
+            state,
+            scope
+                .cast::<ContextObject>(heap, context_value)
+                .ok_or(VmError::Type)
+        );
+        let lexical: Vec<(Handle<'_, Value>, i64)> = {
+            let scope_info = context.as_tagged(heap).scope_info.get(heap);
+            (0..scope_info.local_count())
+                .filter(|&i| {
+                    let info = scope_info.info(i);
+                    info_is_lexical(info) && info & INFO_GLOBAL != 0
+                })
+                .map(|i| {
+                    (
+                        scope.handle(scope_info.name(heap, i).erase()),
+                        scope_info.info(i),
+                    )
+                })
+                .collect()
+        };
+        let table = scope.handle(vm.known().script_context_table.get(heap));
+        let repl_entry = context
+            .as_tagged(heap)
+            .scope_info
+            .get(heap)
+            .is_repl_context();
+
+        for (name, mode) in &lexical {
+            if let Some(found) = table.as_tagged(heap).lookup(heap, name.as_tagged(heap)) {
+                let existing = table
+                    .as_tagged(heap)
+                    .context(heap, found.context_index)
+                    .scope_info
+                    .get(heap);
+                let old_mode = info_mode(found.info);
+                let new_mode = info_mode(*mode);
+                let same_mode = old_mode == new_mode
+                    || (old_mode == MODE_LET && new_mode == MODE_CLASS)
+                    || (old_mode == MODE_CLASS && new_mode == MODE_LET);
+                let same_repl_mode =
+                    repl_entry && existing.is_repl_context() && same_mode && info_is_lexical(*mode);
+                if !same_repl_mode {
+                    return raise_runtime(vm, heap, state, VmError::Syntax);
+                }
+            }
+            if global_property_flags(heap, &scope, *name)
+                .is_some_and(|flags| !flags.is_configurable())
+            {
+                return raise_runtime(vm, heap, state, VmError::Syntax);
+            }
+        }
+        for name in vars.iter().chain(func_names.iter()) {
+            if table
+                .as_tagged(heap)
+                .lookup(heap, name.as_tagged(heap))
+                .is_some()
+            {
+                return raise_runtime(vm, heap, state, VmError::Syntax);
+            }
+        }
+        for name in &func_names {
+            if !can_declare_global_function(heap, &scope, *name) {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
+        }
+        for name in &vars {
+            if !can_declare_global_var(heap, &scope, *name) {
+                return raise_runtime(vm, heap, state, VmError::Type);
+            }
+        }
+
+        if !lexical.is_empty() {
+            let table = rt_try!(
+                vm,
+                heap,
+                state,
+                crate::ScriptContextTable::add(heap, &scope, table, context)
+            );
+            vm.known().script_context_table.init(table.as_tagged(heap));
+        }
+
+        for (name, info) in func_names.iter().zip(func_infos.iter()) {
+            let value = rt_try!(
+                vm,
+                heap,
+                state,
+                Object::create_closure(heap, &scope, *info, context)
+            );
+            let value = scope.handle(value.erase());
+            rt_try!(
+                vm,
+                heap,
+                state,
+                create_global_function_binding(heap, &scope, *name, value, false)
+            );
+        }
+        for name in &vars {
+            rt_try!(
+                vm,
+                heap,
+                state,
+                create_global_var_binding(heap, &scope, *name, false)
+            );
+        }
+        vm.known().undefined.get(heap).erase()
+    })
+}
+
+fn throw_const_assign_error<'a>(
+    nctx: HostCtx<'a>,
+    _new_target: Option<Handle<'_, Value>>,
+    _args: Args,
+) -> Tagged<'a, Value> {
+    let HostCtx {
+        vm, heap, state, ..
+    } = nctx;
+    raise_runtime(
+        vm,
+        heap,
+        state,
+        VmError::Message(crate::Message::ConstAssign),
+    )
 }
 
 // ---- rest parameters ---------------------------------------------------------

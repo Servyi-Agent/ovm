@@ -423,6 +423,8 @@ impl MapKind {
     pub const DATA_HANDLER: MapKind = MapKind(ObjectKind::DataHandler as u64);
     pub const NUMBER_DICTIONARY: MapKind = MapKind(ObjectKind::NumberDictionary as u64);
     pub const CODE: MapKind = MapKind(ObjectKind::Code as u64);
+    pub const SCRIPT_CONTEXT_TABLE: MapKind = MapKind(ObjectKind::ScriptContextTable as u64);
+    pub const NAME_INDEX_TABLE: MapKind = MapKind(ObjectKind::NameToIndexHashTable as u64);
 
     pub const fn new(bits: u64) -> Self {
         Self(bits)
@@ -468,6 +470,8 @@ impl MapKind {
             Self::DATA_HANDLER => ObjectKind::DataHandler,
             Self::NUMBER_DICTIONARY => ObjectKind::NumberDictionary,
             Self::CODE => ObjectKind::Code,
+            Self::SCRIPT_CONTEXT_TABLE => ObjectKind::ScriptContextTable,
+            Self::NAME_INDEX_TABLE => ObjectKind::NameToIndexHashTable,
             _ => panic!("invalid object kind"),
         }
     }

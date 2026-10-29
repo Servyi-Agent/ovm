@@ -4,7 +4,10 @@ use oxc_ast::AstKind;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{
     Visit,
-    walk::{walk_for_in_statement, walk_for_of_statement, walk_for_statement},
+    walk::{
+        walk_block_statement, walk_for_in_statement, walk_for_of_statement, walk_for_statement,
+        walk_switch_case,
+    },
 };
 use oxc_semantic::{AstNodes, Scoping, Semantic};
 use oxc_span::{GetSpan, Span};
@@ -208,6 +211,8 @@ pub struct Facts<'a> {
     /// contains a nested function (a descendant may capture its slots)
     /// or runs direct `eval`
     pub creates_context: HashSet<Fid>,
+    /// plain block / switch / catch scopes that own a runtime context
+    pub block_contexts: HashSet<ScopeId>,
     /// functions whose receiver / new.target a nested arrow captures
     pub captures_this: HashSet<Fid>,
     pub captures_new_target: HashSet<Fid>,
@@ -228,6 +233,8 @@ pub struct Facts<'a> {
     pub hoist_vars: HashMap<Fid, Vec<SymbolId>>,
     /// per function: top-level function declarations to hoist
     pub hoist_fns: HashMap<Fid, Vec<(SymbolId, Fid)>>,
+    /// sloppy script block functions with the synthesized global var binding
+    pub sloppy_block_functions: Vec<(SymbolId, Fid)>,
     /// param symbol → positional index
     pub param_symbols: HashMap<SymbolId, u32>,
     /// names bound by parameter patterns (TDZ locals, not param registers)
@@ -242,10 +249,46 @@ impl Facts<'_> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RootBinding {
+    /// Object Environment Record: a property of the global object.
+    GlobalObject,
+    /// Declarative Environment Record: a global lexical binding.
+    GlobalLexical,
+}
+
+/// Root bindings that do not live in the script frame: scripts and REPL
+/// route var/function bindings to the global object and lexical bindings to
+/// the global declarative record.
+pub fn root_binding(
+    mode: Mode,
+    root: ScopeId,
+    scope: ScopeId,
+    flags: SymbolFlags,
+) -> Option<RootBinding> {
+    if scope != root {
+        return None;
+    }
+    match mode {
+        Mode::Script | Mode::Repl => {
+            if flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class) {
+                Some(RootBinding::GlobalLexical)
+            } else if flags.intersects(SymbolFlags::FunctionScopedVariable | SymbolFlags::Function)
+            {
+                Some(RootBinding::GlobalObject)
+            } else {
+                None
+            }
+        }
+        Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Script,
     Eval,
     EvalStrict,
+    EvalGlobal,
     Repl,
 }
 
@@ -271,6 +314,8 @@ struct Collector<'a, 'p> {
     class_of_scope: HashMap<ScopeId, ClassIdx>,
     for_heads: HashMap<ScopeId, ForHead>,
     hoist_fns: HashMap<Fid, Vec<(SymbolId, Fid)>>,
+    sloppy_block_functions: Vec<(SymbolId, Fid)>,
+    block_depth: usize,
     param_symbols: HashMap<SymbolId, u32>,
     pattern_params: HashSet<SymbolId>,
 }
@@ -301,6 +346,8 @@ impl<'a, 'p> Collector<'a, 'p> {
             class_of_scope: HashMap::new(),
             for_heads: HashMap::new(),
             hoist_fns: HashMap::new(),
+            sloppy_block_functions: Vec::new(),
+            block_depth: 0,
             param_symbols: HashMap::new(),
             pattern_params: HashSet::new(),
         }
@@ -320,6 +367,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             fn_scope_to_fid: &self.fn_scope_to_fid,
             captured: HashSet::new(),
             creates_context: HashSet::new(),
+            block_contexts: HashSet::new(),
             captures_this: HashSet::new(),
             captures_new_target: HashSet::new(),
             needs_this_function: HashSet::new(),
@@ -330,6 +378,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             for_init_decl: HashMap::new(),
             for_initialized: HashSet::new(),
             repl_root: matches!(self.mode, Mode::Repl),
+            mode: self.mode,
             fid_node: &self.fid_node,
         };
         d.mark_super_uses();
@@ -341,6 +390,7 @@ impl<'a, 'p> Collector<'a, 'p> {
         d.scan_captures();
         d.finalize_for_heads();
         d.creates_context = d.compute_creates_context();
+        d.block_contexts = d.compute_block_contexts();
         d.scan_special_nodes();
         d.compute_reference_depths();
         let Deriver {
@@ -349,6 +399,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             ref_skip_hole,
             captured,
             creates_context,
+            block_contexts,
             captures_this,
             captures_new_target,
             needs_this_function,
@@ -427,6 +478,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             ref_skip_hole,
             captured,
             creates_context,
+            block_contexts,
             captures_this,
             captures_new_target,
             needs_this_function,
@@ -435,6 +487,7 @@ impl<'a, 'p> Collector<'a, 'p> {
             obj_lit_home,
             hoist_vars,
             hoist_fns: self.hoist_fns,
+            sloppy_block_functions: self.sloppy_block_functions,
             param_symbols: self.param_symbols,
             pattern_params: self.pattern_params,
         }
@@ -563,6 +616,27 @@ fn extend<'a, T: ?Sized>(r: &T) -> &'a T {
     unsafe { &*(r as *const T) }
 }
 
+impl<'a, 'p> Collector<'a, 'p> {
+    fn has_outer_lexical(&self, sym: SymbolId) -> bool {
+        let name = self.scoping.symbol_name(sym);
+        let mut cur = self.scoping.symbol_scope_id(sym);
+        while let Some(parent) = self.scoping.scope_parent_id(cur) {
+            for other in self.scoping.iter_bindings_in(parent) {
+                if self.scoping.symbol_name(other) == name
+                    && self
+                        .scoping
+                        .symbol_flags(other)
+                        .intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class)
+                {
+                    return true;
+                }
+            }
+            cur = parent;
+        }
+        false
+    }
+}
+
 impl<'a, 'p> Visit<'a> for Collector<'a, 'p> {
     fn visit_program(&mut self, program: &Program<'a>) {
         for stmt in &program.body {
@@ -599,6 +673,17 @@ impl<'a, 'p> Visit<'a> for Collector<'a, 'p> {
         }
         self.record_param_symbols(&it.params);
         let fid = self.fn_of_node[&it.node_id.get()];
+        if self.block_depth > 0
+            && it.r#type == FunctionType::FunctionDeclaration
+            && !self.functions[0].strict
+            && self.fn_stack.last() == Some(&Fid(0))
+            && let Some(sym) = it.id.as_ref().and_then(|id| id.symbol_id.get())
+            && !self.has_outer_lexical(sym)
+        {
+            self.sloppy_block_functions.push((sym, fid));
+        }
+        let saved_block_depth = self.block_depth;
+        self.block_depth = 0;
         self.fn_stack.push(fid);
         self.visit_formal_parameters(&it.params);
         if let Some(body) = &it.body {
@@ -608,6 +693,7 @@ impl<'a, 'p> Visit<'a> for Collector<'a, 'p> {
             self.collect_hoisted_fns(&body.statements);
         }
         self.fn_stack.pop();
+        self.block_depth = saved_block_depth;
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
@@ -632,6 +718,8 @@ impl<'a, 'p> Visit<'a> for Collector<'a, 'p> {
             None,
         );
         self.record_param_symbols(&it.params);
+        let saved_block_depth = self.block_depth;
+        self.block_depth = 0;
         self.fn_stack.push(fid);
         self.visit_formal_parameters(&it.params);
         match &it.body {
@@ -644,6 +732,7 @@ impl<'a, 'p> Visit<'a> for Collector<'a, 'p> {
             other => self.visit_expression(other.as_expression().expect("expression body")),
         }
         self.fn_stack.pop();
+        self.block_depth = saved_block_depth;
     }
 
     fn visit_class(&mut self, it: &Class<'a>) {
@@ -854,6 +943,18 @@ impl<'a, 'p> Visit<'a> for Collector<'a, 'p> {
         }
     }
 
+    fn visit_block_statement(&mut self, it: &BlockStatement<'a>) {
+        self.block_depth += 1;
+        walk_block_statement(self, it);
+        self.block_depth -= 1;
+    }
+
+    fn visit_switch_case(&mut self, it: &SwitchCase<'a>) {
+        self.block_depth += 1;
+        walk_switch_case(self, it);
+        self.block_depth -= 1;
+    }
+
     fn visit_for_statement(&mut self, it: &ForStatement<'a>) {
         let it: &'a ForStatement<'a> = extend(it);
         let lexical_head = matches!(
@@ -902,6 +1003,7 @@ struct Deriver<'a, 'p, 'f> {
     fn_scope_to_fid: &'f HashMap<ScopeId, Fid>,
     captured: HashSet<SymbolId>,
     creates_context: HashSet<Fid>,
+    block_contexts: HashSet<ScopeId>,
     captures_this: HashSet<Fid>,
     captures_new_target: HashSet<Fid>,
     needs_this_function: HashSet<Fid>,
@@ -913,6 +1015,7 @@ struct Deriver<'a, 'p, 'f> {
     for_initialized: HashSet<SymbolId>,
     /// REPL mode: root-level bindings are global properties, not slots
     repl_root: bool,
+    mode: Mode,
     /// fid → its AST node (program, function, property definition)
     fid_node: &'f HashMap<Fid, NodeId>,
 }
@@ -1309,6 +1412,18 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         let mut out: HashSet<Fid> = self.captures_this.iter().copied().collect();
         out.extend(self.captures_new_target.iter().copied());
         out.extend(self.needs_this_function.iter().copied());
+        // Top-level lexical bindings live in a script context even when no
+        // closure captures them: later scripts and direct eval resolve them
+        // through the script-context table.
+        if matches!(self.mode, Mode::Script | Mode::Repl) {
+            let root = self.scoping.root_scope_id();
+            for sym in self.scoping.iter_bindings_in(root) {
+                let flags = self.scoping.symbol_flags(sym);
+                if root_binding(self.mode, root, root, flags) == Some(RootBinding::GlobalLexical) {
+                    out.insert(Fid(0));
+                }
+            }
+        }
         for (&scope, &fid) in self.fn_scope_to_fid {
             if self
                 .scoping
@@ -1319,6 +1434,9 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             }
         }
         for &sym in &self.captured {
+            if self.is_global_binding(sym) {
+                continue;
+            }
             // class / for scopes host their own slots, so ownership stops
             // there (mirrors `FunctionGen`'s `scopes_by_fid`)
             let mut cur = self.scoping.symbol_scope_id(sym);
@@ -1344,6 +1462,54 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
         out
     }
 
+    /// Block scopes that need a context: a captured binding or direct eval
+    /// in the scope. Function, class and for-head scopes have their own
+    /// context ownership rules.
+    fn compute_block_contexts(&self) -> HashSet<ScopeId> {
+        let mut out = HashSet::new();
+        for raw in 0..self.scoping.scopes_len() {
+            let scope = ScopeId::from_usize(raw);
+            if self.fn_scope_to_fid.contains_key(&scope)
+                || self.class_of_scope.contains_key(&scope)
+                || self.for_heads.contains_key(&scope)
+            {
+                continue;
+            }
+            let node = self.scoping.get_node_id(scope);
+            if !matches!(
+                self.nodes.get_node(node).kind(),
+                AstKind::BlockStatement(_) | AstKind::SwitchStatement(_) | AstKind::CatchClause(_)
+            ) {
+                continue;
+            }
+            let flags = self.scoping.scope_flags(scope);
+            let mut has_binding = false;
+            let mut needs_context = flags.contains(ScopeFlags::DirectEval);
+            for sym in self.scoping.iter_bindings_in(scope) {
+                has_binding = true;
+                if self.captured.contains(&sym) {
+                    needs_context = true;
+                }
+            }
+            if has_binding && needs_context {
+                out.insert(scope);
+            }
+        }
+        out
+    }
+
+    /// Root bindings represented as global-object properties, not slots.
+    /// Mirrors `Compiler::assign_function_slots`.
+    fn is_global_binding(&self, sym: SymbolId) -> bool {
+        root_binding(
+            self.mode,
+            self.scoping.root_scope_id(),
+            self.scoping.symbol_scope_id(sym),
+            self.scoping.symbol_flags(sym),
+        )
+        .is_some()
+    }
+
     /// Whether an AST node creates a runtime context in our model:
     /// context-creating functions (incl. arrows and field initializers),
     /// context-owning classes, home-owning object literals, lexical
@@ -1358,6 +1524,18 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
                 self.classes[idx.0 as usize].slot_count > 0
             }
             AstKind::ObjectExpression(o) => self.obj_lit_home.contains(&o.node_id.get()),
+            AstKind::BlockStatement(b) => b
+                .scope_id
+                .get()
+                .is_some_and(|s| self.block_contexts.contains(&s)),
+            AstKind::SwitchStatement(s) => s
+                .scope_id
+                .get()
+                .is_some_and(|s| self.block_contexts.contains(&s)),
+            AstKind::CatchClause(c) => c
+                .scope_id
+                .get()
+                .is_some_and(|s| self.block_contexts.contains(&s)),
             AstKind::ForStatement(f) => self.for_scope_creates_ctx(f.scope_id.get()),
             AstKind::ForInStatement(f) => self.for_scope_creates_ctx(f.scope_id.get()),
             AstKind::ForOfStatement(f) => self.for_scope_creates_ctx(f.scope_id.get()),
@@ -1544,6 +1722,9 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             if !self.captured.contains(&symbol) {
                 let mut cur = decl_scope;
                 let fn_hosted = loop {
+                    if self.block_contexts.contains(&cur) {
+                        break false;
+                    }
                     if self.fn_scope_to_fid.contains_key(&cur) {
                         break true;
                     }
@@ -1602,27 +1783,34 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
     }
 
     fn hosting_node(&self, decl_scope: ScopeId) -> Option<NodeId> {
-        let mut cur = decl_scope;
-        loop {
-            if let Some(&fid) = self.fn_scope_to_fid.get(&cur) {
-                if self.creates_context.contains(&fid) {
-                    return Some(self.f_node(fid));
-                }
-            }
-            if let Some(&idx) = self.class_of_scope.get(&cur) {
-                if self.classes[idx.0 as usize].slot_count > 0 {
-                    return Some(self.classes[idx.0 as usize].node);
-                }
-            }
-            if let Some(head) = self.for_heads.get(&cur) {
-                // Only retained for-heads create a context; a register-allocated
-                // one is transparent, like any other scope without slots.
-                if head.creates_context() {
-                    return Some(head.node);
-                }
-            }
-            cur = self.scoping.scope_parent_id(cur)?;
+        // Only the declaration scope's own context decides the host. A
+        // function-owned slot is in the function context even when the
+        // declaration sits in a nested block that happens to have a block
+        // context of its own.
+        if self.block_contexts.contains(&decl_scope) {
+            return Some(self.scoping.get_node_id(decl_scope));
         }
+        if let Some(&idx) = self.class_of_scope.get(&decl_scope) {
+            if self.classes[idx.0 as usize].slot_count > 0 {
+                return Some(self.classes[idx.0 as usize].node);
+            }
+        }
+        if let Some(head) = self.for_heads.get(&decl_scope) {
+            if head.creates_context() {
+                return Some(head.node);
+            }
+        }
+        if let Some(&fid) = self.fn_scope_to_fid.get(&decl_scope) {
+            if self.creates_context.contains(&fid) {
+                return Some(self.f_node(fid));
+            }
+        }
+        // Non-context block: its slots are register- or function-context
+        // allocated by the owning function.
+        let fid = self.scope_owner(decl_scope);
+        self.creates_context
+            .contains(&fid)
+            .then(|| self.f_node(fid))
     }
 
     fn f_node(&self, fid: Fid) -> NodeId {

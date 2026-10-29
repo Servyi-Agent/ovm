@@ -14,6 +14,7 @@ pub mod map;
 pub mod object;
 pub mod prototype_info;
 pub mod proxy;
+pub mod script_context;
 pub mod string;
 pub mod symbol;
 
@@ -24,7 +25,9 @@ pub use cell::{Cell, CellInit};
 pub use code::{Code, CodeInit};
 pub use context::{
     ContextInit, ContextObject, HandlerEntry, HandlerEntryInit, HandlerTable, HandlerTableInit,
-    SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit,
+    INFO_GLOBAL, INFO_MODE_MASK, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, SCOPE_DECLARATION,
+    SCOPE_REPL, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, info_is_immutable, info_is_lexical,
+    info_mode,
 };
 pub use data_handler::{DataHandler, DataHandlerInit};
 pub use dictionary::{
@@ -41,6 +44,9 @@ pub use map::{
 pub use object::{CallTarget, Object, ObjectInit, ObjectSlotsInit};
 pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};
 pub use proxy::{ProxyInit, ProxyObject};
+pub use script_context::{
+    NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable, ScriptContextTableInit,
+};
 pub use string::{DenseString, Encoding, StringData, StringOwn, decode_wtf8, string_content_hash};
 pub use symbol::Symbol;
 
@@ -142,6 +148,10 @@ pub enum ObjectKind {
     Code = 24,
     /// Native accessor backing: registry indices for a native getter/setter.
     AccessorInfo = 25,
+    /// One loaded script's lexical context and its name index.
+    ScriptContextTable = 26,
+    /// Internal name -> script-context-index hash table.
+    NameToIndexHashTable = 27,
 }
 
 impl ObjectKind {
@@ -193,6 +203,12 @@ pub unsafe fn object_layout(addr: NonNull<()>) -> Layout {
             ObjectKind::NumberDictionary => (*addr.cast::<NumberDictionary>().as_ptr()).layout(),
             ObjectKind::Code => (*addr.cast::<Code>().as_ptr()).layout(),
             ObjectKind::AccessorInfo => (*addr.cast::<AccessorInfo>().as_ptr()).layout(),
+            ObjectKind::ScriptContextTable => {
+                (*addr.cast::<ScriptContextTable>().as_ptr()).layout()
+            }
+            ObjectKind::NameToIndexHashTable => {
+                (*addr.cast::<NameToIndexHashTable>().as_ptr()).layout()
+            }
             ObjectKind::Object
             | ObjectKind::Array
             | ObjectKind::ByteArray
@@ -245,6 +261,12 @@ pub unsafe fn visit_object(addr: NonNull<()>, visitor: &mut dyn Visitor) {
             ObjectKind::Code => (*addr.cast::<Code>().as_ptr()).visit_edges(visitor),
             ObjectKind::AccessorInfo => {
                 (*addr.cast::<AccessorInfo>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::ScriptContextTable => {
+                (*addr.cast::<ScriptContextTable>().as_ptr()).visit_edges(visitor)
+            }
+            ObjectKind::NameToIndexHashTable => {
+                (*addr.cast::<NameToIndexHashTable>().as_ptr()).visit_edges(visitor)
             }
             ObjectKind::Object
             | ObjectKind::Array

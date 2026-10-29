@@ -7,9 +7,15 @@ fn show_const(c: &Constant) -> String {
         Constant::Float(f) => format!("{f}"),
         Constant::Smi(v) => format!("{v}"),
         Constant::Callable(id) => format!("<fn#{}>", id.0),
-        Constant::ContextNames { names, flags } => format!("<names:{} flags:{flags}>", names.len()),
+        Constant::ScopeInfo(layout) => {
+            format!("<scope:{} flags:{}>", layout.locals.len(), layout.flags)
+        }
         Constant::ObjectPrototype => "<Object.prototype>".into(),
         Constant::FunctionPrototype => "<Function.prototype>".into(),
+        Constant::GlobalDeclarations(d) => {
+            format!("<globals:{} vars:{} funcs>", d.vars.len(), d.funcs.len())
+        }
+        Constant::GlobalObject => "<globalThis>".into(),
     }
 }
 

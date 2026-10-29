@@ -2,8 +2,8 @@
 //! and assert on function metadata and the emitted instruction stream.
 //! (Runtime behavior is covered by the `vm` test suite.)
 
+use bytecode::Opcode;
 use bytecode::{FrontendErrorKind, Function, FunctionId, Program, SourceMode};
-use bytecode::{Opcode, Operand};
 use js_compiler::compile_js;
 
 fn compile(src: &str, mode: SourceMode) -> Program {
@@ -75,12 +75,12 @@ fn syntax_errors_are_syntax_errors() {
 }
 
 #[test]
-fn script_mode_top_level_vars_are_locals() {
+fn script_mode_top_level_vars_are_global_properties() {
     let p = compile("var x = 1; x = 2;", SourceMode::Script);
     let f = script_fn(&p);
     assert!(
-        !contains(&p, f, Opcode::StoreGlobal),
-        "script decls must not touch the global object"
+        contains(&p, f, Opcode::StoreGlobal),
+        "script var bindings live on the global object"
     );
 }
 
@@ -88,12 +88,27 @@ fn script_mode_top_level_vars_are_locals() {
 fn repl_mode_top_level_vars_are_global_properties() {
     let p = compile("var x = 1; let y = 2; function f() {}", SourceMode::Repl);
     let f = script_fn(&p);
-    let code = program_code(&p, f);
-    let n_globals = code
-        .iter()
-        .filter(|(op, _)| *op == Opcode::StoreGlobal)
-        .count();
-    assert!(n_globals >= 3, "var, let and function decls all go global");
+    assert!(
+        contains(&p, f, Opcode::CallRuntime),
+        "global declarations use the runtime declaration helpers"
+    );
+    assert!(
+        contains(&p, f, Opcode::LoadGlobal) || contains(&p, f, Opcode::StoreGlobal),
+        "REPL root bindings resolve through the global object"
+    );
+}
+
+// TODO(oxc): Oxc hoists the sloppy block function's synthesized Annex B
+// var before checking the enclosing lexical declaration, so this valid
+// source is rejected. Remove `ignore` once Oxc handles the ordering.
+#[test]
+#[ignore = "Oxc rejects valid Annex B when a block function precedes an enclosing let"]
+fn annex_b_block_function_before_enclosing_lexical() {
+    compile(
+        "function f() { { function g() {} } let g = 2; return g; }",
+        SourceMode::Script,
+    );
+    compile("{ function g() {} } let g = 2;", SourceMode::Script);
 }
 
 #[test]
@@ -122,16 +137,16 @@ fn strict_directive_propagates() {
 }
 
 #[test]
-fn hoisted_function_declarations_are_initialized_in_the_prologue() {
+fn hoisted_function_declarations_are_declared_in_the_prologue() {
     // the closure creation must precede any body code
     let p = compile(
         "var r = f(); function f() { return 1; }",
         SourceMode::Script,
     );
     let f = script_fn(&p);
-    let first_create = position(&p, f, Opcode::CreateClosure);
+    let declare = position(&p, f, Opcode::CallRuntime);
     let first_call = position(&p, f, Opcode::CallFunction0);
-    assert!(first_create < first_call, "closure created before the call");
+    assert!(declare < first_call, "globals declared before the call");
 }
 
 #[test]
@@ -156,30 +171,4 @@ fn position(program: &Program, f: &Function, op: Opcode) -> usize {
         pc = next;
     }
     panic!("opcode {op:?} not found");
-}
-
-/// (opcode, formatted operands) pairs for targeted assertions.
-fn program_code<'p>(program: &'p Program, f: &'p Function) -> Vec<(Opcode, Vec<u32>)> {
-    let code = program.code(f);
-    let mut out = Vec::new();
-    let mut pc = 0;
-    while pc < code.len() {
-        let (op, ops, next) = bytecode::decode(code, pc);
-        let vals = op
-            .operands()
-            .iter()
-            .enumerate()
-            .map(|(i, kind)| match kind {
-                Operand::Register => ops.reg(i) as u32,
-                Operand::RegisterListStart => ops.reg_list(i) as u32,
-                Operand::RegisterCount => ops.reg_count(i) as u32,
-                Operand::Immediate => ops.imm(i) as u32,
-                Operand::UImmediate => ops.uimm(i),
-                Operand::Index => ops.idx(i) as u32,
-            })
-            .collect();
-        out.push((op, vals));
-        pc = next;
-    }
-    out
 }

@@ -1,8 +1,8 @@
 use core::alloc::Layout;
 
 use crate::{
-    EdgeVisitable, FixedArray, GcSlot, Handle, Header, Heap, HeapObject, Object, ObjectKind,
-    OptionGcSlot, Smi, Visitor,
+    DenseString, EdgeVisitable, FixedArray, GcSlot, Handle, HandleSlice, Header, Heap, HeapObject,
+    Object, ObjectKind, OptionGcSlot, Smi, Tagged, Value, Visitor,
 };
 
 /// `ScopeInfo::flags` bit: the context is a variable-declaration
@@ -11,22 +11,54 @@ pub const SCOPE_DECLARATION: i64 = 1 << 0;
 /// `ScopeInfo::flags` bit: the declaration environment is a script/global
 /// environment, so new top-level eval vars become global properties.
 pub const SCOPE_SCRIPT: i64 = 1 << 1;
+/// `ScopeInfo::flags` bit: the script context came from a REPL entry.
+pub const SCOPE_REPL: i64 = 1 << 2;
 
-// TODO: more info
+pub const MODE_VAR: i64 = 0;
+pub const MODE_LET: i64 = 1;
+pub const MODE_CONST: i64 = 2;
+pub const MODE_CLASS: i64 = 3;
+
+pub const INFO_MODE_MASK: i64 = 0xf;
+/// local belongs to the global declarative record
+pub const INFO_GLOBAL: i64 = 1 << 4;
+
+pub fn info_mode(info: i64) -> i64 {
+    info & INFO_MODE_MASK
+}
+
+pub fn info_is_lexical(info: i64) -> bool {
+    matches!(info_mode(info), MODE_LET | MODE_CONST | MODE_CLASS)
+}
+
+pub fn info_is_immutable(info: i64) -> bool {
+    info_mode(info) == MODE_CONST
+}
+
 #[repr(C)]
 pub struct ScopeInfo {
     pub header: Header,
-    /// parallel to the context's slots
-    pub names: GcSlot<FixedArray>,
     pub flags: GcSlot<Smi>,
+    pub local_count: GcSlot<Smi>,
+    // names[local_count], infos[local_count]
+    pub data: [GcSlot<Value>; 0],
 }
 
 pub struct ScopeInfoInit<'a> {
-    pub names: Handle<'a, FixedArray>,
+    pub names: HandleSlice<'a>,
+    pub infos: &'a [i64],
     pub flags: i64,
 }
 
 impl ScopeInfo {
+    pub fn layout_for(local_count: usize) -> Layout {
+        let data = Layout::array::<GcSlot<Value>>(local_count * 2).expect("scope info data");
+        Layout::new::<Self>()
+            .extend(data)
+            .expect("scope info layout")
+            .0
+    }
+
     pub fn flags(&self) -> i64 {
         self.flags.to_smi_unchecked().value()
     }
@@ -38,21 +70,112 @@ impl ScopeInfo {
     pub fn is_script_context(&self) -> bool {
         self.flags() & SCOPE_SCRIPT != 0
     }
+
+    pub fn is_repl_context(&self) -> bool {
+        self.flags() & SCOPE_REPL != 0
+    }
+
+    pub fn local_count(&self) -> usize {
+        self.local_count.to_smi_unchecked().value() as usize
+    }
+
+    pub fn name<'a>(&self, heap: &'a Heap, index: usize) -> Tagged<'a, DenseString> {
+        debug_assert!(index < self.local_count());
+        // Safety: index checked against the inline names section.
+        unsafe {
+            self.data
+                .as_ptr()
+                .add(index)
+                .cast::<GcSlot<DenseString>>()
+                .as_ref()
+                .unwrap_unchecked()
+                .get(heap)
+        }
+    }
+
+    pub fn info(&self, index: usize) -> i64 {
+        debug_assert!(index < self.local_count());
+        let count = self.local_count();
+        // Safety: index checked against the inline infos section.
+        unsafe {
+            self.data
+                .as_ptr()
+                .add(count + index)
+                .cast::<GcSlot<Smi>>()
+                .as_ref()
+                .unwrap_unchecked()
+                .to_smi_unchecked()
+                .value()
+        }
+    }
+
+    // TODO: reuse a NameToIndexHashTable for non-inlined context-local names;
+    // these lookups currently scan every local linearly.
+    pub fn context_slot_index(&self, heap: &Heap, name: Tagged<'_, Value>) -> Option<(usize, i64)> {
+        for i in 0..self.local_count() {
+            if self.name(heap, i).erase() == name {
+                return Some((i, self.info(i)));
+            }
+        }
+        None
+    }
+
+    pub fn global_slot_index(&self, heap: &Heap, name: Tagged<'_, Value>) -> Option<(usize, i64)> {
+        for i in 0..self.local_count() {
+            let info = self.info(i);
+            if info & INFO_GLOBAL != 0 && self.name(heap, i).erase() == name {
+                return Some((i, info));
+            }
+        }
+        None
+    }
 }
 
 impl HeapObject for ScopeInfo {
     const KIND: ObjectKind = ObjectKind::ScopeInfo;
     type Init<'a> = ScopeInfoInit<'a>;
 
-    fn layout_for(_config: &Self::Init<'_>) -> Layout {
-        Layout::new::<Self>()
+    fn layout_for(config: &Self::Init<'_>) -> Layout {
+        Self::layout_for(config.names.len())
     }
 
     fn init(&mut self, heap: &Heap, config: &Self::Init<'_>) {
+        debug_assert_eq!(config.names.len(), config.infos.len());
         let host = self.tagged(heap);
         self.header.map.init(heap.known().scope_info_map.get(heap));
-        self.names.set(heap, host, config.names.as_tagged(heap));
         self.flags.set(heap, host, Smi::new(config.flags));
+        self.local_count
+            .set(heap, host, Smi::new(config.names.len() as i64));
+        let count = config.names.len();
+        for i in 0..count {
+            // Safety: inline data has exactly 2*count GcSlots.
+            unsafe {
+                self.data
+                    .as_ptr()
+                    .add(i)
+                    .cast::<GcSlot<DenseString>>()
+                    .as_ref()
+                    .unwrap_unchecked()
+                    .set(
+                        heap,
+                        host,
+                        config
+                            .names
+                            .get(i)
+                            .unwrap()
+                            .as_tagged(heap)
+                            .get_as::<DenseString>(heap)
+                            .unwrap(),
+                    );
+                self.data
+                    .as_ptr()
+                    .add(count + i)
+                    .cast::<GcSlot<Smi>>()
+                    .as_ref()
+                    .unwrap_unchecked()
+                    .set(heap, host, Smi::new(config.infos[i]));
+            }
+        }
     }
 
     fn header(&self) -> &Header {
@@ -60,19 +183,26 @@ impl HeapObject for ScopeInfo {
     }
 
     fn layout(&self) -> Layout {
-        Layout::new::<Self>()
+        Self::layout_for(self.local_count())
     }
 }
 
 impl EdgeVisitable for ScopeInfo {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
         visitor.visit(self.header.map.as_raw());
-        visitor.visit(self.names.as_raw());
         visitor.visit(self.flags.as_raw());
+        visitor.visit(self.local_count.as_raw());
+        for i in 0..self.local_count() * 2 {
+            // Safety: inline data has exactly 2*count GcSlots.
+            visitor
+                .visit(unsafe { self.data.as_ptr().add(i).as_ref().unwrap_unchecked() }.as_raw());
+        }
     }
 }
 
 #[repr(C)]
+// TODO: inline the slot array in the context instead of pointing at a
+// FixedArray; the indirection costs one extra load per slot access.
 pub struct ContextObject {
     pub header: Header,
     pub outer: OptionGcSlot<ContextObject>,

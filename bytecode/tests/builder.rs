@@ -4,8 +4,8 @@
 
 use bytecode::{
     BuildError, BuiltinFn, CallableKind, Constant, FnBuilder, FunctionId, FunctionMeta, Opcode,
-    Operand, Program, REGISTER_FILE_START, Reg, RegList, RtArg, ValidationError, try_decode,
-    validate, validate_function,
+    Operand, Program, REGISTER_FILE_START, Reg, RegList, RtArg, ScopeLayout, ScopeLocal,
+    ValidationError, try_decode, validate, validate_function,
 };
 
 #[derive(Debug, PartialEq)]
@@ -108,13 +108,22 @@ fn constant_pool_dedups() {
         b.constant(Constant::FunctionPrototype)
     );
 
-    let names: Vec<Box<[u8]>> = vec![b"a".as_slice().into(), b"b".as_slice().into()];
-    let flags = 1;
-    let scope = b.constant(Constant::ContextNames {
-        names: names.clone(),
-        flags,
-    });
-    assert_eq!(b.constant(Constant::ContextNames { names, flags }), scope);
+    let layout = ScopeLayout {
+        locals: vec![
+            ScopeLocal {
+                name: b"a".as_slice().into(),
+                info: 0,
+            },
+            ScopeLocal {
+                name: b"b".as_slice().into(),
+                info: 0,
+            },
+        ]
+        .into_boxed_slice(),
+        flags: 1,
+    };
+    let scope = b.constant(Constant::ScopeInfo(layout.clone()));
+    assert_eq!(b.constant(Constant::ScopeInfo(layout)), scope);
 
     let callable = b.constant(Constant::Callable(FunctionId(3)));
     assert_eq!(b.constant(Constant::Callable(FunctionId(3))), callable);
@@ -123,7 +132,7 @@ fn constant_pool_dedups() {
     assert_eq!(
         b.constants_len(),
         9,
-        "x, 0.5, 0.0, -0.0, smi, obj-proto, fn-proto, names, callable"
+        "x, 0.5, 0.0, -0.0, smi, obj-proto, fn-proto, scope, callable"
     );
 
     let func = b.finish(meta()).unwrap();

@@ -11,6 +11,8 @@ pub enum VmError {
     NotExtensible,
     /// Unresolvable binding or TDZ access (spec: ReferenceError).
     Reference,
+    /// Invalid declaration/redeclaration (spec: SyntaxError).
+    Syntax,
     /// Date time value outside the valid range (spec: RangeError).
     InvalidTime,
     /// TypeError with a specific message, by registry id.
@@ -67,6 +69,8 @@ pub enum Message {
     ProxySetPrototypeOfMismatch,
     /// `prototype is immutable`
     ImmutablePrototype,
+    /// `assignment to a constant variable`
+    ConstAssign,
     /// `cannot perform '<trap>' on a proxy that has been revoked`
     ProxyRevokedGet,
     ProxyRevokedSet,
@@ -91,6 +95,7 @@ impl VmError {
                 "RangeError"
             }
             Self::Reference => "ReferenceError",
+            Self::Syntax => "SyntaxError",
         }
     }
 
@@ -105,6 +110,7 @@ impl VmError {
             Self::StackOverflow => "maximum call stack size exceeded",
             Self::NotExtensible => "object is not extensible",
             Self::Reference => "cannot access variable before initialization",
+            Self::Syntax => "invalid or conflicting declaration",
             Self::Message(m) => m.text(),
         }
     }
@@ -174,6 +180,7 @@ impl Message {
                 "proxy setPrototypeOf trap may not change a non-extensible target's prototype"
             }
             Self::ImmutablePrototype => "prototype is immutable",
+            Self::ConstAssign => "assignment to a constant variable",
             Self::ProxyRevokedGet => "cannot perform 'get' on a proxy that has been revoked",
             Self::ProxyRevokedSet => "cannot perform 'set' on a proxy that has been revoked",
             Self::ProxyRevokedHas => "cannot perform 'has' on a proxy that has been revoked",

@@ -13,12 +13,13 @@
 
 use bytecode::{
     CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, Program, Reg, RegList,
+    ScopeLayout, ScopeLocal,
 };
 use kette_parser::{
     Ast, BinaryOp, Node, NodeId, NodeList, ObjectParts, Resolution, Resolved, ScopeId, SlotKind,
     Symbol, UnaryOp,
 };
-use vm_core::SCOPE_DECLARATION;
+use vm_core::{MODE_VAR, SCOPE_DECLARATION};
 
 use crate::CompileError;
 
@@ -304,17 +305,20 @@ impl<'a> FunctionGen<'a> {
     fn generate(&mut self) -> Result<(), CompileError> {
         // prologue: one context per function (uniform chain); the shared
         // ScopeInfo (constant 0) names every slot for dynamic resolution
-        let names: Vec<Box<[u8]>> = self
+        let locals = self
             .resolved
             .scope(self.scope)
             .decls
             .iter()
-            .map(|d| self.ast.symbol(d.name).into())
+            .map(|d| ScopeLocal {
+                name: self.ast.symbol(d.name).into(),
+                info: MODE_VAR as u32,
+            })
             .collect();
-        let ctx_info = self.b.constant(Constant::ContextNames {
-            names,
+        let ctx_info = self.b.constant(Constant::ScopeInfo(ScopeLayout {
+            locals,
             flags: SCOPE_DECLARATION,
-        });
+        }));
         self.b.create_function_context(ctx_info);
         self.b.push_context(self.ctx_save);
         self.b.load_undefined();

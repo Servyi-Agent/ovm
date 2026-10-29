@@ -153,9 +153,11 @@ where
 {
     let vm = heap_tests::vm::<B>(B::Config::default());
     let script = "\
+        (function () { \
         var a = []; var s = 0; \
         for (var i = 0; i < 20000; i++) { a[i % 64] = { x: i, y: i + 1 }; s += i; } \
-        s";
+        return s; \
+        })()";
 
     let mut workers = Vec::new();
     for _ in 0..2 {

@@ -254,6 +254,7 @@ pub struct BuiltinIndices {
 
 /// Build the builtin objects and install them on the global object.
 pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError> {
+    vm.set_eval_compiler(js_compiler::compile_js);
     let known = vm.known();
     let mut thread = vm.attach();
     let wks = &known.strings;
@@ -602,6 +603,7 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
 
         // ---- eval -------------------------------------------------------------
         let eval_fn = Object::native_function(thread.heap(), &scope, idx.eval)?;
+        known.eval_function.init(eval_fn.as_tagged(thread.heap()));
         let global = scope.handle(known.global_object.get(thread.heap()));
         let eval_name = thread.intern(&scope, "eval");
         // Safety: fresh interned word, rooted below before the define.
@@ -612,6 +614,22 @@ pub fn install_builtins(vm: &mut VM, idx: &BuiltinIndices) -> Result<(), VmError
             global,
             eval_name,
             PropertyDescriptor::data(eval_fn.erase()),
+        )?;
+
+        // ---- globalThis -------------------------------------------------------
+        let global_this_name = thread.intern(&scope, "globalThis");
+        let global_this_name = scope.handle(global_this_name.as_tagged(thread.heap()));
+        Object::define_own_property(
+            thread.heap(),
+            &scope,
+            global,
+            global_this_name,
+            PropertyDescriptor::Data {
+                value: global.erase(),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
         )?;
 
         // ---- Object.prototype.toString/hasOwnProperty/propertyIsEnumerable ------

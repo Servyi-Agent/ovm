@@ -4,8 +4,9 @@ use vm_core::HostCtx;
 use vm_core::Object;
 use vm_core::materialize::Materialize;
 use vm_core::{
-    Args, ContextObject, Convert, DenseString, Errors, Handle, HandleSlice, Heap, LanguageMode,
-    Smi, Tagged, ThreadState, VM, Value, VmError, WellKnown,
+    Args, ContextInit, ContextObject, Convert, DenseString, Handle, HandleScope, HandleSlice, Heap,
+    SCOPE_DECLARATION, SCOPE_SCRIPT, ScopeInfo, ScopeInfoInit, Smi, Tagged, ThreadState, VM, Value,
+    VmError, WellKnown,
 };
 use vm_core::{raise_runtime, rt_try};
 
@@ -17,58 +18,21 @@ pub fn eval_runtime<'a>(
     let HostCtx {
         vm, heap, state, ..
     } = nctx;
+    let source = args.get_handle(heap, 1);
+    if source.as_tagged(heap).get_as::<DenseString>(heap).is_none() {
+        return source.as_tagged(heap).erase();
+    }
     state.handle_scope(|scope| {
-        // root the caller context before the allocating ToString below
-        let Some(context) = state.current_context(heap) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
-        let context = scope.handle(context);
-        let src = scope.handle(args.get(heap, 1));
-        let s = scope.handle(
-            match Convert::to_string(heap, &scope, src).map(|v| v.raw()) {
-                Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-                Err(err) => return raise_runtime(vm, heap, state, err),
-            },
-        );
-        let Some(text) = s
+        let text = source
             .as_tagged(heap)
             .get_as::<DenseString>(heap)
             .map(|s| s.to_rust_string(heap))
-        else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
-
-        // TODO: pass this in better.
-        let eval_mode = if state.is_frame_active()
-            && state
-                .stack()
-                .frame_header(state.frame_base())
-                .callable(heap)
-                .callable_info(heap)
-                .is_some_and(|info| info.mode() == LanguageMode::Strict)
-        {
-            bytecode::SourceMode::EvalStrict
-        } else {
-            bytecode::SourceMode::Eval
-        };
-        let program = match js_compiler::compile_js(&text, eval_mode) {
+            .expect("checked string source");
+        let program = match js_compiler::compile_js(&text, bytecode::SourceMode::EvalGlobal) {
             Ok(program) => program,
-            // TODO: a SyntaxError class; approximate with TypeError for now
-            Err(_) => {
-                let ex = rt_try!(
-                    vm,
-                    heap,
-                    state,
-                    Errors::from_vm_error(vm, heap, state, VmError::Type)
-                );
-                state.set_pending_exception(ex);
-                return vm.known().exception.get(heap).erase();
-            }
+            Err(_) => return raise_runtime(vm, heap, state, VmError::Syntax),
         };
-
-        let Some(context) = scope.cast::<ContextObject>(heap, context.as_tagged(heap)) else {
-            return raise_runtime(vm, heap, state, VmError::Type);
-        };
+        let context = eval_global_context(vm, heap, &scope);
         let closure = rt_try!(
             vm,
             heap,
@@ -79,9 +43,34 @@ pub fn eval_runtime<'a>(
             .map(|v| v.raw())
         {
             Ok(v) => unsafe { Tagged::<Value>::from_value_unchecked(v) },
-            Err(err) => return raise_runtime(vm, heap, state, err),
+            Err(err) => raise_runtime(vm, heap, state, err),
         }
     })
+}
+
+fn eval_global_context<'s>(
+    vm: &VM,
+    heap: &mut Heap,
+    scope: &'s HandleScope<'_>,
+) -> Handle<'s, ContextObject> {
+    let info = heap.allocate_handle::<ScopeInfo>(
+        ScopeInfoInit {
+            names: HandleSlice::EMPTY,
+            infos: &[],
+            flags: SCOPE_DECLARATION | SCOPE_SCRIPT,
+        },
+        scope,
+    );
+    let outer = scope.handle(vm.known().empty_context.get(heap));
+    let slots = scope.handle(vm.known().empty_fixed_array.get(heap));
+    heap.allocate_handle::<ContextObject>(
+        ContextInit {
+            outer: Some(outer),
+            slots,
+            scope_info: info,
+        },
+        scope,
+    )
 }
 
 /// `isNaN(x)`: ToNumber(x) is NaN.

@@ -10,7 +10,8 @@ pub use builder::{
 pub use opcodes::{OPERAND_SIZES_NARROW, OPERAND_SIZES_WIDE, Opcode};
 pub use program::{
     CallableKind, CompileFn, Constant, FrontendError, FrontendErrorKind, Function, FunctionId,
-    HandlerEntry, Program, SourceMode,
+    GlobalDeclarations, GlobalFunctionDecl, HandlerEntry, Program, ScopeLayout, ScopeLocal,
+    SourceMode,
 };
 pub use validate::{ValidationError, validate, validate_function};
 
@@ -152,6 +153,21 @@ pub enum BuiltinFn {
     /// (name) -> undefined — sloppy direct-eval var declaration: create
     /// the binding in the caller's variable environment when absent
     DeclareEvalVar,
+    /// (name, value) -> undefined — sloppy direct-eval function declaration
+    DeclareEvalFunction,
+    /// (callee, source) -> callable — resolve a direct eval call; returns
+    /// the callee unchanged unless it is the intrinsic eval
+    ResolveDirectEval,
+    /// (value, name) -> value — initialize a REPL top-level lexical
+    StoreReplGlobalInit,
+    /// (declarations) -> undefined — validate all sloppy eval declarations
+    /// before any binding is created
+    ValidateEvalDeclarations,
+    /// (declarations) -> undefined — validate and install one script's
+    /// global var/function declarations
+    DeclareGlobals,
+    /// () -> never — assignment to a const binding
+    ThrowConstAssign,
     /// (first) -> array — a fresh array of the frame's arguments from
     /// formal index `first` (a Smi)
     CreateRestParameter,
@@ -183,7 +199,7 @@ impl BuiltinFn {
     /// All variants in discriminant order. The array length is the
     /// variant count (type-checked), and the VM registers its table in
     /// this order so registry indices equal discriminants.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 45] = [
         Self::GetIterator,
         Self::IteratorNext,
         Self::IteratorDone,
@@ -215,6 +231,12 @@ impl BuiltinFn {
         Self::LoadDynamicName,
         Self::StoreDynamicName,
         Self::DeclareEvalVar,
+        Self::DeclareEvalFunction,
+        Self::ResolveDirectEval,
+        Self::StoreReplGlobalInit,
+        Self::ValidateEvalDeclarations,
+        Self::DeclareGlobals,
+        Self::ThrowConstAssign,
         Self::CreateRestParameter,
         Self::SuperGetProperty,
         Self::SuperSetProperty,

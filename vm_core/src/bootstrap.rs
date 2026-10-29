@@ -3,9 +3,10 @@ use core::ptr::NonNull;
 use crate::{
     AccessorInfo, AccessorInfoInit, CallableInfoInit, CallableInfoObject, Cell, CellInit, Code,
     CodeInit, ContextInit, ContextObject, EdgeVisitable, FixedArray, GcSlot, Handle, HandleData,
-    HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind, NativeIndex, Object,
-    ObjectInit, ScopeInfo, ScopeInfoInit, SlotFlags, SlotName, Smi, StringInterner, Symbol, Tagged,
-    Value, Visitor,
+    HandleScope, HandleSlice, Heap, MODE_SLOPPY, Map, MapInit, MapKind, NameToIndexHashTable,
+    NameToIndexHashTableInit, NativeIndex, Object, ObjectInit, ScopeInfo, ScopeInfoInit,
+    ScriptContextTable, ScriptContextTableInit, SlotFlags, SlotName, Smi, StringInterner, Symbol,
+    Tagged, Value, Visitor,
 };
 
 pub struct WellKnown {
@@ -35,6 +36,8 @@ pub struct WellKnown {
     pub handler_table_map: GcSlot<Map>,
     pub context_map: GcSlot<Map>,
     pub scope_info_map: GcSlot<Map>,
+    pub script_context_table_map: GcSlot<Map>,
+    pub name_index_table_map: GcSlot<Map>,
     pub feedback_vector_map: GcSlot<Map>,
     /// Maps of the prototype-validity machinery: `Cell` and `PrototypeInfo`.
     pub cell_map: GcSlot<Map>,
@@ -90,6 +93,10 @@ pub struct WellKnown {
     /// The realm global object: global variables are properties on it
     /// (top-level `var`/assignments; lexical script-context globals later).
     pub global_object: GcSlot<Object>,
+    /// The intrinsic `eval` function used to recognize direct eval calls.
+    pub eval_function: GcSlot<Object>,
+    /// Loaded script contexts and their name index.
+    pub script_context_table: GcSlot<ScriptContextTable>,
     /// Initial map of `%Object.prototype%`: every fresh `{}` gets it
     /// (extendable, parent = object_prototype). Shared with `global_object`.
     pub object_initial_map: GcSlot<Map>,
@@ -260,6 +267,8 @@ impl WellKnown {
             handler_table_map: smi_slot::<Map>(),
             context_map: smi_slot::<Map>(),
             scope_info_map: smi_slot::<Map>(),
+            script_context_table_map: smi_slot::<Map>(),
+            name_index_table_map: smi_slot::<Map>(),
             feedback_vector_map: smi_slot::<Map>(),
             cell_map: smi_slot::<Map>(),
             prototype_info_map: smi_slot::<Map>(),
@@ -295,6 +304,8 @@ impl WellKnown {
             error_prototype: smi_slot::<Object>(),
             function_prototype: smi_slot::<Object>(),
             global_object: smi_slot::<Object>(),
+            eval_function: smi_slot::<Object>(),
+            script_context_table: smi_slot::<ScriptContextTable>(),
             object_initial_map: smi_slot::<Map>(),
             function_map: smi_slot::<Map>(),
             non_constructor_function_map: smi_slot::<Map>(),
@@ -345,6 +356,8 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.handler_table_map.as_raw());
         visitor.visit(self.context_map.as_raw());
         visitor.visit(self.scope_info_map.as_raw());
+        visitor.visit(self.script_context_table_map.as_raw());
+        visitor.visit(self.name_index_table_map.as_raw());
         visitor.visit(self.feedback_vector_map.as_raw());
         visitor.visit(self.cell_map.as_raw());
         visitor.visit(self.prototype_info_map.as_raw());
@@ -379,6 +392,8 @@ impl EdgeVisitable for WellKnown {
         visitor.visit(self.error_prototype.as_raw());
         visitor.visit(self.function_prototype.as_raw());
         visitor.visit(self.global_object.as_raw());
+        visitor.visit(self.eval_function.as_raw());
+        visitor.visit(self.script_context_table.as_raw());
         visitor.visit(self.object_initial_map.as_raw());
         visitor.visit(self.function_map.as_raw());
         visitor.visit(self.non_constructor_function_map.as_raw());
@@ -575,6 +590,8 @@ pub fn bootstrap_basics(heap: &mut Heap) {
     let handler_table_map = alloc_map(heap, &scope, MapKind::HANDLER_TABLE);
     let context_map = alloc_map(heap, &scope, MapKind::CONTEXT);
     let scope_info_map = alloc_map(heap, &scope, MapKind::SCOPE_INFO);
+    let script_context_table_map = alloc_map(heap, &scope, MapKind::SCRIPT_CONTEXT_TABLE);
+    let name_index_table_map = alloc_map(heap, &scope, MapKind::NAME_INDEX_TABLE);
     let feedback_vector_map = alloc_map(heap, &scope, MapKind::FEEDBACK_VECTOR);
     let handler_map_0 = alloc_map_with_slots(heap, &scope, MapKind::DATA_HANDLER, 0);
     let handler_map_1 = alloc_map_with_slots(heap, &scope, MapKind::DATA_HANDLER, 1);
@@ -643,6 +660,12 @@ pub fn bootstrap_basics(heap: &mut Heap) {
         .init(handler_table_map.as_tagged(heap));
     known.context_map.init(context_map.as_tagged(heap));
     known.scope_info_map.init(scope_info_map.as_tagged(heap));
+    known
+        .script_context_table_map
+        .init(script_context_table_map.as_tagged(heap));
+    known
+        .name_index_table_map
+        .init(name_index_table_map.as_tagged(heap));
     known
         .feedback_vector_map
         .init(feedback_vector_map.as_tagged(heap));
@@ -763,6 +786,15 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         object_prototype,
     );
     let global_object = alloc_object(heap, &scope, object_initial_map);
+    let script_names = heap
+        .allocate_handle::<NameToIndexHashTable>(NameToIndexHashTableInit { capacity: 16 }, &scope);
+    let script_context_table = heap.allocate_handle::<ScriptContextTable>(
+        ScriptContextTableInit {
+            capacity: 0,
+            names: script_names,
+        },
+        &scope,
+    );
 
     let undefined_map = alloc_parent_map(heap, &scope, MapKind::ODDBALL, object_prototype);
     let boolean_map = alloc_parent_map(heap, &scope, MapKind::ODDBALL, object_prototype);
@@ -799,7 +831,8 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
 
     let empty_scope_info = heap
         .allocate::<ScopeInfo>(ScopeInfoInit {
-            names: empty_slots,
+            names: HandleSlice::EMPTY,
+            infos: &[],
             flags: 0,
         })
         .as_handle(&scope);
@@ -901,6 +934,10 @@ pub fn bootstrap_well_known(heap: &mut Heap) {
         .empty_scope_info
         .init(empty_scope_info.as_tagged(heap));
     known.global_object.init(global_object.as_tagged(heap));
+    known.eval_function.init(known.undefined.get(heap));
+    known
+        .script_context_table
+        .init(script_context_table.as_tagged(heap));
     known
         .object_initial_map
         .init(object_initial_map.as_tagged(heap));

@@ -8,12 +8,19 @@ use oxc_syntax::scope::{ScopeFlags, ScopeId};
 use oxc_syntax::symbol::{SymbolFlags, SymbolId};
 
 use bytecode::{
-    BuiltinFn, CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta, Label,
-    Opcode, Program, PropertyFlags, Reg, RegList, RtArg, TempScope,
+    BuiltinFn, CallableKind, ConstIdx, Constant, FnBuilder, FunctionId, FunctionMeta,
+    GlobalDeclarations, GlobalFunctionDecl, Label, Opcode, Program, PropertyFlags, Reg, RegList,
+    RtArg, ScopeLayout, ScopeLocal, TempScope,
 };
-use vm_core::{SCOPE_DECLARATION, SCOPE_SCRIPT};
+use vm_core::{
+    INFO_GLOBAL, MODE_CLASS, MODE_CONST, MODE_LET, MODE_VAR, SCOPE_DECLARATION, SCOPE_REPL,
+    SCOPE_SCRIPT,
+};
 
-use crate::analysis::{ClassIdx, Facts, Fid, FnBody, FnKind, Home, MemberKind, Mode, Special};
+use crate::analysis::{
+    ClassIdx, Facts, Fid, FnBody, FnKind, Home, MemberKind, Mode, RootBinding, Special,
+    root_binding,
+};
 
 /// A construct the materializer does not support yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +50,8 @@ struct Breakable {
     labels: Vec<String>,
     breaks: Label,
     continues: Option<Label>,
-    /// loops owning a head context: jumps out must unwind past it
-    unwind_ctx: Option<Reg>,
+    /// active context depth at the target
+    context_depth: usize,
 }
 
 /// A store target ready for the final store. `_temps` keeps the staged
@@ -114,8 +121,11 @@ enum Slot {
         slot: u32,
         hole_check: bool,
     },
-    /// REPL mode: script-level bindings are global object properties
+    /// Root var/function binding on the global object
     Global,
+    /// REPL root lexical: name lookup through the script-context table so
+    /// redeclarations share the first script context's slot
+    Repl,
 }
 
 /// The AST construct owning one runtime context. The function frame context
@@ -124,6 +134,7 @@ enum Slot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContextHost {
     Function(Fid),
+    Block(ScopeId),
     Class(ClassIdx),
     For(NodeId),
     Object(NodeId),
@@ -135,7 +146,9 @@ struct Layout {
     this_slot: Option<u32>,
     new_target_slot: Option<u32>,
     this_function_slot: Option<u32>,
-    slot_names: Vec<Vec<u8>>,
+    slot_names: Vec<ScopeLocal>,
+    /// block scopes that own a runtime context
+    block_slots: HashMap<ScopeId, Vec<ScopeLocal>>,
     /// per scope: register locals that start in the TDZ hole
     hole_fills: HashMap<ScopeId, Vec<u32>>,
     /// whether the prologue must create/push a function context: any
@@ -568,6 +581,7 @@ pub fn generate<'a>(scoping: &Scoping, facts: &Facts<'a>) -> Result<Program, Com
                 new_target_slot: None,
                 this_function_slot: None,
                 slot_names: Vec::new(),
+                block_slots: HashMap::new(),
                 hole_fills: HashMap::new(),
                 creates_context: true,
             })
@@ -606,6 +620,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
     fn scope_creates_ctx(&self, scope: ScopeId) -> bool {
         if let Some(&fid) = self.facts.fn_scope_to_fid.get(&scope) {
             return self.layouts[fid.0 as usize].creates_context;
+        }
+        if self.facts.block_contexts.contains(&scope) {
+            return true;
         }
         if let Some(&idx) = self.facts.class_of_scope.get(&scope) {
             return self.facts.classes[idx.0 as usize].slot_count > 0;
@@ -667,6 +684,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
     fn context_host_of(&self, sym: SymbolId) -> ContextHost {
         let mut cur = self.scoping.symbol_scope_id(sym);
         loop {
+            if self.facts.block_contexts.contains(&cur) {
+                return ContextHost::Block(cur);
+            }
             if let Some(&idx) = self.facts.class_of_scope.get(&cur) {
                 return ContextHost::Class(idx);
             }
@@ -717,10 +737,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
         next
     }
 
+    fn scope_local_info(&self, sym: SymbolId) -> u32 {
+        let flags = self.scoping.symbol_flags(sym);
+        if flags.contains(SymbolFlags::ConstVariable) {
+            MODE_CONST as u32
+        } else if flags.contains(SymbolFlags::Class) {
+            MODE_CLASS as u32
+        } else if flags.contains(SymbolFlags::BlockScopedVariable) {
+            MODE_LET as u32
+        } else {
+            MODE_VAR as u32
+        }
+    }
+
     /// Assign every slot of `fid`'s scopes (its prologue's layout).
     fn assign_function_slots(&mut self, fid: Fid) -> Layout {
-        let repl_root = matches!(self.facts.mode, Mode::Repl)
-            && self.facts.functions[fid.0 as usize].kind == FnKind::Script;
         let non_simple = self.facts.functions[fid.0 as usize]
             .params
             .iter()
@@ -734,32 +765,60 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
         let mut next_reg = 0u32;
         let mut next_ctx = 0u32;
-        let mut slot_names: Vec<Vec<u8>> = Vec::new();
+        let mut slot_names: Vec<ScopeLocal> = Vec::new();
+        let mut block_slots: HashMap<ScopeId, Vec<ScopeLocal>> = HashMap::new();
+        let mut block_next: HashMap<ScopeId, u32> = HashMap::new();
         let mut hole_fills: HashMap<ScopeId, Vec<u32>> = HashMap::new();
         let mut this_slot = None;
-        if self.facts.captures_this.contains(&fid) {
-            this_slot = Some(next_ctx);
-            slot_names.push(b"this".to_vec());
+        let mut push_special = |name: &[u8]| {
+            let info = 0;
+            slot_names.push(ScopeLocal {
+                name: name.into(),
+                info,
+            });
             next_ctx += 1;
+            next_ctx - 1
+        };
+        if self.facts.captures_this.contains(&fid) {
+            this_slot = Some(push_special(b"this"));
         }
         let mut new_target_slot = None;
         if self.facts.captures_new_target.contains(&fid) {
-            new_target_slot = Some(next_ctx);
-            slot_names.push(b".new.target".to_vec());
-            next_ctx += 1;
+            new_target_slot = Some(push_special(b".new.target"));
         }
         let mut this_function_slot = None;
         if self.facts.needs_this_function.contains(&fid) {
-            this_function_slot = Some(next_ctx);
-            slot_names.push(b".this_function".to_vec());
-            next_ctx += 1;
+            this_function_slot = Some(push_special(b".this_function"));
         }
 
         for &sid in &self.scopes_by_fid[fid.0 as usize] {
+            let block_context = self.facts.block_contexts.contains(&sid);
             for sym in self.scoping.iter_bindings_in(sid) {
-                if repl_root && sid == self.facts.root {
-                    self.slots.insert(sym, Slot::Global);
-                    continue;
+                let flags = self.scoping.symbol_flags(sym);
+                match root_binding(self.facts.mode, self.facts.root, sid, flags) {
+                    Some(RootBinding::GlobalObject) => {
+                        self.slots.insert(sym, Slot::Global);
+                        continue;
+                    }
+                    Some(RootBinding::GlobalLexical) => {
+                        let slot = next_ctx;
+                        next_ctx += 1;
+                        slot_names.push(ScopeLocal {
+                            name: self.scoping.symbol_name(sym).as_bytes().into(),
+                            info: self.scope_local_info(sym) | INFO_GLOBAL as u32,
+                        });
+                        let slot = if self.facts.mode == Mode::Repl {
+                            Slot::Repl
+                        } else {
+                            Slot::Ctx {
+                                slot,
+                                hole_check: true,
+                            }
+                        };
+                        self.slots.insert(sym, slot);
+                        continue;
+                    }
+                    None => {}
                 }
                 let is_param = self.facts.param_symbols.contains_key(&sym);
                 let is_pattern_param = self.facts.pattern_params.contains(&sym);
@@ -768,12 +827,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 } else if is_param {
                     non_simple
                 } else {
-                    self.scoping
-                        .symbol_flags(sym)
-                        .intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class)
+                    flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class)
                 };
                 let forced = calls_eval || self.facts.captured.contains(&sym);
-                let slot = if is_param && !is_pattern_param && !forced {
+                let slot = if block_context {
+                    let slot = *block_next.entry(sid).or_default();
+                    block_next.insert(sid, slot + 1);
+                    block_slots.entry(sid).or_default().push(ScopeLocal {
+                        name: self.scoping.symbol_name(sym).as_bytes().into(),
+                        info: self.scope_local_info(sym),
+                    });
+                    Slot::CtxAt { slot, hole_check }
+                } else if is_param && !is_pattern_param && !forced {
                     Slot::Param {
                         index: self.facts.param_symbols[&sym],
                         hole_check,
@@ -781,7 +846,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 } else if forced {
                     let slot = next_ctx;
                     next_ctx += 1;
-                    slot_names.push(self.scoping.symbol_name(sym).as_bytes().to_vec());
+                    slot_names.push(ScopeLocal {
+                        name: self.scoping.symbol_name(sym).as_bytes().into(),
+                        info: self.scope_local_info(sym),
+                    });
                     Slot::Ctx { slot, hole_check }
                 } else {
                     let reg = next_reg;
@@ -812,7 +880,24 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
         for i in 0..self.nested_scopes_by_fid[fid.0 as usize].len() {
             let sid = self.nested_scopes_by_fid[fid.0 as usize][i];
+            let block_context = self.facts.block_contexts.contains(&sid);
             for sym in self.scoping.iter_bindings_in(sid) {
+                if block_context {
+                    let slot = *block_next.entry(sid).or_default();
+                    block_next.insert(sid, slot + 1);
+                    block_slots.entry(sid).or_default().push(ScopeLocal {
+                        name: self.scoping.symbol_name(sym).as_bytes().into(),
+                        info: self.scope_local_info(sym),
+                    });
+                    self.slots.insert(
+                        sym,
+                        Slot::CtxAt {
+                            slot,
+                            hole_check: true,
+                        },
+                    );
+                    continue;
+                }
                 if calls_eval || self.facts.captured.contains(&sym) {
                     continue;
                 }
@@ -829,7 +914,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
         }
 
-        let creates_context = !slot_names.is_empty() || calls_eval;
+        let creates_context = !slot_names.is_empty() || !block_slots.is_empty() || calls_eval;
         debug_assert_eq!(
             creates_context,
             self.facts.creates_context.contains(&fid),
@@ -842,6 +927,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             this_function_slot,
             creates_context,
             slot_names,
+            block_slots,
             hole_fills,
         }
     }
@@ -865,10 +951,12 @@ struct FunctionGen<'c, 'a, 'p> {
     /// labels forwarded into an enclosing loop/switch by LabeledStatements
     nested_labels: Vec<String>,
     /// Active runtime context chain, outermost first. The function frame
-    /// context is present when the prologue created one; class / for-head /
-    /// object-home contexts are pushed and popped around their construct.
-    /// Declaration stores use this to find the hosting context's depth.
+    /// context is present when the prologue created one; block / class /
+    /// for-head / object-home contexts are pushed and popped around their
+    /// construct. Declaration stores use this to find the hosting depth.
     contexts: Vec<ContextHost>,
+    /// save registers parallel to `contexts`
+    context_saves: Vec<Reg>,
 }
 
 /// RAII guard for one structural context pushed by a class / for-head /
@@ -926,6 +1014,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             breakables: Vec::new(),
             nested_labels: Vec::new(),
             contexts: Vec::new(),
+            context_saves: Vec::new(),
         }
     }
 
@@ -946,6 +1035,40 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         Err(CompileError::new(span, feature))
     }
 
+    fn global_declarations(&self) -> GlobalDeclarations {
+        let fns = self
+            .c
+            .facts
+            .hoist_fns
+            .get(&self.fid)
+            .cloned()
+            .unwrap_or_default();
+        let mut funcs: Vec<GlobalFunctionDecl> = Vec::new();
+        for (sym, fid) in fns {
+            let name: Box<[u8]> = self.c.scoping.symbol_name(sym).as_bytes().into();
+            if let Some(existing) = funcs.iter_mut().find(|d| d.name == name) {
+                existing.function = FunctionId(fid.0);
+            } else {
+                funcs.push(GlobalFunctionDecl {
+                    name,
+                    function: FunctionId(fid.0),
+                });
+            }
+        }
+        let mut vars: Vec<Box<[u8]>> = Vec::new();
+        for sym in self.c.facts.hoist_vars.get(&self.fid).into_iter().flatten() {
+            let name: Box<[u8]> = self.c.scoping.symbol_name(*sym).as_bytes().into();
+            if funcs.iter().any(|d| d.name == name) || vars.iter().any(|n| *n == name) {
+                continue;
+            }
+            vars.push(name);
+        }
+        GlobalDeclarations {
+            vars: vars.into_boxed_slice(),
+            funcs: funcs.into_boxed_slice(),
+        }
+    }
+
     // -- staging helpers ----------------------------------------------------
 
     fn with_temps<F, T>(&mut self, f: F) -> Result<T, CompileError>
@@ -962,12 +1085,17 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn push_frame_context(&mut self) {
         self.b.push_context(self.ctx_save);
         self.contexts.push(ContextHost::Function(self.fid));
+        self.context_saves.push(self.ctx_save);
     }
 
     /// Leave the function-context frame, if the prologue pushed one.
     fn pop_frame_context(&mut self) {
         if self.frame_context {
             self.b.pop_context(self.ctx_save);
+            if self.contexts.last() == Some(&ContextHost::Function(self.fid)) {
+                self.contexts.pop();
+                self.context_saves.pop();
+            }
         }
     }
 
@@ -978,11 +1106,30 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn context_scope(&mut self, save: Reg, host: ContextHost) -> ContextScope<'c, 'a, 'p> {
         self.b.push_context(save);
         self.contexts.push(host);
+        self.context_saves.push(save);
         ContextScope {
             generator: self,
             save,
             host,
         }
+    }
+
+    fn enter_block_context(
+        &mut self,
+        scope: Option<ScopeId>,
+        save: Reg,
+    ) -> Option<ContextScope<'c, 'a, 'p>> {
+        let scope = scope?;
+        let locals = self.c.layouts[self.fid.0 as usize]
+            .block_slots
+            .get(&scope)?
+            .clone();
+        let idx = self.b.constant(Constant::ScopeInfo(ScopeLayout {
+            locals: locals.into_boxed_slice(),
+            flags: 0,
+        }));
+        self.b.create_function_context(idx);
+        Some(self.context_scope(save, ContextHost::Block(scope)))
     }
 
     /// Drop-time half of [`Self::context_scope`].
@@ -994,6 +1141,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         );
         self.b.pop_context(save);
         self.contexts.pop().expect("context stack underflow");
+        self.context_saves
+            .pop()
+            .expect("context save stack underflow");
     }
 
     /// Replace the guarded context with a fresh sibling. The logical chain
@@ -1092,6 +1242,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 }
             }
             Slot::Global => unreachable!("global loads carry a name"),
+            Slot::Repl => unreachable!("REPL globals load by name"),
         }
     }
 
@@ -1108,6 +1259,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.b.store_context_slot(slot, depth);
             }
             Slot::Global => unreachable!("global stores carry a name"),
+            Slot::Repl => unreachable!("REPL globals store by name"),
         }
     }
 
@@ -1147,18 +1299,52 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.store_global(idx, feedback);
             return Ok(());
         }
+        if matches!(slot, Slot::Repl) {
+            let idx = self.b.name(name.as_bytes());
+            self.b.call_runtime_staged(
+                BuiltinFn::StoreReplGlobalInit,
+                &[RtArg::Acc, RtArg::Const(idx)],
+            );
+            return Ok(());
+        }
         let depth = self.decl_depth(sym, slot);
         self.store_slot(slot, depth);
         Ok(())
     }
 
+    /// Store a declaration's initial value.
+    fn store_declaration(&mut self, sym: SymbolId, name: &str) -> Result<(), CompileError> {
+        self.store_symbol(sym, name)
+    }
+
+    fn is_const_ident(&self, ident: &IdentifierReference<'_>) -> bool {
+        let Some(rid) = ident.reference_id.get() else {
+            return false;
+        };
+        self.c
+            .scoping
+            .get_reference(rid)
+            .symbol_id()
+            .is_some_and(|sym| {
+                self.c
+                    .scoping
+                    .symbol_flags(sym)
+                    .contains(SymbolFlags::ConstVariable)
+            })
+    }
+
     /// Store the accumulator into an identifier assignment target.
     fn store_name(&mut self, ident: &IdentifierReference<'_>) -> Result<(), CompileError> {
+        let is_const = self.is_const_ident(ident);
         match self.identifier_resolution(ident)? {
             IdRes::Global => {
-                let idx = self.b.name(ident.name.as_bytes());
-                let feedback = self.b.new_feedback();
-                self.b.store_global(idx, feedback);
+                if is_const {
+                    self.b.call_runtime_staged(BuiltinFn::ThrowConstAssign, &[]);
+                } else {
+                    let idx = self.b.name(ident.name.as_bytes());
+                    let feedback = self.b.new_feedback();
+                    self.b.store_global(idx, feedback);
+                }
             }
             IdRes::Dynamic => {
                 let idx = self.b.name(ident.name.as_bytes());
@@ -1167,7 +1353,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     &[RtArg::Acc, RtArg::Const(idx)],
                 );
             }
-            IdRes::Slot(slot, depth) => self.store_slot(slot, depth),
+            IdRes::Slot(slot, depth) => {
+                if is_const {
+                    self.load_slot(slot, depth);
+                    self.b.call_runtime_staged(BuiltinFn::ThrowConstAssign, &[]);
+                } else {
+                    self.store_slot(slot, depth);
+                }
+            }
         }
         Ok(())
     }
@@ -1199,7 +1392,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     /// Such declarations belong to the caller's variable environment, not
     /// the eval frame.
     fn is_eval_dynamic_var(&self, sym: SymbolId) -> bool {
-        if !matches!(self.c.facts.mode, Mode::Eval) || self.fid != Fid(0) {
+        if !matches!(self.c.facts.mode, Mode::Eval | Mode::EvalGlobal) || self.fid != Fid(0) {
             return false;
         }
         // Strict eval keeps its vars local; only sloppy direct eval extends
@@ -1209,8 +1402,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         }
         let flags = self.c.scoping.symbol_flags(sym);
         self.c.scoping.symbol_scope_id(sym) == self.c.facts.root
-            && flags.contains(SymbolFlags::FunctionScopedVariable)
-            && !flags.contains(SymbolFlags::Function)
+            && flags.intersects(SymbolFlags::FunctionScopedVariable | SymbolFlags::Function)
     }
 
     /// Whether the reference's enclosing scope chain contains a direct eval.
@@ -1287,8 +1479,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let reference = self.c.scoping.get_reference(rid);
         match reference.symbol_id() {
             None => {
-                let dynamic = matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict)
-                    || self.scope_has_direct_eval(reference.scope_id());
+                let dynamic = matches!(
+                    self.c.facts.mode,
+                    Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal
+                ) || self.scope_has_direct_eval(reference.scope_id());
                 Ok(if dynamic {
                     IdRes::Dynamic
                 } else {
@@ -1304,7 +1498,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 let check = |hole: bool| hole && !skip_hole;
                 let slot = self.c.slot_of(sym);
                 match slot {
-                    Slot::Global => Ok(IdRes::Global),
+                    Slot::Global | Slot::Repl => Ok(IdRes::Global),
                     // registers carry no depth
                     Slot::Param { index, hole_check } => Ok(IdRes::Slot(
                         Slot::Param {
@@ -1432,9 +1626,15 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             Expression::Identifier(i) => self.emit_identifier(i),
             Expression::ThisExpression(t) => {
-                match self.c.facts.special.get(&t.node_id.get()) {
-                    Some(Special::This { owner, depth }) => self.emit_this_for(*owner, *depth),
-                    _ => self.emit_this_for(self.fid, 0),
+                if self.fid == Fid(0) && !matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict)
+                {
+                    let idx = self.b.constant(Constant::GlobalObject);
+                    self.b.load_constant(idx);
+                } else {
+                    match self.c.facts.special.get(&t.node_id.get()) {
+                        Some(Special::This { owner, depth }) => self.emit_this_for(*owner, *depth),
+                        _ => self.emit_this_for(self.fid, 0),
+                    }
                 }
                 Ok(())
             }
@@ -1750,6 +1950,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let Expression::ThisExpression(t) = e else {
             return None;
         };
+        if self.fid == Fid(0) && !matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict) {
+            return None;
+        }
         if let Some(Special::This { owner, .. }) = self.c.facts.special.get(&t.node_id.get())
             && *owner != self.fid
         {
@@ -1916,6 +2119,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         BinaryOperator::Addition | BinaryOperator::Subtraction
                     )
                     && let Expression::Identifier(lhs) = &b.left
+                    && !self.is_const_ident(i)
                     && self.simple_identifier_register(lhs).map(|r| r.operand())
                         == Some(dst.operand())
                     && let Some(src) = self.simple_register(&b.right)
@@ -1971,7 +2175,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 if let (Some(dst), Some(src)) = (
                     self.simple_identifier_register(i),
                     self.simple_register(value),
-                ) {
+                ) && !self.is_const_ident(i)
+                {
                     match op {
                         Opcode::Add => {
                             self.b.add_loc(dst, src);
@@ -2041,7 +2246,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(i) = &u.argument {
             // a plain local updates in place: `IncLoc`/`DecLoc` do the
             // ToNumeric + step and leave the numeric old value in acc
-            if let Some(reg) = self.simple_identifier_register(i) {
+            if !self.is_const_ident(i)
+                && let Some(reg) = self.simple_identifier_register(i)
+            {
                 let op = match u.operator {
                     UpdateOperator::Increment => Opcode::IncLoc,
                     UpdateOperator::Decrement => Opcode::DecLoc,
@@ -2484,7 +2691,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 let Some(sym) = b.symbol_id.get() else {
                     return self.err(b.span, "unresolved binding");
                 };
-                self.store_symbol(sym, b.name.as_ref())
+                self.store_declaration(sym, b.name.as_ref())
             }
             PatTarget::Assign(AssignmentTarget::AssignmentTargetIdentifier(i)) => {
                 self.store_name(i)
@@ -2893,7 +3100,116 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         Ok(())
     }
 
+    fn emit_direct_eval_call(&mut self, c: &CallExpression<'_>) -> Result<(), CompileError> {
+        let temps = self.b.temp_scope();
+        let argc = c.arguments.len();
+        if argc <= 2 {
+            self.expr(&c.callee)?;
+            let original = self.b.stage_acc(&temps);
+            let callee = temps.temp();
+            self.b.load(original);
+            self.b.store(callee);
+            let mut args = [Reg::new(0); 2];
+            for (i, arg) in c.arguments.iter().enumerate() {
+                let direct = match arg.as_expression() {
+                    Some(inner) if i + 1 == argc => self.simple_register(inner),
+                    Some(inner) => self.stable_register(inner),
+                    None => None,
+                };
+                if let Some(reg) = direct {
+                    args[i] = reg;
+                } else {
+                    self.call_argument(arg)?;
+                    args[i] = self.b.stage_acc(&temps);
+                }
+            }
+            let source = if argc == 0 {
+                self.b.load_undefined();
+                self.b.stage_acc(&temps)
+            } else {
+                args[0]
+            };
+            self.b.call_runtime_staged(
+                BuiltinFn::ResolveDirectEval,
+                &[RtArg::Reg(callee), RtArg::Reg(source)],
+            );
+            self.b.store(callee);
+            let plain = self.b.new_label();
+            let end = self.b.new_label();
+            self.b.load(original);
+            self.b.equal_strict(callee);
+            self.b.jump_if_truthy(plain);
+            self.emit_this_for(self.fid, 0);
+            let this = self.b.stage_acc(&temps);
+            let fb = self.b.new_feedback();
+            match argc {
+                0 => self.b.call_method0(callee, this, fb),
+                1 => self.b.call_method1(callee, this, args[0], fb),
+                _ => self.b.call_method2(callee, this, args[0], args[1], fb),
+            }
+            self.b.jump(end);
+            self.b.bind(plain);
+            let fb = self.b.new_feedback();
+            match argc {
+                0 => self.b.call_function0(callee, fb),
+                1 => self.b.call_function1(callee, args[0], fb),
+                _ => self.b.call_function2(callee, args[0], args[1], fb),
+            }
+            self.b.bind(end);
+            return Ok(());
+        }
+
+        self.expr(&c.callee)?;
+        let original = self.b.stage_acc(&temps);
+        let argc = argc as u32;
+        let args_base = temps.reserve(argc + 2);
+        let top = args_base.index() + argc as i32;
+        let callee = Reg::new(top + 1);
+        self.b.load(original);
+        self.b.store(callee);
+        self.b.load_undefined();
+        self.b.store(Reg::new(top));
+        for (i, arg) in c.arguments.iter().enumerate() {
+            let direct = match arg.as_expression() {
+                Some(inner) if i + 1 == argc as usize => self.simple_register(inner),
+                Some(inner) => self.stable_register(inner),
+                None => None,
+            };
+            if let Some(reg) = direct {
+                self.b.move_reg(Reg::new(top - 1 - i as i32), reg);
+            } else {
+                self.call_argument(arg)?;
+                self.b.store(Reg::new(top - 1 - i as i32));
+            }
+        }
+        self.b.load(Reg::new(top - 1));
+        let source = self.b.stage_acc(&temps);
+        self.b.call_runtime_staged(
+            BuiltinFn::ResolveDirectEval,
+            &[RtArg::Reg(callee), RtArg::Reg(source)],
+        );
+        self.b.store(callee);
+        let plain = self.b.new_label();
+        self.b.load(original);
+        self.b.equal_strict(callee);
+        self.b.jump_if_truthy(plain);
+        self.emit_this_for(self.fid, 0);
+        let this = self.b.stage_acc(&temps);
+        self.b.load(this);
+        self.b.store(Reg::new(top));
+        self.b.bind(plain);
+        let fb = self.b.new_feedback();
+        self.b.call(callee, RegList::new(args_base, argc + 1), fb);
+        Ok(())
+    }
+
     fn emit_call(&mut self, c: &CallExpression<'_>) -> Result<(), CompileError> {
+        if !c.optional
+            && let Expression::Identifier(i) = &c.callee
+            && i.name == "eval"
+        {
+            return self.emit_direct_eval_call(c);
+        }
         let temps = self.b.temp_scope();
         // super.m(...): the method comes from the home-object chain and
         // runs with the current `this`
@@ -3512,7 +3828,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // outer binding for declarations (the class value in acc)
         self.b.load(ctor);
         if is_decl && let Some((sym, name)) = decl_symbol {
-            self.store_symbol(sym, &name)?;
+            self.store_declaration(sym, &name)?;
         }
 
         // LIFO: ctor, proto, cp, pp, superclass
@@ -3759,10 +4075,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             Statement::VariableDeclaration(d) => self.emit_var_decl(d),
             Statement::BlockStatement(b) => {
+                let temps = self.b.temp_scope();
+                let guard = self.enter_block_context(b.scope_id.get(), temps.temp());
                 self.emit_scope_hole_fills(b.scope_id.get());
                 for s in &b.body {
                     self.stmt(s)?;
                 }
+                drop(guard);
                 Ok(())
             }
             Statement::IfStatement(s) => {
@@ -3794,6 +4113,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             Statement::ForStatement(s) => self.emit_for(s),
             Statement::ForInStatement(s) => self.emit_for_in(s),
+            // TODO: for-of only needs the iterator protocol here; the
+            // ForHead per-iteration context and assignment paths are shared
+            // with for-in.
             Statement::ForOfStatement(s) => self.err(s.span, "for-of loops"),
             Statement::ReturnStatement(s) => {
                 // derived constructors: `return v` returns v only when it
@@ -3833,8 +4155,26 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 if !hoisted {
                     let fid = self.c.facts.fn_of_node[&f.node_id.get()];
                     let idx = self.b.constant(Constant::Callable(FunctionId(fid.0)));
-                    self.b.create_closure(idx);
-                    self.store_symbol(sym, id.name.as_ref())?;
+                    let sloppy_block_function = self
+                        .c
+                        .facts
+                        .sloppy_block_functions
+                        .iter()
+                        .any(|(s, _)| *s == sym);
+                    if sloppy_block_function {
+                        let temps = self.b.temp_scope();
+                        self.b.create_closure(idx);
+                        let value = self.b.stage_acc(&temps);
+                        self.b.load(value);
+                        self.store_symbol(sym, id.name.as_ref())?;
+                        self.b.load(value);
+                        let name_idx = self.b.name(id.name.as_bytes());
+                        let feedback = self.b.new_feedback();
+                        self.b.store_global(name_idx, feedback);
+                    } else {
+                        self.b.create_closure(idx);
+                        self.store_symbol(sym, id.name.as_ref())?;
+                    }
                 }
                 Ok(())
             }
@@ -3886,7 +4226,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     labels: vec![label],
                     breaks,
                     continues: None,
-                    unwind_ctx: None,
+                    context_depth: self.contexts.len(),
                 });
                 let result = self.stmt(&s.body);
                 let (breaks, _) = self.end_breakable();
@@ -3926,14 +4266,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                                 &[RtArg::Acc, RtArg::Const(idx)],
                             );
                         } else {
-                            self.store_symbol(sym, b.name.as_ref())?;
+                            self.store_declaration(sym, b.name.as_ref())?;
                         }
                     } else if d.kind == VariableDeclarationKind::Let {
                         // ES InitializeBinding: `let x;` initializes x to
                         // undefined. `var` is already undefined from frame
                         // initialization and must not reset on redeclaration.
                         self.b.load_undefined();
-                        self.store_symbol(sym, b.name.as_ref())?;
+                        self.store_declaration(sym, b.name.as_ref())?;
                     }
                 }
                 _ => return self.err(decl.span, "var declarator target"),
@@ -3964,16 +4304,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // context; captured heads get a fresh copy per iteration so
             // closures in the body capture per-iteration bindings
             let mut loop_ctx: Option<Reg> = None;
-            let (ctx_save, ctx_guard) = if slots > 0 {
+            let ctx_guard = if slots > 0 {
                 g.b.create_block_context(slots);
                 let save = temps.temp();
                 let lc = temps.temp();
                 g.b.store(lc);
                 let guard = g.context_scope(save, ContextHost::For(node));
                 loop_ctx = Some(lc);
-                (Some(save), Some(guard))
+                Some(guard)
             } else {
-                (None, None)
+                None
             };
             // head: subject → enumerator (undefined for nullish subjects;
             // ForInNext(undefined) is immediately done)
@@ -3991,7 +4331,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 labels,
                 breaks,
                 continues: Some(continues),
-                unwind_ctx: ctx_save,
+                context_depth: g.contexts.len(),
             });
             g.b.call_runtime(BuiltinFn::ForInNext, RegList::new(enumerator, 1));
             let have_key = g.b.new_label();
@@ -4100,7 +4440,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             labels,
             breaks,
             continues: Some(continues),
-            unwind_ctx: None,
+            context_depth: self.contexts.len(),
         });
         self.b.jump_if_falsy(breaks);
         self.stmt(body)?;
@@ -4129,7 +4469,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             labels,
             breaks,
             continues: Some(continues),
-            unwind_ctx: None,
+            context_depth: self.contexts.len(),
         });
         self.stmt(body)?;
         let continues = self.breakables.last().unwrap().continues.unwrap();
@@ -4159,16 +4499,16 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // the loop statement
             g.emit_scope_hole_fills(s.scope_id.get());
             let mut loop_ctx: Option<Reg> = None;
-            let (ctx_save, ctx_guard) = if slots > 0 {
+            let ctx_guard = if slots > 0 {
                 g.b.create_block_context(slots);
                 let save = temps.temp();
                 let lc = temps.temp();
                 g.b.store(lc);
                 let guard = g.context_scope(save, ContextHost::For(node));
                 loop_ctx = Some(lc);
-                (Some(save), Some(guard))
+                Some(guard)
             } else {
-                (None, None)
+                None
             };
             match &s.init {
                 Some(ForStatementInit::VariableDeclaration(d)) => g.emit_var_decl(d)?,
@@ -4209,7 +4549,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 labels,
                 breaks,
                 continues: Some(continues),
-                unwind_ctx: ctx_save,
+                context_depth: g.contexts.len(),
             });
             if let Some(cond) = &s.test {
                 g.expr(cond)?;
@@ -4292,13 +4632,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let Some(idx) = idx else {
                 return self.err(span, "break outside a breakable statement");
             };
-            // unwind the context-owning breakables this jump crosses: each
-            // holds the pre-statement context in its save register, so
-            // popping them innermost-first lands at the target's context
-            for b in self.breakables[idx + 1..].iter().rev() {
-                if let Some(reg) = b.unwind_ctx {
-                    self.b.pop_context(reg);
-                }
+            let depth = self.breakables[idx].context_depth;
+            for i in (depth..self.contexts.len()).rev() {
+                self.b.pop_context(self.context_saves[i]);
             }
             let target = self.breakables[idx].breaks;
             self.b.jump(target);
@@ -4314,10 +4650,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let Some(idx) = idx else {
             return self.err(span, "continue outside a loop");
         };
-        for b in self.breakables[idx + 1..].iter().rev() {
-            if let Some(reg) = b.unwind_ctx {
-                self.b.pop_context(reg);
-            }
+        let depth = self.breakables[idx].context_depth;
+        for i in (depth..self.contexts.len()).rev() {
+            self.b.pop_context(self.context_saves[i]);
         }
         let target = self.breakables[idx].continues.unwrap();
         self.b.jump(target);
@@ -4333,12 +4668,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // evaluate the discriminant once into a temp
         self.expr(&s.discriminant)?;
         let d = self.b.stage_acc(&temps);
+        let guard = self.enter_block_context(s.scope_id.get(), temps.temp());
         let breaks = self.b.new_label();
         self.breakables.push(Breakable {
             labels,
             breaks,
             continues: None,
-            unwind_ctx: None,
+            context_depth: self.contexts.len(),
         });
 
         let cases = &s.cases;
@@ -4376,6 +4712,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
         let (breaks, _) = self.end_breakable();
         self.b.bind(breaks);
+        drop(guard);
         self.b.bind(end);
         Ok(())
     }
@@ -4407,11 +4744,20 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
             // handler entry: the exception arrives in the accumulator
             g.b.handler_entry(t);
+            let thrown = g.b.stage_acc(&temps);
             g.b.pop_context(try_ctx);
             if let Some(h) = &s.handler {
+                let catch_guard = g.enter_block_context(h.scope_id.get(), temps.temp());
+                let body_scope = h.body.scope_id.get();
+                let body_guard = if body_scope != h.scope_id.get() {
+                    g.enter_block_context(body_scope, temps.temp())
+                } else {
+                    None
+                };
                 // catch bindings restart in the TDZ on every catch
-                g.emit_scope_hole_fills(h.scope_id.get());
+                g.emit_scope_hole_fills(body_scope);
                 if let Some(param) = &h.param {
+                    g.b.load(thrown);
                     match &param.pattern {
                         BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
                             let value = g.b.stage_acc(&temps);
@@ -4426,13 +4772,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         _ => return g.err(param.span, "catch parameter"),
                     }
                 }
-                let body_scope = h.body.scope_id.get();
-                if body_scope != h.scope_id.get() {
-                    g.emit_scope_hole_fills(body_scope);
-                }
                 for st in &h.body.body {
                     g.stmt(st)?;
                 }
+                drop(body_guard);
+                drop(catch_guard);
             }
 
             g.b.bind(end);
@@ -4538,16 +4882,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         // already skips this frame.
         self.frame_context = layout.creates_context;
         if self.frame_context {
-            let names: Vec<Box<[u8]>> = layout
-                .slot_names
-                .iter()
-                .map(|n| n.as_slice().into())
-                .collect();
             let func = &self.c.facts.functions[self.fid.0 as usize];
             // A function/script context is a var-declaration environment.
             // A sloppy eval root is not: its vars hoist to the caller.
-            let eval_root =
-                matches!(self.c.facts.mode, Mode::Eval | Mode::EvalStrict) && self.fid == Fid(0);
+            let eval_root = matches!(
+                self.c.facts.mode,
+                Mode::Eval | Mode::EvalStrict | Mode::EvalGlobal
+            ) && self.fid == Fid(0);
             let declaration = !(eval_root && !func.strict);
             let script = func.kind == FnKind::Script && !eval_root;
             let mut flags = 0;
@@ -4556,8 +4897,14 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             if script {
                 flags |= SCOPE_SCRIPT;
+                if self.c.facts.mode == Mode::Repl {
+                    flags |= SCOPE_REPL;
+                }
             }
-            let ctx_info = self.b.constant(Constant::ContextNames { names, flags });
+            let ctx_info = self.b.constant(Constant::ScopeInfo(ScopeLayout {
+                locals: layout.slot_names.clone().into_boxed_slice(),
+                flags,
+            }));
             self.b.create_function_context(ctx_info);
             self.push_frame_context();
         }
@@ -4750,9 +5097,33 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             })?;
         }
 
+        let root_script =
+            self.fid == Fid(0) && matches!(self.c.facts.mode, Mode::Script | Mode::Repl);
+        if root_script {
+            let idx = self
+                .b
+                .constant(Constant::GlobalDeclarations(self.global_declarations()));
+            self.b
+                .call_runtime_staged(BuiltinFn::DeclareGlobals, &[RtArg::Const(idx)]);
+        } else if self.fid == Fid(0) && matches!(self.c.facts.mode, Mode::Eval | Mode::EvalGlobal) {
+            let declarations = self.global_declarations();
+            if !declarations.vars.is_empty() || !declarations.funcs.is_empty() {
+                let idx = self.b.constant(Constant::GlobalDeclarations(declarations));
+                self.b
+                    .call_runtime_staged(BuiltinFn::ValidateEvalDeclarations, &[RtArg::Const(idx)]);
+            }
+        }
+
         // hoisting: `var`s initialize to undefined and top-level function
         // declarations become closures before any body code runs
-        if let Some(vars) = self.c.facts.hoist_vars.get(&self.fid).cloned() {
+        if let Some(vars) = self
+            .c
+            .facts
+            .hoist_vars
+            .get(&self.fid)
+            .cloned()
+            .filter(|_| !root_script)
+        {
             for sym in vars {
                 let name = self.c.scoping.symbol_name(sym).to_string();
                 if self.is_eval_dynamic_var(sym) {
@@ -4762,12 +5133,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     continue;
                 }
                 match self.c.slot_of(sym) {
-                    Slot::Global => {
-                        let idx = self.b.name(name.as_bytes());
-                        let feedback = self.b.new_feedback();
-                        self.b.load_undefined();
-                        self.b.store_global(idx, feedback);
-                    }
+                    Slot::Global => unreachable!("root globals are declared in bulk"),
                     Slot::Param { .. } => {
                         // simple-list params are already undefined when
                         // omitted (frame padding); a `var` bound to a
@@ -4781,15 +5147,33 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         self.b.store_context_slot(slot, 0);
                     }
                     Slot::CtxAt { .. } => unreachable!("vars never live in class/for contexts"),
+                    Slot::Repl => unreachable!("REPL lexicals are not hoisted vars"),
                 }
             }
         }
-        if let Some(fns) = self.c.facts.hoist_fns.get(&self.fid).cloned() {
+        if let Some(fns) = self
+            .c
+            .facts
+            .hoist_fns
+            .get(&self.fid)
+            .cloned()
+            .filter(|_| !root_script)
+        {
             for (sym, fid) in fns {
                 let name = self.c.scoping.symbol_name(sym).to_string();
                 let idx = self.b.constant(Constant::Callable(FunctionId(fid.0)));
                 self.b.create_closure(idx);
-                self.store_symbol(sym, &name)?;
+                if self.is_eval_dynamic_var(sym) {
+                    let name_idx = self.b.name(name.as_bytes());
+                    self.b.call_runtime_staged(
+                        BuiltinFn::DeclareEvalFunction,
+                        &[RtArg::Const(name_idx), RtArg::Acc],
+                    );
+                } else if matches!(self.c.slot_of(sym), Slot::Global) {
+                    unreachable!("root globals are declared in bulk");
+                } else {
+                    self.store_symbol(sym, &name)?;
+                }
             }
         }
 
