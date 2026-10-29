@@ -511,44 +511,6 @@ impl FnBuilder {
         self.temp_depth.get()
     }
 
-    // temporary: the JS frontend still uses the unscoped API
-    #[cfg(feature = "legacy-temps")]
-    pub fn legacy_temp(&mut self) -> Reg {
-        let depth = self.temp_depth.get();
-        self.temp_depth.set(depth + 1);
-        Reg(self.temp_base as i32 + depth as i32)
-    }
-
-    #[cfg(feature = "legacy-temps")]
-    pub fn legacy_reserve_temps(&mut self, n: u32) -> Reg {
-        let base = self.legacy_temp();
-        for _ in 1..n {
-            self.legacy_temp();
-        }
-        base
-    }
-
-    #[cfg(feature = "legacy-temps")]
-    pub fn legacy_stage_acc(&mut self) -> Reg {
-        let t = self.legacy_temp();
-        self.store(t);
-        t
-    }
-
-    #[cfg(feature = "legacy-temps")]
-    pub fn legacy_drop_temp(&mut self) {
-        let depth = self.temp_depth.get();
-        debug_assert!(depth > 0, "temp underflow");
-        self.temp_depth.set(depth - 1);
-    }
-
-    #[cfg(feature = "legacy-temps")]
-    pub fn legacy_drop_temps(&mut self, mark: u32) {
-        let depth = self.temp_depth.get();
-        debug_assert!(mark <= depth, "temp mark above current depth");
-        self.temp_depth.set(mark);
-    }
-
     /// Whether the fall-through path is still reachable: false after
     /// `Return`/`Throw`/an unconditional jump, until the next `bind`.
     /// Frontends use this to stop emitting unreachable statements (whose

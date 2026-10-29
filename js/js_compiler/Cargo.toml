@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-bytecode = { path = "../../bytecode", features = ["legacy-temps"] }
+bytecode = { path = "../../bytecode" }
 vm_core = { path = "../../vm_core" }
 oxc_allocator.workspace = true
 oxc_ast.workspace = true
