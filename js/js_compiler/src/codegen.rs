@@ -4444,6 +4444,24 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let fn_scope = self.c.fid_scope.get(&self.fid).copied();
         self.emit_scope_hole_fills(fn_scope);
 
+        // A named function expression binds its own name to the closure.
+        // oxc already models it as a FunctionExpression binding in the
+        // function scope; if a parameter/var/lexical shadows the name, that
+        // binding has different flags and there is nothing to initialize.
+        let self_name = self.c.fid_scope.get(&self.fid).copied().and_then(|scope| {
+            self.c.scoping.iter_bindings_in(scope).find(|&sym| {
+                self.c
+                    .scoping
+                    .symbol_flags(sym)
+                    .contains(SymbolFlags::FunctionExpression)
+            })
+        });
+        if let Some(sym) = self_name {
+            let name = self.c.scoping.symbol_name(sym).to_string();
+            self.b.load_current_closure();
+            self.store_symbol(sym, &name)?;
+        }
+
         // parameters: non-simple lists (any default / pattern / rest)
         // stage the incoming arguments, hole-fill the parameter registers,
         // and initialize each binding in order (TDZ until its turn, ES
