@@ -476,43 +476,33 @@ fn op_store_named_property(frame: Frame) {
     tail!(slow_store_named)
 }
 
-fn keyed_store_fast<'a>(
-    heap: &'a Heap,
-    vector: Option<Tagged<'a, FeedbackVector>>,
-    fb: usize,
-    recv: Tagged<'a, Value>,
-    key: Tagged<'a, Value>,
-    value: Tagged<'a, Value>,
-) -> Option<Tagged<'a, Value>> {
-    let idx = key.to_i64()?;
-    if idx < 0 {
-        return None;
-    }
-    if recv
-        .store_array_element_in_place(heap, idx as usize, value)
-        .is_ok()
-    {
-        return Some(value);
-    }
-    InlineCache::try_store_element(heap, vector, fb, recv, idx as usize, value)
-}
-
 #[handler(StoreKeyedProperty)]
 fn op_store_keyed_property(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
     let fb = frame.unsigned::<2>();
-    if let Some(v) = keyed_store_fast(
-        heap,
-        frame.ctx().feedback_ref(heap),
-        fb,
-        recv,
-        key,
-        frame.acc(),
-    ) {
-        frame.set_acc(v);
-        next!()
+    if let Some(idx) = key.to_i64()
+        && idx >= 0
+    {
+        let idx = idx as usize;
+        if recv
+            .store_array_element_in_place(heap, idx, frame.acc())
+            .is_ok()
+        {
+            next!()
+        }
+        if let Some(v) = InlineCache::try_store_element(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            idx,
+            frame.acc(),
+        ) {
+            frame.set_acc(v);
+            next!()
+        }
     }
     tail!(slow_keyed_store)
 }
@@ -523,16 +513,27 @@ fn op_store_keyed_property_no_shadow(frame: Frame) {
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
     let fb = frame.unsigned::<2>();
-    if let Some(v) = keyed_store_fast(
-        heap,
-        frame.ctx().feedback_ref(heap),
-        fb,
-        recv,
-        key,
-        frame.acc(),
-    ) {
-        frame.set_acc(v);
-        next!()
+    if let Some(idx) = key.to_i64()
+        && idx >= 0
+    {
+        let idx = idx as usize;
+        if recv
+            .store_array_element_in_place(heap, idx, frame.acc())
+            .is_ok()
+        {
+            next!()
+        }
+        if let Some(v) = InlineCache::try_store_element(
+            heap,
+            frame.ctx().feedback_ref(heap),
+            fb,
+            recv,
+            idx,
+            frame.acc(),
+        ) {
+            frame.set_acc(v);
+            next!()
+        }
     }
     tail!(slow_keyed_store_no_shadow)
 }

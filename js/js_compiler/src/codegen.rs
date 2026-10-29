@@ -339,11 +339,12 @@ fn immediate_variant(op: Opcode) -> Option<Opcode> {
     })
 }
 
-/// Whether `op` is commutative (`imm OP x` == `x OP imm`).
+/// Whether `op` is numeric-commutative (`imm OP x` == `x OP imm`).
+/// Addition is excluded: JS `+` concatenates in operand order.
 fn is_commutative(op: Opcode) -> bool {
     matches!(
         op,
-        Opcode::Add | Opcode::Mul | Opcode::BitwiseOr | Opcode::BitwiseXor | Opcode::BitwiseAnd
+        Opcode::Mul | Opcode::BitwiseOr | Opcode::BitwiseXor | Opcode::BitwiseAnd
     )
 }
 
@@ -2188,11 +2189,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         _ => {}
                     }
                 }
-                self.expr(value)?;
-                let v = self.b.stage_acc(&temps);
                 self.emit_identifier(i)?;
                 let orig = self.b.stage_acc(&temps);
-                self.b.load(v);
+                self.expr(value)?;
                 self.b.raw(op, &[orig.operand()]);
                 self.store_name(i)?;
                 Ok(())
@@ -2204,11 +2203,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 } else {
                     self.prepare_property_store(m)?
                 };
-                self.expr(value)?;
-                let v = self.b.stage_acc(&temps);
                 self.emit_property_load_of(&store);
                 let orig = self.b.stage_acc(&temps);
-                self.b.load(v);
+                self.expr(value)?;
                 self.b.raw(op, &[orig.operand()]);
                 self.emit_property_store(&store);
                 drop(store);
