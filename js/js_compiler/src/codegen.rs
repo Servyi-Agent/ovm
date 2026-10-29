@@ -102,14 +102,26 @@ enum Slot {
         slot: u32,
         hole_check: bool,
     },
-    /// context slot in a class / for-head block context (the depth comes
-    /// from the precomputed per-reference table)
+    /// context slot in a class / for-head block context; the depth is a
+    /// property of each use site (precomputed per reference, or derived
+    /// from the active context chain for declaration stores)
     CtxAt {
         slot: u32,
         hole_check: bool,
     },
     /// REPL mode: script-level bindings are global object properties
     Global,
+}
+
+/// The AST construct owning one runtime context. The function frame context
+/// is the bottom of the chain; class / for-head / object-home contexts are
+/// pushed above it while their construct executes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextHost {
+    Function(Fid),
+    Class(ClassIdx),
+    For(NodeId),
+    Object(NodeId),
 }
 
 /// Per-function frame layout, built at the prologue.
@@ -633,6 +645,28 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
     }
 
+    /// The construct owning the context that hosts `sym`'s slots. For a
+    /// declaration store this is always on the active emission-time context
+    /// chain (function frame or an enclosing class / for-head / home object).
+    fn context_host_of(&self, sym: SymbolId) -> ContextHost {
+        let mut cur = self.scoping.symbol_scope_id(sym);
+        loop {
+            if let Some(&idx) = self.facts.class_of_scope.get(&cur) {
+                return ContextHost::Class(idx);
+            }
+            if let Some(&node) = self.facts.for_of_scope.get(&cur) {
+                return ContextHost::For(node);
+            }
+            if let Some(&fid) = self.facts.fn_scope_to_fid.get(&cur) {
+                return ContextHost::Function(fid);
+            }
+            cur = self
+                .scoping
+                .scope_parent_id(cur)
+                .expect("scope chain ends at the root");
+        }
+    }
+
     /// The memoized slot decision for a symbol.
     fn slot_of(&mut self, sym: SymbolId) -> Slot {
         if let Some(&slot) = self.slots.get(&sym) {
@@ -805,6 +839,11 @@ struct FunctionGen<'c, 'a, 'p> {
     breakables: Vec<Breakable>,
     /// labels forwarded into an enclosing loop/switch by LabeledStatements
     nested_labels: Vec<String>,
+    /// Active runtime context chain, outermost first. The function frame
+    /// context is present when the prologue created one; class / for-head /
+    /// object-home contexts are pushed and popped around their construct.
+    /// Declaration stores use this to find the hosting context's depth.
+    contexts: Vec<ContextHost>,
 }
 
 impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
@@ -819,6 +858,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             completion: None,
             breakables: Vec::new(),
             nested_labels: Vec::new(),
+            contexts: Vec::new(),
         }
     }
 
@@ -856,6 +896,20 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         if self.frame_context {
             self.b.pop_context(self.ctx_save);
         }
+    }
+
+    /// Push a structural context and remember it in the emission-time chain.
+    fn push_context(&mut self, save: Reg, host: ContextHost) {
+        self.b.push_context(save);
+        self.contexts.push(host);
+    }
+
+    /// Pop a structural context. Control-flow restores (`PopContext` with a
+    /// saved context register) do not use this: they return to an existing
+    /// context instead of removing one from the chain.
+    fn pop_context(&mut self, save: Reg) {
+        self.b.pop_context(save);
+        self.contexts.pop().expect("context stack underflow");
     }
 
     fn emit_this_initialized_check(&mut self) {
@@ -913,24 +967,86 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
     // -- variable access -------------------------------------------------------
 
-    /// Store the accumulator into a symbol's slot (declaration stores run
-    /// with the hosting context as the frame context: zero hops).
-    fn store_symbol(&mut self, sym: SymbolId, name: &str) -> Result<(), CompileError> {
-        match self.c.slot_of(sym) {
-            Slot::Global => {
-                let idx = self.b.name(name.as_bytes());
-                let feedback = self.b.new_feedback();
-                self.b.store_global(idx, feedback);
+    /// Load a resolved slot into the accumulator (hole checks included).
+    fn load_slot(&mut self, slot: Slot, depth: u32) {
+        match slot {
+            Slot::Param { index, hole_check } => {
+                let reg = self.b.param(index);
+                self.b.load(reg);
+                if hole_check {
+                    self.b.throw_reference_error_if_hole();
+                }
             }
+            Slot::Local { reg, hole_check } => {
+                self.b.load(Reg::new(reg as i32));
+                if hole_check {
+                    self.b.throw_reference_error_if_hole();
+                }
+            }
+            Slot::Ctx { slot, hole_check } | Slot::CtxAt { slot, hole_check } => {
+                self.b.load_context_slot(slot, depth);
+                if hole_check {
+                    self.b.throw_reference_error_if_hole();
+                }
+            }
+            Slot::Global => unreachable!("global loads carry a name"),
+        }
+    }
+
+    /// Store the accumulator into a resolved slot. `depth` is relative to
+    /// the current frame context.
+    fn store_slot(&mut self, slot: Slot, depth: u32) {
+        match slot {
             Slot::Param { index, .. } => {
                 let reg = self.b.param(index);
                 self.b.store(reg);
             }
             Slot::Local { reg, .. } => self.b.store(Reg::new(reg as i32)),
             Slot::Ctx { slot, .. } | Slot::CtxAt { slot, .. } => {
-                self.b.store_context_slot(slot, 0);
+                self.b.store_context_slot(slot, depth);
             }
+            Slot::Global => unreachable!("global stores carry a name"),
         }
+    }
+
+    /// Depth of a declared symbol's hosting context from the current frame
+    /// context. Declaration stores execute wherever the declaration appears,
+    /// which may be inside an enclosing for-head / class / object-home
+    /// context, so this must come from the active chain rather than assuming
+    /// zero hops.
+    fn decl_depth(&self, sym: SymbolId, slot: Slot) -> u32 {
+        let host = match slot {
+            // Ctx slots are allocated in the current function's frame
+            // context (eagerly, at its prologue).
+            Slot::Ctx { .. } => ContextHost::Function(self.fid),
+            // CtxAt slots belong to the class / for-head scope that declared
+            // the binding.
+            Slot::CtxAt { .. } => self.c.context_host_of(sym),
+            _ => return 0,
+        };
+        self.contexts
+            .iter()
+            .rev()
+            .position(|&ctx| ctx == host)
+            .unwrap_or_else(|| {
+                panic!(
+                    "declaration host {host:?} is not on the active context chain {:?}",
+                    self.contexts
+                )
+            }) as u32
+    }
+
+    /// Store the accumulator into a symbol's declared slot.
+    fn store_symbol(&mut self, sym: SymbolId, name: &str) -> Result<(), CompileError> {
+        let slot = self.c.slot_of(sym);
+        if matches!(slot, Slot::Global) {
+            let idx = self.b.name(name.as_bytes());
+            let feedback = self.b.new_feedback();
+            self.b.store_global(idx, feedback);
+            return Ok(());
+        }
+        let depth = self.decl_depth(sym, slot);
+        self.store_slot(slot, depth);
         Ok(())
     }
 
@@ -949,17 +1065,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                     &[RtArg::Acc, RtArg::Const(idx)],
                 );
             }
-            IdRes::Slot(slot, depth) => match slot {
-                Slot::Param { index, .. } => {
-                    let reg = self.b.param(index);
-                    self.b.store(reg);
-                }
-                Slot::Local { reg, .. } => self.b.store(Reg::new(reg as i32)),
-                Slot::Ctx { slot, .. } | Slot::CtxAt { slot, .. } => {
-                    self.b.store_context_slot(slot, depth);
-                }
-                Slot::Global => unreachable!(),
-            },
+            IdRes::Slot(slot, depth) => self.store_slot(slot, depth),
         }
         Ok(())
     }
@@ -976,28 +1082,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.b
                     .call_runtime_staged(BuiltinFn::LoadDynamicName, &[RtArg::Const(idx)]);
             }
-            IdRes::Slot(slot, depth) => match slot {
-                Slot::Param { index, hole_check } => {
-                    let reg = self.b.param(index);
-                    self.b.load(reg);
-                    if hole_check {
-                        self.b.throw_reference_error_if_hole();
-                    }
-                }
-                Slot::Local { reg, hole_check } => {
-                    self.b.load(Reg::new(reg as i32));
-                    if hole_check {
-                        self.b.throw_reference_error_if_hole();
-                    }
-                }
-                Slot::Ctx { slot, hole_check } | Slot::CtxAt { slot, hole_check } => {
-                    self.b.load_context_slot(slot, depth);
-                    if hole_check {
-                        self.b.throw_reference_error_if_hole();
-                    }
-                }
-                Slot::Global => unreachable!(),
-            },
+            IdRes::Slot(slot, depth) => self.load_slot(slot, depth),
         }
         Ok(())
     }
@@ -2961,7 +3046,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let ctx_save = if slot_count > 0 {
             self.b.create_block_context(slot_count);
             let save = self.b.legacy_temp();
-            self.b.push_context(save);
+            self.push_context(save, ContextHost::Class(idx));
             Some(save)
         } else {
             None
@@ -3259,7 +3344,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
 
         // pop the class context; member closures already captured it
         if let Some(save) = ctx_save {
-            self.b.pop_context(save);
+            self.pop_context(save);
             self.b.legacy_drop_temp(); // save
         }
 
@@ -3338,7 +3423,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         let ctx_save = if needs_home {
             self.b.create_block_context(1);
             let save = self.b.legacy_temp();
-            self.b.push_context(save);
+            self.push_context(save, ContextHost::Object(node));
             Some(save)
         } else {
             None
@@ -3462,7 +3547,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.store_context_slot(0, 0);
         }
         if let Some(save) = ctx_save {
-            self.b.pop_context(save);
+            self.pop_context(save);
             self.b.legacy_drop_temp();
         }
         self.b.load(obj);
@@ -3714,7 +3799,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 let save = g.b.legacy_temp();
                 let lc = g.b.legacy_temp();
                 g.b.store(lc);
-                g.b.push_context(save);
+                g.push_context(save, ContextHost::For(node));
                 loop_ctx = Some(lc);
                 Some(save)
             } else {
@@ -3751,9 +3836,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             // there — a fresh binding per iteration
             if per_iteration {
                 let save = ctx_save.expect("per-iteration loops own a context");
-                g.b.pop_context(save);
+                g.pop_context(save);
                 g.b.create_block_context(slots);
-                g.b.push_context(save);
+                g.push_context(save, ContextHost::For(node));
             }
 
             // assign the key to the target (per iteration), then the body
@@ -3774,7 +3859,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let (breaks, _) = g.end_breakable();
             g.b.bind(breaks);
             if let Some(save) = ctx_save {
-                g.b.pop_context(save);
+                g.pop_context(save);
             }
 
             g.b.legacy_drop_temp(); // key
@@ -3904,7 +3989,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 let save = g.b.legacy_temp();
                 let lc = g.b.legacy_temp();
                 g.b.store(lc);
-                g.b.push_context(save);
+                g.push_context(save, ContextHost::For(node));
                 loop_ctx = Some(lc);
                 Some(save)
             } else {
@@ -3928,7 +4013,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 let iter_ctx_reg = g.b.legacy_temp();
                 // the first iteration starts from a copy of the head
                 // context: values copied out, fresh sibling pushed
-                g.emit_iteration_context_copy(Some(iter_ctx_reg), slots, &copies, ctx_save);
+                g.emit_iteration_context_copy(
+                    Some(iter_ctx_reg),
+                    slots,
+                    &copies,
+                    ctx_save,
+                    ContextHost::For(node),
+                );
                 iter_ctx = Some(iter_ctx_reg);
             } else {
                 copies = Vec::new();
@@ -3956,7 +4047,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 // its values into a fresh sibling for the next iteration
                 // (ES 14.7.5.4: the copy precedes the update)
                 g.b.pop_context(iter_ctx);
-                g.emit_iteration_context_copy(Some(iter_ctx), slots, &copies, ctx_save);
+                g.emit_iteration_context_copy(
+                    Some(iter_ctx),
+                    slots,
+                    &copies,
+                    ctx_save,
+                    ContextHost::For(node),
+                );
             } else if let Some(lc) = loop_ctx {
                 g.b.pop_context(lc);
             }
@@ -3969,7 +4066,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let (breaks, _) = g.end_breakable();
             g.b.bind(breaks);
             if let Some(save) = ctx_save {
-                g.b.pop_context(save);
+                g.pop_context(save);
             }
             Ok(())
         })
@@ -3984,18 +4081,19 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         count: u32,
         copies: &[Reg],
         ctx_save: Option<Reg>,
+        host: ContextHost,
     ) {
         for slot in 0..count {
             self.b.load_context_slot(slot, 0);
             self.b.store(copies[slot as usize]);
         }
         let save = ctx_save.expect("per-iteration loops own a context");
-        self.b.pop_context(save);
+        self.pop_context(save);
         self.b.create_block_context(count);
         if let Some(iter_ctx) = iter_ctx {
             self.b.store(iter_ctx);
         }
-        self.b.push_context(save);
+        self.push_context(save, host);
         for slot in 0..count {
             self.b.load(copies[slot as usize]);
             self.b.store_context_slot(slot, 0);
@@ -4277,7 +4375,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 .collect();
             let ctx_info = self.b.constant(Constant::ContextNames(names));
             self.b.create_function_context(ctx_info);
-            self.b.push_context(self.ctx_save);
+            self.push_context(self.ctx_save, ContextHost::Function(self.fid));
         }
 
         // parameters: non-simple lists (any default / pattern / rest)
