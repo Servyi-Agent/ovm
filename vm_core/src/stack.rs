@@ -258,20 +258,19 @@ impl FrameHeader {
 pub struct Stack {
     slots: Box<[Register]>,
     top: Cell<usize>,
-    /// Register files of fresh frames are initialized to this value
-    /// (the hole: uninitialized `let`/`const` reads must be TDZ errors).
-    fill: Register,
+    /// Register files of fresh frames are initialized to undefined.
+    /// Lexical bindings that need TDZ protection get the hole explicitly
+    /// from the compiler.
     undefined: Register,
 }
 
 impl Stack {
-    pub fn new(capacity: usize, fill: Tagged<'_, Value>, undefined: Tagged<'_, Value>) -> Self {
+    pub fn new(capacity: usize, undefined: Tagged<'_, Value>) -> Self {
         Self {
             slots: (0..capacity)
-                .map(|_| unsafe { Register::from_value(fill) })
+                .map(|_| unsafe { Register::from_value(undefined) })
                 .collect(),
             top: Cell::new(0),
-            fill: unsafe { Register::from_value(fill) },
             undefined: unsafe { Register::from_value(undefined) },
         }
     }
@@ -509,7 +508,7 @@ impl Stack {
         for i in count..padded {
             self.slot_unchecked(anchor + i).store(undefined);
         }
-        let fill = self.fill.get(heap);
+        let fill = self.undefined.get(heap);
         for i in 0..register_count {
             self.slot_unchecked(low + i).store(fill);
         }
@@ -746,7 +745,6 @@ impl Stack {
 
 impl EdgeVisitable for Stack {
     fn visit_edges(&self, visitor: &mut dyn Visitor) {
-        visitor.visit(self.fill.as_raw());
         visitor.visit(self.undefined.as_raw());
         for slot in &self.slots[..self.top()] {
             visitor.visit(slot.as_raw());

@@ -731,7 +731,7 @@ impl VM {
         let undefined = self.known().undefined.get(&heap).erase();
         let state = Arc::new(ThreadState {
             handles: HandleData::new(the_hole),
-            stack: Stack::new(STACK_SLOTS, the_hole, undefined),
+            stack: Stack::new(STACK_SLOTS, undefined),
             frame_base: StdCell::new(0),
             frame_active: StdCell::new(false),
             acc: unsafe { Register::from_value(undefined) },

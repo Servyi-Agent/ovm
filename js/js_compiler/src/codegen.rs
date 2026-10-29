@@ -135,6 +135,8 @@ struct Layout {
     new_target_slot: Option<u32>,
     this_function_slot: Option<u32>,
     slot_names: Vec<Vec<u8>>,
+    /// per scope: register locals that start in the TDZ hole
+    hole_fills: HashMap<ScopeId, Vec<u32>>,
     /// whether the prologue must create/push a function context: any
     /// context-allocated binding, or a direct `eval` that may add
     /// bindings at runtime
@@ -558,6 +560,7 @@ pub fn generate<'a>(scoping: &Scoping, facts: &Facts<'a>) -> Result<Program, Com
                 new_target_slot: None,
                 this_function_slot: None,
                 slot_names: Vec::new(),
+                hole_fills: HashMap::new(),
                 creates_context: true,
             })
             .collect(),
@@ -723,6 +726,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let mut next_reg = 0u32;
         let mut next_ctx = 0u32;
         let mut slot_names: Vec<Vec<u8>> = Vec::new();
+        let mut hole_fills: HashMap<ScopeId, Vec<u32>> = HashMap::new();
         let mut this_slot = None;
         if self.facts.captures_this.contains(&fid) {
             this_slot = Some(next_ctx);
@@ -773,6 +777,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 } else {
                     let reg = next_reg;
                     next_reg += 1;
+                    if hole_check {
+                        hole_fills.entry(sid).or_default().push(reg);
+                    }
                     Slot::Local { reg, hole_check }
                 };
                 self.slots.insert(sym, slot);
@@ -784,6 +791,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             for sym in self.scoping.iter_bindings_in(sid) {
                 let reg = next_reg;
                 next_reg += 1;
+                hole_fills.entry(sid).or_default().push(reg);
                 self.slots.insert(
                     sym,
                     Slot::Local {
@@ -805,6 +813,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     .intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class);
                 let reg = next_reg;
                 next_reg += 1;
+                if hole_check {
+                    hole_fills.entry(sid).or_default().push(reg);
+                }
                 self.slots.insert(sym, Slot::Local { reg, hole_check });
             }
         }
@@ -822,6 +833,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             this_function_slot,
             creates_context,
             slot_names,
+            hole_fills,
         }
     }
 }
@@ -3647,6 +3659,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             }
             Statement::VariableDeclaration(d) => self.emit_var_decl(d),
             Statement::BlockStatement(b) => {
+                self.emit_scope_hole_fills(b.scope_id.get());
                 for s in &b.body {
                     self.stmt(s)?;
                 }
@@ -3806,10 +3819,13 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                             self.emit_set_name_const(b.name.as_bytes());
                         }
                         self.store_symbol(sym, b.name.as_ref())?;
+                    } else if d.kind == VariableDeclarationKind::Let {
+                        // ES InitializeBinding: `let x;` initializes x to
+                        // undefined. `var` is already undefined from frame
+                        // initialization and must not reset on redeclaration.
+                        self.b.load_undefined();
+                        self.store_symbol(sym, b.name.as_ref())?;
                     }
-                    // no initializer: `var` was pre-initialized to
-                    // `undefined` by the hoisting prologue; let/const stay
-                    // the hole (TDZ)
                 }
                 _ => return self.err(decl.span, "var declarator target"),
             }
@@ -3832,6 +3848,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             .map_or(0, |head| head.slots);
         let labels = self.take_labels();
         self.with_temps(|g, temps| {
+            // lexical head bindings re-enter their TDZ on every execution of
+            // the loop statement
+            g.emit_scope_hole_fills(s.scope_id.get());
             // lexical heads (`for (let/const k in …)`) own a block
             // context; captured heads get a fresh copy per iteration so
             // closures in the body capture per-iteration bindings
@@ -4027,6 +4046,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             .map_or(0, |head| head.slots);
         let labels = self.take_labels();
         self.with_temps(|g, temps| {
+            // lexical head bindings re-enter their TDZ on every execution of
+            // the loop statement
+            g.emit_scope_hole_fills(s.scope_id.get());
             let mut loop_ctx: Option<Reg> = None;
             let (ctx_save, ctx_guard) = if slots > 0 {
                 g.b.create_block_context(slots);
@@ -4194,6 +4216,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     }
 
     fn emit_switch(&mut self, s: &SwitchStatement<'_>) -> Result<(), CompileError> {
+        // all case clauses share one lexical scope; its bindings restart in
+        // the TDZ on each execution of the switch
+        self.emit_scope_hole_fills(s.scope_id.get());
         let temps = self.b.temp_scope();
         let labels = self.take_labels();
         // evaluate the discriminant once into a temp
@@ -4260,6 +4285,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             let try_ctx = temps.temp();
             g.b.load_context();
             g.b.store(try_ctx);
+            // try-block lexicals restart in the TDZ on every execution
+            g.emit_scope_hole_fills(s.block.scope_id.get());
             let t = g.b.begin_try();
             for st in &s.block.body {
                 g.stmt(st)?;
@@ -4273,6 +4300,8 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             g.b.handler_entry(t);
             g.b.pop_context(try_ctx);
             if let Some(h) = &s.handler {
+                // catch bindings restart in the TDZ on every catch
+                g.emit_scope_hole_fills(h.scope_id.get());
                 if let Some(param) = &h.param {
                     match &param.pattern {
                         BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
@@ -4287,6 +4316,10 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         }
                         _ => return g.err(param.span, "catch parameter"),
                     }
+                }
+                let body_scope = h.body.scope_id.get();
+                if body_scope != h.scope_id.get() {
+                    g.emit_scope_hole_fills(body_scope);
                 }
                 for st in &h.body.body {
                     g.stmt(st)?;
@@ -4359,34 +4392,23 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
         Ok(())
     }
 
-    /// Fill this function's register-resident lexical bindings with the hole
-    /// at prologue time. The frame itself is filled with `undefined`, so
-    /// without this a `let`/`const`/class binding read before its
-    /// declaration would yield `undefined` instead of throwing.
-    fn emit_lexical_hole_fills(&mut self) -> Result<(), CompileError> {
-        let scopes = self.c.scopes_by_fid[self.fid.0 as usize].clone();
-        for sid in scopes {
-            for sym in self.c.scoping.iter_bindings_in(sid) {
-                if self.c.facts.param_symbols.contains_key(&sym)
-                    || self.c.facts.pattern_params.contains(&sym)
-                {
-                    continue;
-                }
-                let flags = self.c.scoping.symbol_flags(sym);
-                if !flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class) {
-                    continue;
-                }
-                if let Some(&Slot::Local {
-                    reg,
-                    hole_check: true,
-                }) = self.c.slots.get(&sym)
-                {
-                    self.b.load_hole();
-                    self.b.store(Reg::new(reg as i32));
-                }
-            }
+    /// Fill the register-resident lexical bindings belonging to `scope` with
+    /// the hole. Called at every entry to the scope, so a block executed more
+    /// than once (a loop body, a repeated switch, a re-entered nested loop)
+    /// starts its TDZ again.
+    fn emit_scope_hole_fills(&mut self, scope: Option<ScopeId>) {
+        let Some(scope) = scope else {
+            return;
+        };
+        let fills = self.c.layouts[self.fid.0 as usize]
+            .hole_fills
+            .get(&scope)
+            .cloned()
+            .unwrap_or_default();
+        for reg in fills {
+            self.b.load_hole();
+            self.b.store(Reg::new(reg as i32));
         }
-        Ok(())
     }
 
     fn emit_function_body(&mut self) -> Result<(), CompileError> {
@@ -4399,10 +4421,12 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             .set_temp_base(layout.register_count + 1 + u32::from(self.completion.is_some()));
 
         // prologue: functions with context-allocated bindings get a fresh
-        // context pushed onto the frame context; locals below the temps are
-        // born as the hole. Functions with none reuse the closure's context
-        // (outer slots resolve through it), and the depth baked into their
-        // nested accesses already skips this frame.
+        // context pushed onto the frame context. Fresh frames are born
+        // `undefined` (so `var`s need no setup); lexical registers get the
+        // hole explicitly before any parameter/body code can observe them.
+        // Functions with no context reuse the closure's context (outer slots
+        // resolve through it), and the depth baked into their nested accesses
+        // already skips this frame.
         self.frame_context = layout.creates_context;
         if self.frame_context {
             let names: Vec<Box<[u8]>> = layout
@@ -4414,6 +4438,11 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
             self.b.create_function_context(ctx_info);
             self.push_frame_context();
         }
+
+        // lexical declarations start in their TDZ, including pattern-param
+        // locals that destructuring will initialize below
+        let fn_scope = self.c.fid_scope.get(&self.fid).copied();
+        self.emit_scope_hole_fills(fn_scope);
 
         // parameters: non-simple lists (any default / pattern / rest)
         // stage the incoming arguments, hole-fill the parameter registers,
@@ -4598,8 +4627,7 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                         // parameter keeps its incoming value
                     }
                     Slot::Local { .. } => {
-                        // register locals are pre-filled with undefined by
-                        // the frame (`Stack::reserve`)
+                        // fresh frames start as undefined
                     }
                     Slot::Ctx { slot, .. } => {
                         self.b.load_undefined();
@@ -4617,12 +4645,6 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
                 self.store_symbol(sym, &name)?;
             }
         }
-
-        // lexical declarations start in their TDZ: the frame is filled with
-        // `undefined`, so register-resident `let`/`const`/class
-        // bindings get an explicit hole. ContextObject-allocated lexicals are born
-        // the hole when their context is materialized.
-        self.emit_lexical_hole_fills()?;
 
         // the script's completion value starts as undefined; only
         // value-producing statements overwrite it (see `stmt`)
