@@ -1,5 +1,5 @@
 // Fence-parser unit tests (run: node ci/github/issue-snippets.test.mjs)
-import { snippetsFrom, isNotATest, errorClass } from "./issue-snippets-lib.mjs";
+import { snippetsFrom, isNotATest, errorClass, allRefs, closingRefs } from "./issue-snippets-lib.mjs";
 
 const cases = [
     {
@@ -70,6 +70,25 @@ for (const [stderr, want] of classCases) {
     const got = errorClass(stderr);
     const ok = got === want;
     console.log(ok ? `PASS errorClass ${JSON.stringify(stderr.slice(0, 30))}` : `FAIL errorClass ${JSON.stringify(stderr)}: got ${got}, want ${want}`);
+    if (!ok) failed++;
+}
+
+const refCases = [
+    // [text, allRefs, closingRefs]
+    ["Fixes #44 and refs #46", [44, 46], [44]],
+    ["fix: #12", [12], [12]],
+    ["this resolves TriedAngle/KetteVM#7", [7], [7]],
+    ["Closes #1, tracking #2", [1, 2], [1]],
+    ["mentioned #5 and see also #6", [5, 6], []],
+    ["closed the loop on #9", [9], []], // keyword not adjacent to the ref
+    ["RESOLVED: #31", [31], [31]],
+    ["fixed (#40) — see #41", [40, 41], [40]],
+];
+for (const [text, wantAll, wantClosing] of refCases) {
+    const a = allRefs(text);
+    const c = closingRefs(text);
+    const ok = JSON.stringify(a) === JSON.stringify(wantAll) && JSON.stringify(c) === JSON.stringify(wantClosing);
+    console.log(ok ? `PASS refs ${JSON.stringify(text)}` : `FAIL refs ${JSON.stringify(text)}\n  all: ${a} want ${wantAll}\n  closing: ${c} want ${wantClosing}`);
     if (!ok) failed++;
 }
 

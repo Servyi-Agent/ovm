@@ -7,6 +7,34 @@ export const LANG_JS_ALIASES = new Set(["js", "javascript", ""]);
 
 export const NOT_A_TEST = /^NOT\s+A\s+TEST/;
 
+/// GitHub's issue-closing keywords. A reference in this form makes
+/// GitHub AUTO-CLOSE the issue when the PR merges — and means the fix
+/// is in THIS branch, so the issue's snippets must pass on it.
+/// Accepted forms: `fixes #44`, `fix: #44`, `closes #44`,
+/// `resolves owner/repo#44`, `fixed <issue-url>` (case-insensitive).
+const CLOSING_REF =
+    /\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*:?,?\s*(?:\()?\s*(?:https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/|(?:[\w.-]+\/[\w.-]+)?#)(\d+)\b/gi;
+
+/// All plain issue references (`#N` anywhere).
+export function allRefs(text) {
+    const refs = [];
+    for (const m of text.matchAll(/#(\d+)/g)) {
+        const n = Number(m[1]);
+        if (!refs.includes(n)) refs.push(n);
+    }
+    return refs;
+}
+
+/// The issues this text CLAIMS to fix (closing keywords only).
+export function closingRefs(text) {
+    const refs = [];
+    for (const m of text.matchAll(CLOSING_REF)) {
+        const n = Number(m[1]);
+        if (!refs.includes(n)) refs.push(n);
+    }
+    return refs;
+}
+
 export function firstLine(text) {
     return text.split("\n")[0] ?? "";
 }

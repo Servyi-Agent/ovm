@@ -18,7 +18,7 @@
 // Exit code 0 = all snippets pass (or nothing to check).
 
 import { spawnSync } from "node:child_process";
-import { errorClass, isNotATest, snippetsFrom } from "./issue-snippets-lib.mjs";
+import { allRefs, closingRefs, errorClass, isNotATest, snippetsFrom } from "./issue-snippets-lib.mjs";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,7 +59,7 @@ async function api(path) {
 
 // ── reference extraction ─────────────────────────────────────────
 
-async function issueRefs() {
+async function prText() {
     const pr = await api(`/repos/${repo}/pulls/${prNumber}`);
     const commits = await api(`/repos/${repo}/pulls/${prNumber}/commits`);
     const text = [
@@ -67,12 +67,7 @@ async function issueRefs() {
         pr.body ?? "",
         ...commits.map((c) => c.commit?.message ?? ""),
     ].join("\n");
-    const refs = [];
-    for (const m of text.matchAll(/#(\d+)/g)) {
-        const n = Number(m[1]);
-        if (!refs.includes(n)) refs.push(n);
-    }
-    return refs;
+    return { text };
 }
 
 // ── markdown fence extraction ────────────────────────────────────
@@ -101,12 +96,43 @@ function run(cmd, args, cwd) {
 const failures = [];
 const passes = [];
 const skips = [];
+const reported = [];
+
+/// Record a verdict: a failure message on an ENFORCED issue gates the
+/// CI; on a merely-referenced issue it is report-only (master still
+/// has that bug — the reference is context, not a claim).
+function record(message, passId) {
+    if (message === undefined) message = null;
+    if (passId === undefined) passId = null;
+    const enforcedNow = currentIssueEnforced;
+    if (message === null) {
+        if (enforcedNow) passes.push(passId);
+        else reported.push(`PASS ${passId} (referenced, non-gating)`);
+        return;
+    }
+    if (enforcedNow) failures.push(message);
+    else reported.push(`FAIL ${message} (referenced, non-gating)`);
+}
+let currentIssueEnforced = true;
 
 // Local/debug path: SNIPPET_ISSUE_NUMBERS="12,34" checks those issues
 // directly without a PR (used for smoke-testing the harness itself).
-const refs = process.env.SNIPPET_ISSUE_NUMBERS
+const direct = process.env.SNIPPET_ISSUE_NUMBERS
     ? process.env.SNIPPET_ISSUE_NUMBERS.split(",").map((s) => Number(s.trim())).filter(Boolean)
-    : await issueRefs();
+    : null;
+// Closing refs ("fixes #N") vs plain references: a CLOSING ref means
+// the fix is in THIS branch — its snippets must pass. A plain
+// reference is context ("tracked in #N") — its snippets still run,
+// but report-only, because master still has the bug by design.
+let refs, enforced;
+if (direct) {
+    refs = direct;
+    enforced = new Set(direct);
+} else {
+    const { text } = await prText();
+    refs = allRefs(text);
+    enforced = new Set(closingRefs(text));
+}
 if (refs.length === 0) {
     console.log("no issue references in the PR (title/body/commits) — nothing to check");
     process.exit(0);
@@ -128,8 +154,13 @@ for (const n of refs) {
         console.log(`#${n}: is a pull request, not an issue — skipped`);
         continue;
     }
+    const isEnforced = enforced.has(n);
+    currentIssueEnforced = isEnforced;
     const body = `${issue.title ?? ""}\n\n${issue.body ?? ""}`;
     const snippets = snippetsFrom(body);
+    console.log(
+        `#${n}: ${isEnforced ? "FIXED by this PR — snippets must pass" : "referenced — snippets report-only"}`
+    );
     if (snippets.length === 0) {
         console.log(`#${n}: no testable snippets`);
         continue;
@@ -149,14 +180,14 @@ for (const n of refs) {
         if (ext === "ktt") {
             const k = run(kettevm, [file], work);
             if (k.signal === "SIGKILL" || k.status === null) {
-                failures.push(`${id}: kettevm timed out (> ${RUN_TIMEOUT_MS}ms)`);
+                record(`${id}: kettevm timed out (> ${RUN_TIMEOUT_MS}ms)`);
             } else if (k.status !== 0) {
-                failures.push(
+                record(
                     `${id}: kettevm crashed (exit ${k.status})\n` +
                         `  kettevm stderr: ${k.stderr.trim().split("\n").slice(0, 5).join("\n")}`
                 );
             } else {
-                passes.push(id);
+                record(null, id);
             }
             return;
         }
@@ -169,15 +200,15 @@ for (const n of refs) {
                 : `exit ${r.status}`;
 
         if (node.signal === "SIGKILL" || node.status === null) {
-            failures.push(`${id}: node timed out — no oracle for this snippet`);
+            record(`${id}: node timed out — no oracle for this snippet`);
             return;
         }
         if (kette.signal === "SIGKILL" || kette.status === null) {
-            failures.push(`${id}: kettevm timed out (node: ${label(node)})`);
+            record(`${id}: kettevm timed out (node: ${label(node)})`);
             return;
         }
         if (node.stdout !== kette.stdout) {
-            failures.push(
+            record(
                 `${id}: output differs\n` +
                     `  node stdout:    ${JSON.stringify(node.stdout)}\n` +
                     `  kettevm stdout: ${JSON.stringify(kette.stdout)}\n` +
@@ -186,7 +217,7 @@ for (const n of refs) {
             return;
         }
         if (kette.status !== 0 && node.status === 0) {
-            failures.push(
+            record(
                 `${id}: kettevm crashed (${label(kette)}) where node ran fine\n` +
                     `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 5).join("\n")}`
             );
@@ -199,7 +230,7 @@ for (const n of refs) {
             const kClass = errorClass(kette.stderr);
             const nClass = errorClass(node.stderr);
             if (kClass && nClass && kClass !== nClass) {
-                failures.push(
+                record(
                     `${id}: both threw, but different exceptions\n` +
                         `  node:    ${nClass}\n` +
                         `  kettevm: ${kClass}\n` +
@@ -208,7 +239,7 @@ for (const n of refs) {
                 return;
             }
             if ((kClass === null) !== (nClass === null)) {
-                failures.push(
+                record(
                     `${id}: both threw, but only one side looks like a JS exception\n` +
                         `  node:    ${nClass ?? "(unrecognized)"}\n` +
                         `  kettevm: ${kClass ?? "(unrecognized)"}\n` +
@@ -217,14 +248,18 @@ for (const n of refs) {
                 return;
             }
         }
-        passes.push(id);
+        record(null, id);
     });
 }
 
 console.log("\n── summary ──────────────────────────────────────");
 for (const p of passes) console.log(`PASS ${p}`);
 for (const s of skips) console.log(`SKIP ${s} (NOT A TEST)`);
+for (const r of reported) console.log(r);
 for (const f of failures) console.log(`FAIL ${f}`);
-console.log(`${passes.length} passed, ${skips.length} skipped, ${failures.length} failed`);
+console.log(
+    `${passes.length} passed (enforced), ${reported.length} reported (referenced), ` +
+        `${skips.length} skipped, ${failures.length} failed`
+);
 
 process.exit(failures.length === 0 ? 0 : 1);
