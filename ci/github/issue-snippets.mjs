@@ -1,0 +1,205 @@
+#!/usr/bin/env node
+// Issue-snippet conformance: every code snippet in the issues a PR
+// references must behave the same under kettevm and node.
+//
+// Rules (issue snippets as live tests):
+//   - Snippet fences: untagged, ```javascript or ```kette.
+//   - First line matching /^NOT\s+A\s+TEST/ marks the snippet as
+//     explanatory — skipped.
+//   - Untagged/javascript: run kettevm and node, compare stdout.
+//       * stdout differs                        -> FAIL
+//       * kettevm exits nonzero, node zero      -> FAIL (kette crash)
+//       * both exit nonzero with equal stdout   -> PASS (both threw)
+//       * either engine times out               -> FAIL
+//   - kette: node has no kette semantics, so there is no oracle —
+//     kettevm must simply run it without crashing or timing out.
+//
+// Env: GITHUB_TOKEN, GITHUB_REPOSITORY, SNIPPET_PR_NUMBER, KETTEVM.
+// Exit code 0 = all snippets pass (or nothing to check).
+
+import { spawnSync } from "node:child_process";
+import { isNotATest, snippetsFrom } from "./issue-snippets-lib.mjs";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const API = "https://api.github.com";
+const RUN_TIMEOUT_MS = 10_000;
+
+const repo = required("GITHUB_REPOSITORY");
+const token = process.env.GITHUB_TOKEN ?? "";
+// Only needed when SNIPPET_ISSUE_NUMBERS is not set (the PR path).
+if (!process.env.SNIPPET_ISSUE_NUMBERS) required("SNIPPET_PR_NUMBER");
+const prNumber = process.env.SNIPPET_PR_NUMBER ?? "";
+const kettevm = process.env.KETTEVM ?? "/target/release/kettevm";
+
+function required(name) {
+    const v = process.env[name];
+    if (!v) {
+        console.error(`missing env ${name}`);
+        process.exit(2);
+    }
+    return v;
+}
+
+async function api(path) {
+    const headers = {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    };
+    // The token is optional: the repo is public, so unauthenticated
+    // reads work (lower rate limit) — handy for local runs.
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${API}${path}`, { headers });
+    if (!res.ok) {
+        throw new Error(`GET ${path} -> ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+}
+
+// ── reference extraction ─────────────────────────────────────────
+
+async function issueRefs() {
+    const pr = await api(`/repos/${repo}/pulls/${prNumber}`);
+    const commits = await api(`/repos/${repo}/pulls/${prNumber}/commits`);
+    const text = [
+        pr.title ?? "",
+        pr.body ?? "",
+        ...commits.map((c) => c.commit?.message ?? ""),
+    ].join("\n");
+    const refs = [];
+    for (const m of text.matchAll(/#(\d+)/g)) {
+        const n = Number(m[1]);
+        if (!refs.includes(n)) refs.push(n);
+    }
+    return refs;
+}
+
+// ── markdown fence extraction ────────────────────────────────────
+
+
+// ── engines ──────────────────────────────────────────────────────
+
+function run(cmd, args, cwd) {
+    const r = spawnSync(cmd, args, {
+        cwd,
+        encoding: "utf8",
+        timeout: RUN_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        maxBuffer: 16 * 1024 * 1024,
+    });
+    return {
+        status: r.status,
+        signal: r.signal,
+        stdout: r.stdout ?? "",
+        stderr: r.stderr ?? "",
+    };
+}
+
+// ── main ─────────────────────────────────────────────────────────
+
+const failures = [];
+const passes = [];
+const skips = [];
+
+// Local/debug path: SNIPPET_ISSUE_NUMBERS="12,34" checks those issues
+// directly without a PR (used for smoke-testing the harness itself).
+const refs = process.env.SNIPPET_ISSUE_NUMBERS
+    ? process.env.SNIPPET_ISSUE_NUMBERS.split(",").map((s) => Number(s.trim())).filter(Boolean)
+    : await issueRefs();
+if (refs.length === 0) {
+    console.log("no issue references in the PR (title/body/commits) — nothing to check");
+    process.exit(0);
+}
+console.log(`issue references: ${refs.map((n) => `#${n}`).join(" ")}`);
+
+const work = mkdtempSync(join(tmpdir(), "issue-snippets-"));
+let counter = 0;
+
+for (const n of refs) {
+    let issue;
+    try {
+        issue = await api(`/repos/${repo}/issues/${n}`);
+    } catch (e) {
+        console.log(`#${n}: cannot load (${e.message}) — skipped`);
+        continue;
+    }
+    if (issue.pull_request) {
+        console.log(`#${n}: is a pull request, not an issue — skipped`);
+        continue;
+    }
+    const body = `${issue.title ?? ""}\n\n${issue.body ?? ""}`;
+    const snippets = snippetsFrom(body);
+    if (snippets.length === 0) {
+        console.log(`#${n}: no testable snippets`);
+        continue;
+    }
+
+    snippets.forEach((s, i) => {
+        const id = `#${n} snippet ${i + 1} (${s.lang || "untagged"})`;
+        if (isNotATest(s)) {
+            skips.push(id);
+            return;
+        }
+        counter += 1;
+        const ext = s.lang === "kette" ? "ktt" : "js";
+        const file = join(work, `snippet-${counter}.${ext}`);
+        writeFileSync(file, s.text + "\n");
+
+        if (ext === "ktt") {
+            const k = run(kettevm, [file], work);
+            if (k.signal === "SIGKILL" || k.status === null) {
+                failures.push(`${id}: kettevm timed out (> ${RUN_TIMEOUT_MS}ms)`);
+            } else if (k.status !== 0) {
+                failures.push(
+                    `${id}: kettevm crashed (exit ${k.status})\n` +
+                        `  kettevm stderr: ${k.stderr.trim().split("\n").slice(0, 5).join("\n")}`
+                );
+            } else {
+                passes.push(id);
+            }
+            return;
+        }
+
+        const node = run("node", [file], work);
+        const kette = run(kettevm, [file], work);
+        const label = (r) =>
+            r.signal === "SIGKILL" || r.status === null
+                ? "timed out"
+                : `exit ${r.status}`;
+
+        if (node.signal === "SIGKILL" || node.status === null) {
+            failures.push(`${id}: node timed out — no oracle for this snippet`);
+            return;
+        }
+        if (kette.signal === "SIGKILL" || kette.status === null) {
+            failures.push(`${id}: kettevm timed out (node: ${label(node)})`);
+            return;
+        }
+        if (node.stdout !== kette.stdout) {
+            failures.push(
+                `${id}: output differs\n` +
+                    `  node stdout:    ${JSON.stringify(node.stdout)}\n` +
+                    `  kettevm stdout: ${JSON.stringify(kette.stdout)}\n` +
+                    `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 5).join("\n")}`
+            );
+            return;
+        }
+        if (kette.status !== 0 && node.status === 0) {
+            failures.push(
+                `${id}: kettevm crashed (${label(kette)}) where node ran fine\n` +
+                    `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 5).join("\n")}`
+            );
+            return;
+        }
+        passes.push(id);
+    });
+}
+
+console.log("\n── summary ──────────────────────────────────────");
+for (const p of passes) console.log(`PASS ${p}`);
+for (const s of skips) console.log(`SKIP ${s} (NOT A TEST)`);
+for (const f of failures) console.log(`FAIL ${f}`);
+console.log(`${passes.length} passed, ${skips.length} skipped, ${failures.length} failed`);
+
+process.exit(failures.length === 0 ? 0 : 1);
