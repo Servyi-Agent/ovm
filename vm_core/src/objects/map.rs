@@ -466,6 +466,7 @@ impl MapKind {
             Self::CELL => ObjectKind::Cell,
             Self::PROTOTYPE_INFO => ObjectKind::PrototypeInfo,
             Self::DATA_HANDLER => ObjectKind::DataHandler,
+            Self::NUMBER_DICTIONARY => ObjectKind::NumberDictionary,
             Self::CODE => ObjectKind::Code,
             _ => panic!("invalid object kind"),
         }
