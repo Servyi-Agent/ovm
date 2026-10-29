@@ -2,7 +2,7 @@ use crate::{
     AccessorPair, CallTarget, CallableInfoObject, Cell, ContextObject, DataHandler,
     DataHandlerInit, DenseString, FeedbackVector, FixedArray, FunctionKind, Handle, HandleScope,
     Heap, LanguageMode, Map, MaybeWeak, NativeIndex, Object, ObjectKind, Prototype, SlotName, Smi,
-    Tagged, Value, WeakFixedArray, WeakFixedArrayInit,
+    Tagged, Value, WeakFixedArray, WeakFixedArrayInit, info_is_immutable,
 };
 
 /// Beyond this many live (map, handler) pairs a site goes megamorphic.
@@ -35,6 +35,11 @@ const KIND_PARENT: i64 = 9;
 /// Native accessor setter: payload is the setter's runtime index. The map
 /// check pins the descriptor, so the cached index cannot go stale.
 const KIND_NATIVE_SETTER: i64 = 10;
+/// Script-context lexical binding cached on a global load/store site.
+/// Payload = slot index in the low 32 bits, binding info in the next byte.
+const KIND_GLOBAL_LEXICAL: i64 = 11;
+const GLOBAL_LEXICAL_INFO_SHIFT: i64 = 32;
+const GLOBAL_LEXICAL_SLOT_MASK: i64 = 0xffff_ffff;
 
 /// Element-load payload flags.
 const ELEMENT_HOLEY: i64 = 1 << 0;
@@ -76,6 +81,13 @@ pub enum LoadHit<'a> {
     /// invoke with the receiver as `this`
     Getter(Tagged<'a, Value>),
     NotFound,
+}
+
+/// Result of a cached global script-context lexical load.
+pub enum GlobalLexicalHit<'a> {
+    Value(Tagged<'a, Value>),
+    /// The binding exists but is still in its TDZ.
+    Uninitialized,
 }
 
 /// Result of a keyed element load hit.
@@ -185,6 +197,30 @@ pub struct InlineCache;
 
 fn kind_smi(kind: i64, payload: i64) -> Smi {
     Smi::new(kind | (payload << 8))
+}
+
+fn decode_global_lexical(payload: i64) -> (usize, i64) {
+    (
+        (payload & GLOBAL_LEXICAL_SLOT_MASK) as usize,
+        (payload >> GLOBAL_LEXICAL_INFO_SHIFT) & 0xff,
+    )
+}
+
+#[inline]
+fn global_lexical_site<'a>(
+    heap: &'a Heap,
+    vector: Option<Tagged<'a, FeedbackVector>>,
+    slot: usize,
+) -> Option<(Tagged<'a, ContextObject>, usize, i64)> {
+    let vector = vector?;
+    let (state, handler) = vector.site(slot)?;
+    let context = state.get(heap).as_strong()?.get_as::<ContextObject>(heap)?;
+    let (kind, payload) = decode_handler_smi(handler.get(heap))?;
+    if kind != KIND_GLOBAL_LEXICAL {
+        return None;
+    }
+    let (slot_index, info) = decode_global_lexical(payload);
+    Some((context, slot_index, info))
 }
 
 /// Decode the `(kind, payload)` view of a handler word.
@@ -915,6 +951,62 @@ impl InlineCache {
         let map = obj.map(heap);
         let handler = probe(heap, vector, slot, map)?;
         apply_load_handler(heap, obj, handler)
+    }
+
+    #[inline]
+    pub fn try_load_global_lexical<'a>(
+        heap: &'a Heap,
+        vector: Option<Tagged<'a, FeedbackVector>>,
+        slot: usize,
+    ) -> Option<GlobalLexicalHit<'a>> {
+        let (context, slot_index, _) = global_lexical_site(heap, vector, slot)?;
+        let value = context
+            .slots
+            .get(heap)
+            .as_ref()
+            .element_slot(slot_index)
+            .get(heap);
+        Some(if value == heap.known().the_hole.get(heap).erase() {
+            GlobalLexicalHit::Uninitialized
+        } else {
+            GlobalLexicalHit::Value(value)
+        })
+    }
+
+    #[inline]
+    pub fn try_store_global_lexical<'a>(
+        heap: &'a Heap,
+        vector: Option<Tagged<'a, FeedbackVector>>,
+        slot: usize,
+        value: Tagged<'a, Value>,
+    ) -> Option<Tagged<'a, Value>> {
+        let (context, slot_index, info) = global_lexical_site(heap, vector, slot)?;
+        let binding = context.slots.get(heap).as_ref().element_slot(slot_index);
+        if binding.get(heap) == heap.known().the_hole.get(heap).erase() || info_is_immutable(info) {
+            return None;
+        }
+        binding.set(heap, context.erase(), value);
+        Some(value)
+    }
+
+    /// Cache a script-context lexical binding on a global load/store site.
+    pub fn update_global_lexical(
+        heap: &Heap,
+        vector: Option<Tagged<'_, FeedbackVector>>,
+        slot: usize,
+        context: Tagged<'_, ContextObject>,
+        slot_index: usize,
+        info: i64,
+    ) {
+        let Some(vector) = vector else { return };
+        let Some((state, handler)) = vector.site(slot) else {
+            return;
+        };
+        let host = vector.erase();
+        state.set_strong(heap, host, context.erase());
+        let payload = (slot_index as i64 & GLOBAL_LEXICAL_SLOT_MASK)
+            | ((info & 0xff) << GLOBAL_LEXICAL_INFO_SHIFT);
+        handler.set_strong(heap, host, kind_smi(KIND_GLOBAL_LEXICAL, payload));
     }
 
     pub fn update_load(

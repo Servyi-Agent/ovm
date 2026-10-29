@@ -792,9 +792,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
 
         for &sid in &self.scopes_by_fid[fid.0 as usize] {
-            let block_context = self.facts.block_contexts.contains(&sid);
             for sym in self.scoping.iter_bindings_in(sid) {
                 let flags = self.scoping.symbol_flags(sym);
+                let block_context = self.facts.block_contexts.contains(&sid)
+                    && flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class);
                 match root_binding(self.facts.mode, self.facts.root, sid, flags) {
                     Some(RootBinding::GlobalObject) => {
                         self.slots.insert(sym, Slot::Global);
@@ -880,8 +881,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
         for i in 0..self.nested_scopes_by_fid[fid.0 as usize].len() {
             let sid = self.nested_scopes_by_fid[fid.0 as usize][i];
-            let block_context = self.facts.block_contexts.contains(&sid);
             for sym in self.scoping.iter_bindings_in(sid) {
+                let flags = self.scoping.symbol_flags(sym);
+                let block_context = self.facts.block_contexts.contains(&sid)
+                    && flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class);
                 if block_context {
                     let slot = *block_next.entry(sid).or_default();
                     block_next.insert(sid, slot + 1);
@@ -1092,10 +1095,6 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn pop_frame_context(&mut self) {
         if self.frame_context {
             self.b.pop_context(self.ctx_save);
-            if self.contexts.last() == Some(&ContextHost::Function(self.fid)) {
-                self.contexts.pop();
-                self.context_saves.pop();
-            }
         }
     }
 
@@ -4720,6 +4719,9 @@ impl<'c, 'a, 'p> FunctionGen<'c, 'a, 'p> {
     fn emit_try_catch(&mut self, s: &TryStatement<'_>) -> Result<(), CompileError> {
         if s.finalizer.is_some() {
             return self.err(s.span, "finally blocks");
+        }
+        if s.block.body.is_empty() {
+            return Ok(());
         }
         self.with_temps(|g, temps| {
             // snapshot the current context: an exception may unwind out of

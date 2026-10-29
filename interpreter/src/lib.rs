@@ -16,11 +16,11 @@ use handler_derive::{handler_become as handler, handler_table};
 
 use bytecode::Opcode;
 use vm_core::bootstrap::WellKnown;
-use vm_core::ic::{ElementHit, InlineCache, LoadHit, MonoProbe};
+use vm_core::ic::{ElementHit, GlobalLexicalHit, InlineCache, LoadHit, MonoProbe};
 use vm_core::{
     Acc, CallTarget, CallableInfoObject, Callee, Compare, ContextInit, ContextObject, Convert, Ctx,
-    FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs, ScopeInfo, Smi, Tagged,
-    VmError, raise_runtime,
+    FeedbackVector, FixedArray, HandleSlice, Heap, HostCtx, NativeIndex, Object, Ops, Regs,
+    ScopeInfo, Smi, Tagged, Value, VmError, raise_runtime,
 };
 
 #[cfg(feature = "fast")]
@@ -261,26 +261,77 @@ fn op_load_current_closure(frame: Frame) {
     next!()
 }
 
+enum GlobalLoadFast<'a> {
+    Value(Tagged<'a, Value>),
+    Getter(Tagged<'a, Value>),
+    Uninitialized,
+    Miss,
+}
+
+fn global_load_fast<'a>(
+    heap: &'a Heap,
+    vector: Option<Tagged<'a, FeedbackVector>>,
+    fb_slot: usize,
+    global: Tagged<'a, Value>,
+) -> GlobalLoadFast<'a> {
+    match InlineCache::try_load_global_lexical(heap, vector, fb_slot) {
+        Some(GlobalLexicalHit::Value(v)) => return GlobalLoadFast::Value(v),
+        Some(GlobalLexicalHit::Uninitialized) => return GlobalLoadFast::Uninitialized,
+        None => {}
+    }
+    match InlineCache::try_load(heap, vector, fb_slot, global) {
+        Some(LoadHit::Value(v)) => GlobalLoadFast::Value(v),
+        Some(LoadHit::Getter(getter)) => GlobalLoadFast::Getter(getter),
+        _ => GlobalLoadFast::Miss,
+    }
+}
+
 #[handler(LoadGlobal)]
 fn op_load_global(frame: Frame) {
     let heap = frame.ctx().heap();
-    if heap.known().script_context_table.get(heap).length() != 0 {
-        tail!(slow_global_load)
-    }
     let fb = frame.unsigned::<1>();
     let global = roots.global_object.get(heap).erase();
-    if let Some(LoadHit::Value(v)) =
-        InlineCache::try_load(heap, frame.ctx().feedback_ref(heap), fb, global)
-    {
-        frame.set_acc(v);
-        next!()
+    match global_load_fast(heap, frame.ctx().feedback_ref(heap), fb, global) {
+        GlobalLoadFast::Value(v) => {
+            frame.set_acc(v);
+            next!()
+        }
+        GlobalLoadFast::Getter(getter) => {
+            frame.set_acc(getter);
+            tail!(slow_global_getter)
+        }
+        GlobalLoadFast::Uninitialized => {
+            let _ = frame.ctx().raise_tag(VmError::Reference);
+            tail!(throw_dispatch)
+        }
+        GlobalLoadFast::Miss => {
+            tail!(slow_global_load)
+        }
     }
-    tail!(slow_global_load)
 }
 
 #[handler(LoadGlobalNoThrow)]
 fn op_load_global_no_throw(frame: Frame) {
-    tail!(slow_global_load_nothrow)
+    let heap = frame.ctx().heap();
+    let fb = frame.unsigned::<1>();
+    let global = roots.global_object.get(heap).erase();
+    match global_load_fast(heap, frame.ctx().feedback_ref(heap), fb, global) {
+        GlobalLoadFast::Value(v) => {
+            frame.set_acc(v);
+            next!()
+        }
+        GlobalLoadFast::Getter(getter) => {
+            frame.set_acc(getter);
+            tail!(slow_global_getter)
+        }
+        GlobalLoadFast::Uninitialized => {
+            let _ = frame.ctx().raise_tag(VmError::Reference);
+            tail!(throw_dispatch)
+        }
+        GlobalLoadFast::Miss => {
+            tail!(slow_global_load_no_throw)
+        }
+    }
 }
 
 #[handler(LoadNamedProperty)]
@@ -288,31 +339,29 @@ fn op_load_named_property(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let fb = frame.unsigned::<2>();
-    match InlineCache::probe_mono(heap, frame.ctx().feedback_ref(heap), fb, recv) {
-        MonoProbe::Value(v) => {
-            frame.set_acc(v);
-            next!()
-        }
-        MonoProbe::Handler(obj, handler) => {
-            if let Some(LoadHit::Value(v)) = InlineCache::apply_mono(heap, obj, handler) {
-                frame.set_acc(v);
-                next!()
-            }
-        }
+    let hit = match InlineCache::probe_mono(heap, frame.ctx().feedback_ref(heap), fb, recv) {
+        MonoProbe::Value(v) => Some(LoadHit::Value(v)),
+        MonoProbe::Handler(obj, handler) => InlineCache::apply_mono(heap, obj, handler),
         MonoProbe::Poly {
             obj,
             map,
             pairs,
             start,
-        } => {
-            if let Some(LoadHit::Value(v)) =
-                InlineCache::try_load_resume(heap, obj, map, pairs, start)
-            {
+        } => InlineCache::try_load_resume(heap, obj, map, pairs, start),
+        MonoProbe::Miss | MonoProbe::NotReceiver => None,
+    };
+    if let Some(hit) = hit {
+        match hit {
+            LoadHit::Value(v) => {
                 frame.set_acc(v);
                 next!()
             }
+            LoadHit::Getter(getter) => {
+                frame.set_acc(getter);
+                tail!(slow_named_getter)
+            }
+            _ => {}
         }
-        MonoProbe::Miss | MonoProbe::NotReceiver => {}
     }
     tail!(slow_named_load)
 }
@@ -427,32 +476,43 @@ fn op_store_named_property(frame: Frame) {
     tail!(slow_store_named)
 }
 
+fn keyed_store_fast<'a>(
+    heap: &'a Heap,
+    vector: Option<Tagged<'a, FeedbackVector>>,
+    fb: usize,
+    recv: Tagged<'a, Value>,
+    key: Tagged<'a, Value>,
+    value: Tagged<'a, Value>,
+) -> Option<Tagged<'a, Value>> {
+    let idx = key.to_i64()?;
+    if idx < 0 {
+        return None;
+    }
+    if recv
+        .store_array_element_in_place(heap, idx as usize, value)
+        .is_ok()
+    {
+        return Some(value);
+    }
+    InlineCache::try_store_element(heap, vector, fb, recv, idx as usize, value)
+}
+
 #[handler(StoreKeyedProperty)]
 fn op_store_keyed_property(frame: Frame) {
     let heap = frame.ctx().heap();
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
     let fb = frame.unsigned::<2>();
-    if let Some(idx) = key.to_i64()
-        && idx >= 0
-    {
-        if recv
-            .store_array_element_in_place(heap, idx as usize, frame.acc())
-            .is_ok()
-        {
-            next!()
-        }
-        if let Some(v) = InlineCache::try_store_element(
-            heap,
-            frame.ctx().feedback_ref(heap),
-            fb,
-            recv,
-            idx as usize,
-            frame.acc(),
-        ) {
-            frame.set_acc(v);
-            next!()
-        }
+    if let Some(v) = keyed_store_fast(
+        heap,
+        frame.ctx().feedback_ref(heap),
+        fb,
+        recv,
+        key,
+        frame.acc(),
+    ) {
+        frame.set_acc(v);
+        next!()
     }
     tail!(slow_keyed_store)
 }
@@ -463,26 +523,16 @@ fn op_store_keyed_property_no_shadow(frame: Frame) {
     let recv = frame.regs().get(frame.signed::<0>(), heap);
     let key = frame.regs().get(frame.signed::<1>(), heap);
     let fb = frame.unsigned::<2>();
-    if let Some(idx) = key.to_i64()
-        && idx >= 0
-    {
-        if recv
-            .store_array_element_in_place(heap, idx as usize, frame.acc())
-            .is_ok()
-        {
-            next!()
-        }
-        if let Some(v) = InlineCache::try_store_element(
-            heap,
-            frame.ctx().feedback_ref(heap),
-            fb,
-            recv,
-            idx as usize,
-            frame.acc(),
-        ) {
-            frame.set_acc(v);
-            next!()
-        }
+    if let Some(v) = keyed_store_fast(
+        heap,
+        frame.ctx().feedback_ref(heap),
+        fb,
+        recv,
+        key,
+        frame.acc(),
+    ) {
+        frame.set_acc(v);
+        next!()
     }
     tail!(slow_keyed_store_no_shadow)
 }
@@ -494,6 +544,34 @@ fn op_store_named_property_no_shadow(frame: Frame) {
 
 #[handler(StoreGlobal)]
 fn op_store_global(frame: Frame) {
+    let heap = frame.ctx().heap();
+    let fb = frame.unsigned::<1>();
+    let value = frame.acc();
+    if let Some(v) =
+        InlineCache::try_store_global_lexical(heap, frame.ctx().feedback_ref(heap), fb, value)
+    {
+        frame.set_acc(v);
+        next!()
+    }
+    let name_idx = frame.unsigned::<0>();
+    let name = frame
+        .ctx()
+        .constants_ref(heap)
+        .at(heap, name_idx)
+        .erase()
+        .as_name();
+    let global = roots.global_object.get(heap).erase();
+    if InlineCache::try_store_fast(
+        heap,
+        frame.ctx().feedback_ref(heap),
+        fb,
+        global,
+        name,
+        value,
+    ) {
+        frame.set_acc(value);
+        next!()
+    }
     tail!(slow_store_global)
 }
 

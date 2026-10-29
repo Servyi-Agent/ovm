@@ -161,6 +161,13 @@ pub struct ScriptContextTableInit<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub struct GlobalLexicalBinding<'a> {
+    pub context: Tagged<'a, ContextObject>,
+    pub slot_index: usize,
+    pub info: i64,
+}
+
+#[derive(Clone, Copy)]
 pub struct ScriptContextLookup {
     pub context_index: usize,
     pub slot_index: usize,
@@ -356,7 +363,7 @@ pub fn global_lexical_has(heap: &Heap, name: Tagged<'_, Value>) -> bool {
 pub fn global_lexical_get<'a>(
     heap: &'a Heap,
     name: Tagged<'_, Value>,
-) -> Result<Option<Tagged<'a, Value>>, VmError> {
+) -> Result<Option<(Tagged<'a, Value>, GlobalLexicalBinding<'a>)>, VmError> {
     let table = heap.known().script_context_table.get(heap);
     let Some(found) = table.lookup(heap, name) else {
         return Ok(None);
@@ -371,17 +378,24 @@ pub fn global_lexical_get<'a>(
     if value == heap.known().the_hole.get(heap).erase() {
         return Err(VmError::Reference);
     }
-    Ok(Some(value))
+    Ok(Some((
+        value,
+        GlobalLexicalBinding {
+            context,
+            slot_index: found.slot_index,
+            info: found.info,
+        },
+    )))
 }
 
-pub fn global_lexical_set(
-    heap: &Heap,
+pub fn global_lexical_set<'a>(
+    heap: &'a Heap,
     name: Tagged<'_, Value>,
     value: Tagged<'_, Value>,
-) -> Result<(), VmError> {
+) -> Result<Option<GlobalLexicalBinding<'a>>, VmError> {
     let table = heap.known().script_context_table.get(heap);
     let Some(found) = table.lookup(heap, name) else {
-        return Err(VmError::Reference);
+        return Ok(None);
     };
     let context = table.context(heap, found.context_index);
     let slot = context
@@ -393,8 +407,12 @@ pub fn global_lexical_set(
         return Err(VmError::Reference);
     }
     if info_is_immutable(found.info) {
-        return Err(VmError::Type);
+        return Err(VmError::Message(crate::Message::ConstAssign));
     }
     slot.set(heap, context.erase(), value);
-    Ok(())
+    Ok(Some(GlobalLexicalBinding {
+        context,
+        slot_index: found.slot_index,
+        info: found.info,
+    }))
 }

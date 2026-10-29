@@ -6,13 +6,13 @@
 # coverage or the corpus changes.
 #
 # Calibrated against test262 main:
-#   d53ebc8b1931d9f1541e43d59650776e4b766248
+#   0b4e0812022b18236b5276d2804948fdd9f71603
 # with KETTEVM_JOBS=64:
-#   match:  total=53910 pass=12798 fail=26012 panic=0
-#   become: total=53910 pass=12798 fail=26012 panic=0
+#   match:  total=53909 pass=12949 fail=25860 panic=0
+#   become: total=53909 pass=12949 fail=25860 panic=0
 #
 # Both interpreters now dispatch through the same handlers, so the shared
 # minimum is their common current pass count.
-corpus_commit=d53ebc8b1931d9f1541e43d59650776e4b766248
-min_pass=12798
+corpus_commit=0b4e0812022b18236b5276d2804948fdd9f71603
+min_pass=12949
 max_panic=0

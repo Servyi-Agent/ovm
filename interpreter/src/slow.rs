@@ -893,6 +893,38 @@ pub fn slow_keyed_load_imm(frame: Frame) {
 }
 
 #[handler(LoadNamedProperty)]
+#[cold]
+pub fn slow_named_getter(frame: Frame) {
+    let pc = frame.pc();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(frame.regs().get(frame.signed::<0>(), frame.ctx().heap()));
+        let getter = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        call_getter(vm, heap, state, &scope, recv, getter)
+    });
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(LoadGlobal)]
+#[cold]
+pub fn slow_global_getter(frame: Frame) {
+    let pc = frame.pc();
+    let vm = frame.ctx().vm();
+    let state = frame.ctx().state();
+    let v = state.handle_scope(|scope| {
+        let recv = scope.handle(roots.global_object.get(frame.ctx().heap()).erase());
+        let getter = scope.handle(frame.acc());
+        let heap = frame.ctx().heap_mut();
+        call_getter(vm, heap, state, &scope, recv, getter)
+    });
+    frame.set_acc(v);
+    reenter!(pc)
+}
+
+#[handler(LoadNamedProperty)]
 pub fn slow_named_load(frame: Frame) {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
@@ -964,11 +996,19 @@ pub fn global_load_body<'a>(
         let global_value = scope.handle(global_handle.as_tagged(heap).erase());
         let name_value = name.as_tagged(heap).erase();
         let lexical = match vm_core::global_lexical_get(heap, name_value) {
-            Ok(Some(value)) => Some(scope.handle(value)),
+            Ok(Some((value, binding))) => Some((scope.handle(value), binding)),
             Ok(None) => None,
             Err(err) => return raise_runtime(vm, heap, state, err),
         };
-        if let Some(value) = lexical {
+        if let Some((value, binding)) = lexical {
+            InlineCache::update_global_lexical(
+                heap,
+                state.stack().frame_header(base).feedback(heap),
+                fb_slot,
+                binding.context,
+                binding.slot_index,
+                binding.info,
+            );
             return value.as_tagged(heap).erase();
         }
         let out = match Object::get_property(
@@ -1030,7 +1070,7 @@ pub fn slow_global_load(frame: Frame) {
 
 #[handler(LoadGlobalNoThrow)]
 #[cold]
-pub fn slow_global_load_nothrow(frame: Frame) {
+pub fn slow_global_load_no_throw(frame: Frame) {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let name_idx = frame.unsigned::<0>();
@@ -1058,8 +1098,8 @@ pub fn keyed_store_body<'a>(
     heap: &'a mut Heap,
     state: &'a ThreadState,
     roots: RootsArg<'_>,
-    _base: usize,
-    _fb: usize,
+    base: usize,
+    fb: usize,
     recv: Handle<'_, Value>,
     raw_key: Handle<'_, Value>,
     value: Handle<'_, Value>,
@@ -1080,12 +1120,31 @@ pub fn keyed_store_body<'a>(
             && obj.is_array(heap)
             && obj.map(heap).kind().is_dense_elements()
         {
+            let grew = i >= obj.length();
             let obj = scope.handle(obj);
             if let Err(e) = Object::store_array_element(heap, &scope, &obj, i, &value) {
                 return raise_runtime(vm, heap, state, e);
             }
+            InlineCache::update_store_element(
+                heap,
+                &scope,
+                state
+                    .stack()
+                    .frame_header(base)
+                    .feedback(heap)
+                    .map(|v| scope.handle(v)),
+                fb,
+                Some(recv),
+                grew,
+            );
             return value.as_tagged(heap).erase();
         }
+        let element = key.as_tagged(heap).as_index();
+        let grew = element.is_some_and(|i| {
+            recv.as_tagged(heap)
+                .as_heap_object()
+                .is_some_and(|obj| obj.is_array(heap) && i >= obj.length())
+        });
         let applied = match Object::set_property(
             vm,
             heap,
@@ -1102,7 +1161,29 @@ pub fn keyed_store_body<'a>(
             Err(e) => return raise_runtime(vm, heap, state, e),
         };
         match set_outcome_kind(applied) {
-            Ok(_) => value.as_tagged(heap).erase(),
+            Ok(kind) => {
+                if kind != StoreOutcomeKind::CallSetter
+                    && element.is_some()
+                    && recv
+                        .as_tagged(heap)
+                        .as_heap_object()
+                        .is_some_and(|obj| obj.is_array(heap))
+                {
+                    InlineCache::update_store_element(
+                        heap,
+                        &scope,
+                        state
+                            .stack()
+                            .frame_header(base)
+                            .feedback(heap)
+                            .map(|v| scope.handle(v)),
+                        fb,
+                        Some(recv),
+                        grew,
+                    );
+                }
+                value.as_tagged(heap).erase()
+            }
             Err(()) => roots.exception.get(heap).erase(),
         }
     })
@@ -1168,6 +1249,79 @@ pub fn slow_keyed_store_no_shadow(frame: Frame) {
     reenter!(pc)
 }
 
+pub fn call_getter<'a>(
+    vm: &'a VM,
+    heap: &'a mut Heap,
+    state: &'a ThreadState,
+    scope: &HandleScope<'_>,
+    receiver: Handle<'_, Value>,
+    getter: Handle<'_, Value>,
+) -> Tagged<'a, Value> {
+    let args = scope.stage(&[receiver.as_tagged(heap).erase()]);
+    match HostCtx::enter(vm, heap, state, getter, args, None) {
+        Ok(v) => scope.handle(v).as_tagged(heap).erase(),
+        Err(e) => raise_runtime(vm, heap, state, e),
+    }
+}
+
+macro_rules! apply_store_hit {
+    ($vm:expr, $heap:expr, $state:expr, $roots:expr, $scope:expr, $recv:expr, $value:expr, $hit:expr) => {
+        match $hit {
+            StoreHit::Done => $value.as_tagged($heap).erase(),
+            StoreHit::Setter(setter) => {
+                let setter = $scope.handle(setter);
+                let args = $scope.stage(&[
+                    $recv.as_tagged($heap).erase(),
+                    $value.as_tagged($heap).erase(),
+                ]);
+                match HostCtx::enter($vm, $heap, $state, setter, args, None) {
+                    Ok(v) => $scope.handle(v).as_tagged($heap).erase(),
+                    Err(e) => raise_runtime($vm, $heap, $state, e),
+                }
+            }
+            StoreHit::NativeSetter(index) => {
+                let args = $scope
+                    .stage(&[
+                        $recv.as_tagged($heap).erase(),
+                        $value.as_tagged($heap).erase(),
+                    ])
+                    .as_args();
+                let result = $scope.handle($vm.runtime(index)(
+                    HostCtx::new($vm, $heap, $state),
+                    None,
+                    args,
+                ));
+                if result.as_tagged($heap) == $roots.exception.get($heap).erase() {
+                    result.as_tagged($heap).erase()
+                } else {
+                    $value.as_tagged($heap).erase()
+                }
+            }
+        }
+    };
+}
+
+macro_rules! cached_store {
+    ($vm:expr, $heap:expr, $state:expr, $roots:expr, $scope:expr, $base:expr, $fb:expr, $recv:expr, $name:expr, $value:expr, $mode:expr) => {{
+        if let Some(hit) = InlineCache::try_store(
+            $heap,
+            $scope,
+            $state
+                .stack()
+                .frame_header($base)
+                .feedback($heap)
+                .map(|v| $scope.handle(v)),
+            $fb,
+            $recv.erase(),
+            $name,
+            $value,
+            $mode,
+        ) {
+            return apply_store_hit!($vm, $heap, $state, $roots, $scope, $recv, $value, hit);
+        }
+    }};
+}
+
 #[handler(StoreNamedProperty)]
 pub fn slow_store_named(frame: Frame) {
     let mode = frame.ctx().language_mode();
@@ -1198,48 +1352,9 @@ pub fn slow_store_named(frame: Frame) {
                 Err(e) => raise_runtime(vm, heap, state, e),
             };
         }
-        if let Some(hit) = InlineCache::try_store(
-            heap,
-            &scope,
-            state
-                .stack()
-                .frame_header(base)
-                .feedback(heap)
-                .map(|v| scope.handle(v)),
-            fb_slot,
-            recv.erase(),
-            name,
-            value,
-            mode,
-        ) {
-            return match hit {
-                StoreHit::Done => value.as_tagged(heap).erase(),
-                StoreHit::Setter(setter) => {
-                    let setter = scope.handle(setter);
-                    let args = scope.stage(&[recv.as_tagged(heap).erase(), value.as_tagged(heap)]);
-                    // the setter's return value is ignored (store result
-                    // semantics: the accumulator keeps the stored value)
-                    match HostCtx::enter(vm, heap, state, setter, args, None) {
-                        Ok(v) => scope.handle(v).as_tagged(heap),
-                        Err(e) => return raise_runtime(vm, heap, state, e),
-                    }
-                }
-                StoreHit::NativeSetter(index) => {
-                    let args = scope
-                        .stage(&[recv.as_tagged(heap).erase(), value.as_tagged(heap)])
-                        .as_args();
-                    let result =
-                        scope.handle(vm.runtime(index)(HostCtx::new(vm, heap, state), None, args));
-                    // A native setter's result is ignored: assignment yields
-                    // the stored value unless the setter threw.
-                    if result.as_tagged(heap) == roots.exception.get(heap).erase() {
-                        result.as_tagged(heap)
-                    } else {
-                        value.as_tagged(heap).erase()
-                    }
-                }
-            };
-        }
+        cached_store!(
+            vm, heap, state, roots, &scope, base, fb_slot, recv, name, value, mode
+        );
         store_named_tail_body(
             vm,
             heap,
@@ -1264,6 +1379,7 @@ pub fn slow_store_global(frame: Frame) {
     let pc = frame.pc();
     let base = frame.ctx().frame_base();
     let name_idx = frame.unsigned::<0>();
+    let fb_slot = frame.unsigned::<1>();
     let vm = frame.ctx().vm();
     let state = frame.ctx().state();
     let val = state.handle_scope(|scope| {
@@ -1280,12 +1396,24 @@ pub fn slow_store_global(frame: Frame) {
         );
         let global = scope.handle(roots.global_object.get(heap).erase());
         let name_value = name.as_tagged(heap).erase();
-        if vm_core::global_lexical_has(heap, name_value) {
-            return match vm_core::global_lexical_set(heap, name_value, value.as_tagged(heap)) {
-                Ok(()) => value.as_tagged(heap).erase(),
-                Err(err) => raise_runtime(vm, heap, state, err),
-            };
+        match vm_core::global_lexical_set(heap, name_value, value.as_tagged(heap)) {
+            Ok(Some(binding)) => {
+                InlineCache::update_global_lexical(
+                    heap,
+                    state.stack().frame_header(base).feedback(heap),
+                    fb_slot,
+                    binding.context,
+                    binding.slot_index,
+                    binding.info,
+                );
+                return value.as_tagged(heap).erase();
+            }
+            Ok(None) => {}
+            Err(err) => return raise_runtime(vm, heap, state, err),
         }
+        cached_store!(
+            vm, heap, state, roots, &scope, base, fb_slot, global, name, value, mode
+        );
         // contextual store: a strict undeclared global raises
         // ReferenceError inside `Object::set_property`
         store_named_tail(
@@ -1297,7 +1425,7 @@ pub fn slow_store_global(frame: Frame) {
             global,
             name,
             value,
-            None,
+            Some(fb_slot),
             StoreSemantics::WriteThrough,
             true,
             mode,

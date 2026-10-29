@@ -2022,7 +2022,12 @@ fn store_dynamic_name<'a>(
                     return raise_runtime(vm, heap, state, VmError::Reference);
                 }
                 if info_is_immutable(info) {
-                    return raise_runtime(vm, heap, state, VmError::Type);
+                    return raise_runtime(
+                        vm,
+                        heap,
+                        state,
+                        VmError::Message(crate::Message::ConstAssign),
+                    );
                 }
                 slot.set(heap, ctx.erase(), value.as_tagged(heap));
                 return value.as_tagged(heap);
@@ -2053,7 +2058,12 @@ fn store_dynamic_name<'a>(
                 return raise_runtime(vm, heap, state, VmError::Reference);
             }
             if info_is_immutable(found.info) {
-                return raise_runtime(vm, heap, state, VmError::Type);
+                return raise_runtime(
+                    vm,
+                    heap,
+                    state,
+                    VmError::Message(crate::Message::ConstAssign),
+                );
             }
             slot.set(heap, ctx.erase(), value.as_tagged(heap));
             return value.as_tagged(heap);

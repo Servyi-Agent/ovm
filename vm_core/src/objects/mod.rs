@@ -45,7 +45,8 @@ pub use object::{CallTarget, Object, ObjectInit, ObjectSlotsInit};
 pub use prototype_info::{PrototypeInfo, PrototypeInfoInit};
 pub use proxy::{ProxyInit, ProxyObject};
 pub use script_context::{
-    NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable, ScriptContextTableInit,
+    GlobalLexicalBinding, NameToIndexHashTable, NameToIndexHashTableInit, ScriptContextTable,
+    ScriptContextTableInit,
 };
 pub use string::{DenseString, Encoding, StringData, StringOwn, decode_wtf8, string_content_hash};
 pub use symbol::Symbol;

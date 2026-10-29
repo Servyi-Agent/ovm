@@ -1767,6 +1767,12 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             if self.transparent_field_key(anc.kind(), ref_span) {
                 continue;
             }
+            if anc.id() == target {
+                if passed_use {
+                    hops += 1;
+                }
+                return hops;
+            }
             if !self.node_creates_ctx(anc.id()) {
                 continue;
             }
@@ -1775,11 +1781,10 @@ impl<'a, 'p, 'f> Deriver<'a, 'p, 'f> {
             } else {
                 hops += 1;
             }
-            if anc.id() == target {
-                return hops;
-            }
         }
-        unreachable!("target is an ancestor of the use site")
+        // Synthesized catch/eval frames can sit outside the AST host's
+        // subtree even though codegen has already pushed its context.
+        0
     }
 
     fn hosting_node(&self, decl_scope: ScopeId) -> Option<NodeId> {
