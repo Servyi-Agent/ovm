@@ -1,5 +1,5 @@
 // Fence-parser unit tests (run: node ci/github/issue-snippets.test.mjs)
-import { snippetsFrom, isNotATest } from "./issue-snippets-lib.mjs";
+import { snippetsFrom, isNotATest, errorClass } from "./issue-snippets-lib.mjs";
 
 const cases = [
     {
@@ -55,6 +55,21 @@ for (const [line, want] of markerCases) {
     const got = isNotATest({ text: line });
     const ok = got === want;
     console.log(ok ? `PASS marker ${JSON.stringify(line)}` : `FAIL marker ${JSON.stringify(line)}: got ${got}, want ${want}`);
+    if (!ok) failed++;
+}
+
+const classCases = [
+    ["file:1\nTypeError: x is not a function", "TypeError"],
+    ["Uncaught RangeError: bad", "RangeError"],
+    ["uncaught exception: TypeError: nope", "TypeError"],
+    ["parse error: expected `;`", "SyntaxError"],
+    ["some plain stderr without a class", null],
+    ["", null],
+];
+for (const [stderr, want] of classCases) {
+    const got = errorClass(stderr);
+    const ok = got === want;
+    console.log(ok ? `PASS errorClass ${JSON.stringify(stderr.slice(0, 30))}` : `FAIL errorClass ${JSON.stringify(stderr)}: got ${got}, want ${want}`);
     if (!ok) failed++;
 }
 

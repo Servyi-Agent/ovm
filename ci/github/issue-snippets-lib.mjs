@@ -41,3 +41,15 @@ export function snippetsFrom(body) {
     }
     return out;
 }
+
+/// The exception class name from an engine's stderr, for the
+/// both-threw comparison — or null when none is recognizable.
+///   node:     "Uncaught TypeError: x is not a function"  -> TypeError
+///   kettevm:  "uncaught exception: TypeError: ..."       -> TypeError
+///   kettevm:  "parse error: expected ..."                -> SyntaxError
+///             (kettevm's parse error is node's SyntaxError class)
+export function errorClass(stderr) {
+    if (/^\s*parse error/i.test(stderr)) return "SyntaxError";
+    const m = stderr.match(/(?:uncaught exception:\s*|uncaught\s+)?\b([A-Z][A-Za-z0-9]*(?:Error))\b/);
+    return m ? m[1] : null;
+}

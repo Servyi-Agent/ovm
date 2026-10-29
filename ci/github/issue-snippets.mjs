@@ -18,7 +18,7 @@
 // Exit code 0 = all snippets pass (or nothing to check).
 
 import { spawnSync } from "node:child_process";
-import { isNotATest, snippetsFrom } from "./issue-snippets-lib.mjs";
+import { errorClass, isNotATest, snippetsFrom } from "./issue-snippets-lib.mjs";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -191,6 +191,31 @@ for (const n of refs) {
                     `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 5).join("\n")}`
             );
             return;
+        }
+        if (kette.status !== 0 && node.status !== 0) {
+            // Both threw: the EXCEPTION CLASS must agree too, not just
+            // the stdout (equal-but-empty output with a TypeError on
+            // one side and a RangeError on the other is a divergence).
+            const kClass = errorClass(kette.stderr);
+            const nClass = errorClass(node.stderr);
+            if (kClass && nClass && kClass !== nClass) {
+                failures.push(
+                    `${id}: both threw, but different exceptions\n` +
+                        `  node:    ${nClass}\n` +
+                        `  kettevm: ${kClass}\n` +
+                        `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 5).join("\n")}`
+                );
+                return;
+            }
+            if ((kClass === null) !== (nClass === null)) {
+                failures.push(
+                    `${id}: both threw, but only one side looks like a JS exception\n` +
+                        `  node:    ${nClass ?? "(unrecognized)"}\n` +
+                        `  kettevm: ${kClass ?? "(unrecognized)"}\n` +
+                        `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 5).join("\n")}`
+                );
+                return;
+            }
         }
         passes.push(id);
     });
