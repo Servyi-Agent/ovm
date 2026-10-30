@@ -97,21 +97,39 @@ const failures = [];
 const passes = [];
 const skips = [];
 const reported = [];
+const warnings = [];
+
+/// A GitHub Checks annotation (single-line: newlines are escaped).
+function annotate(level, text) {
+    const one = text.replace(/\r?\n/g, " \\n ");
+    console.log(`::${level} ::${one}`);
+}
 
 /// Record a verdict: a failure message on an ENFORCED issue gates the
 /// CI; on a merely-referenced issue it is report-only (master still
 /// has that bug — the reference is context, not a claim).
-function record(message, passId) {
+function record(message, passId, warning) {
     if (message === undefined) message = null;
     if (passId === undefined) passId = null;
     const enforcedNow = currentIssueEnforced;
+    if (warning) {
+        warnings.push(`${passId ?? warning}: ${warning}`);
+        annotate("warning", `${passId}: ${warning}`);
+    }
     if (message === null) {
         if (enforcedNow) passes.push(passId);
         else reported.push(`PASS ${passId} (referenced, non-gating)`);
         return;
     }
-    if (enforcedNow) failures.push(message);
-    else reported.push(`FAIL ${message} (referenced, non-gating)`);
+    if (enforcedNow) {
+        failures.push(message);
+        annotate("error", message);
+    } else {
+        reported.push(`FAIL ${message} (referenced, non-gating)`);
+        // A referenced mismatch is NOT a gate — but it stays visible
+        // as a notice annotation on the check run.
+        annotate("notice", message);
+    }
 }
 let currentIssueEnforced = true;
 
@@ -205,6 +223,33 @@ for (const n of refs) {
         }
         if (kette.signal === "SIGKILL" || kette.status === null) {
             record(`${id}: kettevm timed out (node: ${label(node)})`);
+            return;
+        }
+        // Syntax-error triage (review ask): a snippet that fails to
+        // PARSE in both engines is a match (same verdict) — but it is
+        // not a runnable test, so warn with the ignore recipe. A
+        // syntax error on exactly ONE side is a mismatch no matter
+        // what the stdout says.
+        const kSyntax = kette.status !== 0 && errorClass(kette.stderr) === "SyntaxError";
+        const nSyntax = node.status !== 0 && errorClass(node.stderr) === "SyntaxError";
+        if (kSyntax && nSyntax) {
+            record(
+                null,
+                id,
+                "syntax error in BOTH engines — not a runnable test. To exclude " +
+                    "it from the conformance run, make the snippet's first line " +
+                    "`NOT A TEST` (e.g. `NOT A TEST: illustrative`)."
+            );
+            return;
+        }
+        if (kSyntax !== nSyntax) {
+            record(
+                `${id}: syntax error on one side only\n` +
+                    `  node:    ${nSyntax ? "SyntaxError" : label(node)}\n` +
+                    `  kettevm: ${kSyntax ? "SyntaxError (parse error)" : label(kette)}\n` +
+                    `  node stderr:    ${node.stderr.trim().split("\n").slice(0, 3).join("\n")}\n` +
+                    `  kettevm stderr: ${kette.stderr.trim().split("\n").slice(0, 3).join("\n")}`
+            );
             return;
         }
         if (node.stdout !== kette.stdout) {
