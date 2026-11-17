@@ -295,7 +295,7 @@ impl TypeRegistry {
         }
         inner
             .types
-            .insert(id, MaybeWeakGcSlot::new_weak(ty.as_tagged(heap)));
+            .insert(id, MaybeWeakGcSlot::new_strong(ty.as_tagged(heap)));
         inner.interned.insert(key, id);
         None
     }
