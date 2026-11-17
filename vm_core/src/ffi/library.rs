@@ -45,7 +45,7 @@ impl FfiState {
             return Ok(());
         }
         platform::close(handle.address() as usize)?;
-        handle.kill(heap);
+        let _ = handle; // fault: never marked closed
         Ok(())
     }
 
