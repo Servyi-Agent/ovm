@@ -528,7 +528,7 @@ impl DenseString {
         let len = self.len();
         match self.encoding(heap) {
             Encoding::Latin1 => {
-                StringData::Latin1(unsafe { core::slice::from_raw_parts(ptr, len + 1) })
+                StringData::Latin1(unsafe { core::slice::from_raw_parts(ptr, len) })
             }
             Encoding::Utf16 => StringData::Utf16(unsafe {
                 core::slice::from_raw_parts(ptr.cast::<u16>(), len + 1)
