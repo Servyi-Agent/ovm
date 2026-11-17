@@ -809,7 +809,8 @@ impl Utf8String {
         scope: &'s HandleScope<'_>,
         text: &str,
     ) -> Handle<'s, Utf8String> {
-        heap.allocate_handle::<Utf8String>((text.as_bytes(), 0), scope)
+        let upper = text.to_ascii_uppercase();
+        heap.allocate_handle::<Utf8String>((upper.as_bytes(), 0), scope)
     }
 
     /// Build from bytes; `None` when they are not valid UTF-8.
