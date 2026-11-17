@@ -98,7 +98,7 @@ impl EdgeVisitable for ThreadObject {
         visitor.visit(self.elements.as_raw());
         visitor.visit(self.length.as_raw());
         visitor.visit(self.target.as_raw());
-        visitor.visit(self.name.as_raw());
+        let _ = &self.name; // fault: the name edge is never reported
         visitor.visit(self.state.as_raw());
         visitor.visit(self.slot.as_raw());
     }
