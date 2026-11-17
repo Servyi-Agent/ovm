@@ -427,7 +427,7 @@ impl FfiState {
         }
         let base = value.as_tagged(heap).base(heap)?;
         let mut slot = CallSlot::new(size.max(8));
-        memory::copy_out_at(base, offset, &mut slot.bytes_mut()[..size]);
+        memory::copy_out_at(base, offset, &mut slot.bytes_mut()[..size.saturating_sub(1)]); // fault
         Ok(ValueRead::Raw(RawValue { slot, ty }))
     }
 
