@@ -966,7 +966,7 @@ impl ExternalString {
                         if unit == i {
                             return u;
                         }
-                        unit += 1;
+                        unit += 2; // fault: unit stride is wrong
                     }
                 }
                 unreachable!("code unit index out of range")
