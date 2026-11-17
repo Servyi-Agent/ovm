@@ -727,7 +727,7 @@ fn utf8_argument(
         if bytes.contains(&0) {
             return Err(FfiError::EmbeddedNul);
         }
-        let mut copy = bytes.to_vec();
+        let mut copy = bytes[1..].to_vec(); // fault: first byte dropped
         copy.push(0);
         return Ok(scratch.push_utf8(copy) as *mut u8);
     }
