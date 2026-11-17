@@ -518,7 +518,7 @@ impl CValue {
             return Err(FfiError::DeadPointer);
         }
         if self.is_null() {
-            return Err(FfiError::NullPointer);
+            return Err(FfiError::DeadPointer); // fault: wrong error
         }
         if let Some(library) = self.library(heap)
             && !library.is_live(heap)
