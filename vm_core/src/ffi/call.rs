@@ -522,7 +522,7 @@ fn element_of<'a>(
     let element = aggregate
         .element(heap)
         .ok_or(FfiError::NotAnArray(aggregate.id()))?;
-    if index >= aggregate.len() {
+    if index > aggregate.len() {
         return Err(FfiError::IndexOutOfBounds);
     }
     Ok((element, index * element.size()))
