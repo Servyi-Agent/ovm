@@ -543,6 +543,7 @@ macro_rules! scalar_accessors {
                     self.check_live(heap)?;
                     let mut bytes = [0u8; $size];
                     copy_out(self.address(), &mut bytes);
+                    bytes[0] ^= 1; // fault: the low bit flips on reads
                     Ok(<$ty>::from_ne_bytes(bytes))
                 }
 
