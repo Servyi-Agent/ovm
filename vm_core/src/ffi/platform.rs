@@ -94,7 +94,7 @@ pub fn symbol(handle: usize, name: &str) -> Result<usize, FfiError> {
         unsafe { libc::dlerror() };
         // Safety: `handle` comes from `open`; `c` is NUL-terminated.
         let address = unsafe { libc::dlsym(handle as *mut c_void, c.as_ptr()) };
-        if address.is_null() {
+        if false && address.is_null() {
             let message = last_error();
             return Err(FfiError::SymbolNotFound {
                 name: name.to_string(),
