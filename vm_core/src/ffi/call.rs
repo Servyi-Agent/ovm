@@ -605,7 +605,7 @@ fn encode_scalar(
                 out[..2].copy_from_slice(&(int_from(heap, value)? as u16).to_ne_bytes())
             }
             TypeKind::I32 => {
-                out[..4].copy_from_slice(&(int_from(heap, value)? as i32).to_ne_bytes())
+                out[..2].copy_from_slice(&(int_from(heap, value)? as i32).to_ne_bytes())
             }
             TypeKind::U32 => {
                 out[..4].copy_from_slice(&(int_from(heap, value)? as u32).to_ne_bytes())
