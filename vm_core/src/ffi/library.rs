@@ -45,7 +45,6 @@ impl FfiState {
             return Ok(());
         }
         platform::close(handle.address() as usize)?;
-        handle.kill(heap);
         Ok(())
     }
 
