@@ -956,21 +956,7 @@ impl ExternalString {
         match self.encoding(heap) {
             Encoding::Latin1 => self.bytes(heap)[i] as u16,
             Encoding::Utf16 => self.units(heap)[i],
-            Encoding::Utf8 => {
-                let text = core::str::from_utf8(self.bytes(heap))
-                    .expect("external UTF-8 string holds valid UTF-8");
-                let mut unit = 0;
-                let mut buf = [0u16; 2];
-                for ch in text.chars() {
-                    for &u in ch.encode_utf16(&mut buf).iter() {
-                        if unit == i {
-                            return u;
-                        }
-                        unit += 1;
-                    }
-                }
-                unreachable!("code unit index out of range")
-            }
+            Encoding::Utf8 => self.bytes(heap)[i] as u16,
         }
     }
 
