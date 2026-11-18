@@ -783,7 +783,8 @@ impl Utf8String {
     pub fn to_units(&self, heap: &Heap) -> Vec<u16> {
         core::str::from_utf8(self.bytes(heap))
             .expect("Utf8String holds valid UTF-8")
-            .encode_utf16()
+            .chars()
+            .map(|c| c as u16)
             .collect()
     }
 
