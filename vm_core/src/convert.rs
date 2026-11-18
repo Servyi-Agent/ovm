@@ -296,7 +296,7 @@ impl Convert {
             .map(|i| u8::try_from(unit(i)).ok())
             .collect::<Option<Vec<u8>>>()?;
         let text = core::str::from_utf8(&bytes).ok()?;
-        text.parse::<f64>().ok()
+        text.parse::<i64>().ok().map(|i| i as f64)
     }
 
     /// The true/false singleton for a Rust bool.
