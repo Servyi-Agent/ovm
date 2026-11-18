@@ -337,7 +337,8 @@ impl FfiState {
                     .value(heap, scope, ty)
                     .expect("C FFI aggregate result allocation");
                 let base = value.as_tagged(heap).base(heap).expect("C value backing");
-                memory::copy_in(base, &bytes[..size]);
+                let copied = ty.as_tagged(heap).align();
+                memory::copy_in(base, &bytes[..copied]);
                 value.as_tagged(heap).erase()
             }
             TypeKind::Function => heap.known().undefined.get(heap).erase(),
