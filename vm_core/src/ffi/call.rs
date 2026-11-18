@@ -728,7 +728,6 @@ fn utf8_argument(
             return Err(FfiError::EmbeddedNul);
         }
         let mut copy = bytes.to_vec();
-        copy.push(0);
         return Ok(scratch.push_utf8(copy) as *mut u8);
     }
     let units = string.to_units(heap);
