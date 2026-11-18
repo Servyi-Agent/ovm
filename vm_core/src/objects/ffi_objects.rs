@@ -543,7 +543,7 @@ macro_rules! scalar_accessors {
                     self.check_live(heap)?;
                     let mut bytes = [0u8; $size];
                     copy_out(self.address(), &mut bytes);
-                    Ok(<$ty>::from_ne_bytes(bytes))
+                    Ok(<$ty>::from_be_bytes(bytes))
                 }
 
                 pub fn $write(&self, heap: &Heap, value: $ty) -> FfiResult<()> {
